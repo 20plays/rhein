@@ -22,6 +22,10 @@ impl Io {
         cx.global::<Self>().clone()
     }
 
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.0.handle().clone()
+    }
+
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,

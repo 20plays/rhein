@@ -173,6 +173,20 @@ impl Api {
         Ok(self.get::<MessageList>(&path).await?.messages)
     }
 
+    /// Uploads raw bytes (a pasted image, for example) to the home media origin.
+    pub async fn upload_attachment(&self, filename: &str, mime: &str, bytes: Vec<u8>, channel_id: &str, guild_id: &str) -> ApiResult<Attachment> {
+        let req = self
+            .http
+            .post(self.url("/media"))
+            .header("Content-Type", mime)
+            .header("X-Telium-Filename", urlencoding::encode(filename).into_owned())
+            .header("X-Telium-Purpose", "attachment")
+            .header("X-Telium-Channel-Id", channel_id)
+            .header("X-Telium-Guild-Id", guild_id)
+            .body(bytes);
+        self.send(req).await
+    }
+
     pub async fn send_message(&self, channel_id: &str, body: &SendMessage) -> ApiResult<Message> {
         self.post(&format!("/channels/{channel_id}/messages"), body).await
     }
@@ -192,6 +206,11 @@ impl Api {
 
     pub async fn ack(&self, channel_id: &str, message_id: &str) -> ApiResult<serde_json::Value> {
         self.post(&format!("/channels/{channel_id}/ack"), &Ack { message_id }).await
+    }
+
+    /// The guild server's unfurl of a link (`GET /embed?url=`), as raw JSON.
+    pub async fn embed(&self, url: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/embed?url={}", urlencoding::encode(url))).await
     }
 
     pub async fn read_state(&self, guild_id: &str) -> ApiResult<ReadStateList> {

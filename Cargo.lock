@@ -5154,9 +5154,11 @@ dependencies = [
  "gpui_platform",
  "jiff",
  "log",
+ "reqwest",
  "rhein-proto",
  "rhein-store",
  "rhein-ui",
+ "tokio",
 ]
 
 [[package]]
@@ -5207,6 +5209,7 @@ dependencies = [
  "dirs",
  "gpui",
  "log",
+ "regex",
  "reqwest",
  "rhein-auth",
  "rhein-net",
@@ -5214,6 +5217,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "unicode-segmentation",
+ "url",
+ "urlencoding",
 ]
 
 [[package]]

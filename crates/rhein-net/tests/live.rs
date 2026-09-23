@@ -160,3 +160,30 @@ async fn guild_on_foreign_server() {
     assert!(sent.author.ends_with(&format!(":{}", home_doc.server_name)), "author {} keeps its home", sent.author);
     println!("ok: {} posted in {} on {}", sent.author, guild.id, doc.server_name);
 }
+
+/// The guild server unfurls links for its members (`GET /embed?url=`). Needs outbound internet on
+/// the dev server; a server that refuses previews (403) passes too.
+#[tokio::test]
+async fn embed_preview() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let home = Api::new(http.clone(), &doc.api, None);
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    auth::register(&home, &format!("embed{}", std::process::id()), "correct horse battery", &DeviceKey::generate(), "rhein", &ksf)
+        .await
+        .expect("register");
+    let guild = Api::new(http, &doc.api, None);
+    auth::guild_session(&home, &guild, &doc.server_name).await.expect("session");
+    match guild.embed("https://example.com").await {
+        Ok(card) => {
+            assert!(card.get("status").is_some(), "unexpected embed answer: {card}");
+            println!("ok: embed status {}", card["status"]);
+        }
+        Err(err) if err.status() == Some(403) => println!("ok: server refuses previews"),
+        Err(err) => panic!("embed: {err}"),
+    }
+}

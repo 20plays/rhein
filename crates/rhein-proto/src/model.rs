@@ -36,6 +36,7 @@ pub struct Channel {
     pub topic: Option<String>,
     pub position: i64,
     pub parent_id: Option<String>,
+    pub strip_embeds: bool,
     pub permission_overwrites: Vec<Overwrite>,
 }
 

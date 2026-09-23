@@ -1,5 +1,7 @@
 pub mod chat;
 pub mod login;
+pub mod message_text;
+pub mod rows;
 pub mod shell;
 
 use gpui::{

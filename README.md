@@ -10,6 +10,7 @@ Rhein talks to Telium servers directly and is meant to work next to the official
 | --- | --- |
 | M0 – workspace, local test servers | done |
 | M1 – login (OPAQUE), guild chat | done: history, sending, editing, deleting, reactions, typing, members, file upload |
+| UI phases 1–3 | done: design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
 | M2 – multiple servers (federation) | done: extra servers, invites across servers, one gateway per server |
 | M3 – DMs (MLS) | not started |
 | M4 – voice/video | not started |

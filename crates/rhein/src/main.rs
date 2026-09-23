@@ -1,4 +1,7 @@
+mod http;
 mod views;
+
+use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, actions, px, size,
@@ -18,8 +21,12 @@ fn main() {
         }
     };
 
-    gpui_platform::application().with_assets(rhein_ui::Assets).run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(rhein_ui::Assets)
+        .with_http_client(Arc::new(http::Client::new(io.handle())))
+        .run(move |cx: &mut App| {
         rhein_ui::init(cx);
+        cx.bind_keys(views::chat::bindings());
         cx.set_global(io.clone());
         cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None), KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());

@@ -10,6 +10,7 @@
 
 import * as opaque from '@serenity-kit/opaque';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 
 await opaque.ready;
 
@@ -69,6 +70,7 @@ await call('POST', `/guilds/${guild.id}/channels`, { name: 'Lounge', type: 'voic
 const invite = await call('POST', `/guilds/${guild.id}/invites`, { channel_id: general.id }, annaGuild);
 await call('POST', `/invites/${encodeURIComponent(invite.code)}/join`, {}, benGuild);
 
+const annaTag = `<${anna.user_id}>`;
 const history = [
   [annaGuild, 'Hi everyone! Welcome to Riverside.'],
   [benGuild, 'Hey Anna 👋'],
@@ -81,6 +83,43 @@ for (const [token, content] of history) {
   last = await call('POST', `/channels/${general.id}/messages`, { content }, token);
 }
 await call('PUT', `/messages/${last.id}/reactions/${encodeURIComponent('🎉')}/@me`, null, benGuild);
+
+// Everything the message renderer understands, in a few realistic messages.
+const announcements = (await call('GET', `/guilds/${guild.id}/channels`, null, annaGuild)).channels.find(
+  (c) => c.name === 'announcements',
+);
+const rich = [
+  [benGuild, `Formatting works too: **bold**, *italic*, ~~struck~~, \`inline code\` and a ||spoiler||. Ping ${annaTag}!`],
+  [annaGuild, 'Here is a snippet:\n```rust\nfn main() {\n    println!("hello from Rhein");\n}\n```'],
+  [benGuild, '> Quotes look like this.\n> They can span lines.\nAnd then normal text again.'],
+  [annaGuild, `Release notes live in <#${announcements.id}>.`],
+  [benGuild, 'Link previews come from the guild server: https://www.rust-lang.org'],
+  [annaGuild, 'GIFs animate inline: https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif'],
+  [benGuild, '🎉🚀'],
+];
+for (const [token, content] of rich) {
+  last = await call('POST', `/channels/${general.id}/messages`, { content }, token);
+}
+// A reply to Anna's first message, and an image attachment.
+const first = (await call('GET', `/channels/${general.id}/messages?limit=100`, null, annaGuild)).messages[0];
+await call('POST', `/channels/${general.id}/messages`, { content: 'Replying to the very first message.', reply_to: first.id }, benGuild);
+const png = riverPng(64, 32);
+const upload = await fetch(`${base}/_telium/v1/media`, {
+  method: 'POST',
+  headers: {
+    authorization: `Bearer ${anna.access_token}`,
+    'content-type': 'image/png',
+    'x-telium-filename': 'river.png',
+    'x-telium-purpose': 'attachment',
+    'x-telium-channel-id': general.id,
+    'x-telium-guild-id': guild.id,
+    'x-telium-width': '64',
+    'x-telium-height': '32',
+  },
+  body: png,
+}).then((r) => r.json());
+await call('POST', `/channels/${general.id}/messages`, { content: 'A tiny picture of the river:', attachments: [upload] }, annaGuild);
+await call('POST', `/channels/${general.id}/messages`, { content: `Bring friends: ${base}/invite/${invite.code}` }, benGuild);
 
 const dir = process.argv[2] ?? '.dev/config-demo';
 mkdirSync(dir, { recursive: true });
@@ -102,3 +141,46 @@ writeFileSync(`${dir}/ben.json`, JSON.stringify({ token: benGuild, channel: gene
 
 console.log(`Seeded ${anna.user_id} and ${ben.user_id} in guild "${guild.name}" (invite ${serverName}/${invite.code}).`);
 console.log(`Both passwords: "${password}"`);
+
+/// A small valid PNG (a blue-green gradient), so the demo needs no image files.
+function riverPng(width, height) {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const i = row + 1 + x * 3;
+      raw[i] = 30 + (x * 40) / width;
+      raw[i + 1] = 90 + (y * 120) / height;
+      raw[i + 2] = 160 + (x * 80) / width;
+    }
+  }
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // bit depth
+  header[9] = 2; // RGB
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', header),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const b of bytes) {
+    crc ^= b;
+    for (let k = 0; k < 8; k++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}

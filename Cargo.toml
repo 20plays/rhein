@@ -29,6 +29,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 url = "2"
+regex = "1"
+unicode-segmentation = "1.12"
 urlencoding = "2"
 opaque-ke = { version = "4.0.1", features = ["argon2", "ristretto255"] }
 argon2 = "0.5"

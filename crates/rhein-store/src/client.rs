@@ -62,6 +62,7 @@ pub struct Home {
     pub user_id: String,
     pub device_id: String,
     pub display_name: Option<String>,
+    pub avatar_ref: Option<String>,
     device_seed: String,
     expires_at: Option<i64>,
 }
@@ -117,15 +118,54 @@ pub struct ChannelLog {
     pub loading: bool,
     pub reached_start: bool,
     pub error: Option<String>,
+    /// Pending messages the server refused; they stay visible with Retry / Discard.
+    pub failed: std::collections::HashSet<String>,
     task: Option<Task<()>>,
 }
 
 /// How much of a channel this user has not read yet.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReadMark {
     pub unread: u32,
     pub mentions: u32,
     pub muted: bool,
+    /// The newest message the server says we read.
+    pub last_read: Option<String>,
+    /// The first message counted unread live, when the server's cursor is unknown.
+    pub first_unread: Option<String>,
+}
+
+/// Where the "New messages" line goes in a channel just opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Divider {
+    /// Before the first message newer than this id.
+    After(String),
+    /// Before this message.
+    At(String),
+}
+
+/// A file waiting to go out with the next message.
+pub struct Staged {
+    pub id: u64,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub state: StagedState,
+    /// For pasted images: the bytes to preview before the upload has a URL.
+    pub preview: Option<std::sync::Arc<gpui::Image>>,
+}
+
+pub enum StagedState {
+    Uploading,
+    Ready(Box<Attachment>),
+    Failed(String),
+}
+
+pub enum EmbedState {
+    Loading,
+    Ready(crate::embed::Embed),
+    /// Nothing to show; asked again after `retry_at`.
+    Empty { retry_at: Instant },
 }
 
 impl ReadMark {
@@ -142,6 +182,8 @@ pub enum ClientEvent {
     MessageAppended { channel_id: String },
     MessageChanged { channel_id: String, index: usize },
     MessageRemoved { channel_id: String, index: usize },
+    /// Scroll to and highlight a message.
+    Jump { channel_id: String, index: usize },
     Notice(SharedString),
 }
 
@@ -158,6 +200,9 @@ pub struct Client {
     /// The home view (direct messages) is showing instead of a guild.
     pub showing_home: bool,
     read: HashMap<String, ReadMark>,
+    dividers: HashMap<String, Divider>,
+    staged: HashMap<String, Vec<Staged>>,
+    embeds: HashMap<String, EmbedState>,
     /// guild id → user id → the voice channel they are in.
     voice: HashMap<String, HashMap<String, String>>,
     selected_channel: HashMap<String, String>,
@@ -192,6 +237,9 @@ impl Client {
             typing: HashMap::new(),
             showing_home: false,
             read: HashMap::new(),
+            dividers: HashMap::new(),
+            staged: HashMap::new(),
+            embeds: HashMap::new(),
             voice: HashMap::new(),
             signin: None,
         };
@@ -229,8 +277,10 @@ impl Client {
             this.update(cx, |this, cx| {
                 match result {
                     Ok((doc, api, me)) => {
+                        let avatar_ref = me.profile.as_ref().and_then(|p| p.avatar_ref.clone());
                         let display_name = me.profile.and_then(|p| p.display_name);
                         let home = Home {
+                            avatar_ref,
                             input: saved.home.clone(),
                             doc,
                             api,
@@ -301,6 +351,7 @@ impl Client {
                             api,
                             user_id: signed.session.user_id.clone(),
                             device_id: signed.session.device_id.clone(),
+                            avatar_ref: me.as_ref().and_then(|m| m.profile.as_ref()).and_then(|p| p.avatar_ref.clone()),
                             display_name: me.and_then(|m| m.profile).and_then(|p| p.display_name),
                             device_seed: rhein_auth::b64u(&device.seed()),
                             expires_at: signed.session.expires_at,
@@ -341,6 +392,9 @@ impl Client {
         self.members.clear();
         self.typing.clear();
         self.read.clear();
+        self.dividers.clear();
+        self.staged.clear();
+        self.embeds.clear();
         self.voice.clear();
         self.showing_home = false;
         self.selected_guild = None;
@@ -839,9 +893,22 @@ impl Client {
         self.selected_guild = Some(guild.clone());
         self.selected_channel.insert(guild, channel_id.clone());
         let had_unread = self.read.get(&channel_id).is_some_and(|m| m.unread > 0 || m.mentions > 0);
+        let divider = self.read.get(&channel_id).filter(|m| m.unread > 0).and_then(|m| {
+            m.first_unread.clone().map(Divider::At).or_else(|| m.last_read.clone().map(Divider::After))
+        });
+        match divider {
+            Some(d) => {
+                self.dividers.insert(channel_id.clone(), d);
+            }
+            None if had_unread => {}
+            None => {
+                self.dividers.remove(&channel_id);
+            }
+        }
         if let Some(mark) = self.read.get_mut(&channel_id) {
             mark.unread = 0;
             mark.mentions = 0;
+            mark.first_unread = None;
         }
         let needs_load = self.logs.get(&channel_id).is_none_or(|l| !l.loaded && !l.loading);
         if needs_load {
@@ -933,6 +1000,8 @@ impl Client {
                             unread: if on_screen { 0 } else { ch.unread },
                             mentions: if on_screen { 0 } else { ch.mentions },
                             muted: ch.muted,
+                            last_read: ch.last_read_id,
+                            first_unread: None,
                         },
                     );
                 }
@@ -961,6 +1030,7 @@ impl Client {
         }
         let mention = mentions_user(&message.content, &me);
         let mark = self.read.entry(message.channel_id.clone()).or_default();
+        mark.first_unread.get_or_insert_with(|| message.id.clone());
         mark.unread += 1;
         if mention {
             mark.mentions += 1;
@@ -969,7 +1039,7 @@ impl Client {
     }
 
     pub fn read_mark(&self, channel_id: &str) -> ReadMark {
-        self.read.get(channel_id).copied().unwrap_or_default()
+        self.read.get(channel_id).cloned().unwrap_or_default()
     }
 
     /// Whether anything in the guild is unread, and how many mentions wait there.
@@ -1029,6 +1099,27 @@ impl Client {
         localpart(user_id).to_owned()
     }
 
+    /// A user's picture as seen in a guild: the member record's `avatar_ref` through the guild
+    /// server, or for ourselves the home profile through the home server.
+    pub fn avatar_url(&self, guild_id: Option<&str>, user_id: &str) -> Option<String> {
+        if let Some(gid) = guild_id
+            && let Some(member) = self.members.get(gid).and_then(|l| l.iter().find(|m| m.user_id == user_id))
+            && let Some(reference) = member.avatar_ref.as_deref().filter(|r| !r.is_empty())
+            && let Some(entry) = self.guild(gid)
+            && let Some(server) = self.server(&entry.server)
+            && let Some(doc) = &server.doc
+        {
+            let origin = crate::media::remote_origin(user_id, &doc.server_name);
+            return Some(crate::media::media_url(&doc.api, reference, origin));
+        }
+        let home = self.home.as_ref()?;
+        if home.user_id != user_id {
+            return None;
+        }
+        let reference = home.avatar_ref.as_deref().filter(|r| !r.is_empty())?;
+        Some(crate::media::media_url(&home.doc.api, reference, None))
+    }
+
     pub fn typing_in(&self, channel_id: &str) -> Vec<String> {
         let now = Instant::now();
         self.typing
@@ -1044,40 +1135,75 @@ impl Client {
 
     // ---------------------------------------------------------------- actions
 
-    pub fn send_message(&mut self, channel_id: String, content: String, attachments: Vec<Attachment>, cx: &mut Context<Self>) {
+    /// Sends the composer's text with every finished staged upload, optionally as a reply.
+    pub fn send_message(&mut self, channel_id: String, content: String, reply_to: Option<String>, cx: &mut Context<Self>) {
         let content = content.trim().to_owned();
+        let staged = self.staged.get(&channel_id);
+        if staged.is_some_and(|list| list.iter().any(|s| matches!(s.state, StagedState::Uploading))) {
+            self.error = Some("Wait until the uploads have finished.".into());
+            cx.notify();
+            return;
+        }
+        let attachments: Vec<Attachment> = self
+            .staged
+            .remove(&channel_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|s| match s.state {
+                StagedState::Ready(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
         if content.is_empty() && attachments.is_empty() {
             return;
         }
-        let Some(api) = self.api_for_channel(&channel_id) else { return };
         let Some(me) = self.user_id().map(str::to_owned) else { return };
         let nonce = format!("rhein-{}-{}", now_ms(), next_nonce());
         let guild_id = self.guild_of_channel(&channel_id).map(|g| g.guild.id.clone());
+        let pending = Message {
+            id: format!("pending:{nonce}"),
+            channel_id: channel_id.clone(),
+            guild_id,
+            author: me,
+            content,
+            attachments,
+            reply_to,
+            created_at: now_ms(),
+            nonce: Some(nonce),
+            ..Default::default()
+        };
         // Show it immediately; the echo or the response replaces it.
+        let id = pending.id.clone();
         if let Some(log) = self.logs.get_mut(&channel_id) {
-            log.messages.push(Message {
-                id: format!("pending:{nonce}"),
-                channel_id: channel_id.clone(),
-                guild_id,
-                author: me,
-                content: content.clone(),
-                attachments: attachments.clone(),
-                created_at: now_ms(),
-                nonce: Some(nonce.clone()),
-                ..Default::default()
-            });
+            log.messages.push(pending);
             cx.emit(ClientEvent::MessageAppended { channel_id: channel_id.clone() });
         }
+        self.post(channel_id, id, cx);
+        cx.notify();
+    }
+
+    /// Sends (or re-sends) a pending message already in the log.
+    fn post(&mut self, channel_id: String, pending_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let Some(message) = self.logs.get(&channel_id).and_then(|l| l.messages.iter().find(|m| m.id == pending_id)) else {
+            return;
+        };
+        let body = SendMessage {
+            content: message.content.clone(),
+            attachments: message.attachments.clone(),
+            reply_to: message.reply_to.clone(),
+            nonce: message.nonce.clone(),
+        };
         let io = self.io.clone();
         let chan = channel_id.clone();
-        let body = SendMessage { content, attachments, reply_to: None, nonce: Some(nonce.clone()) };
-        let task = cx.spawn(async move |this, cx| {
+        cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move { Ok(api.send_message(&chan, &body).await?) })).await;
             this.update(cx, |this, cx| {
                 let Some(log) = this.logs.get_mut(&channel_id) else { return };
-                let pending = log.messages.iter().position(|m| m.id == format!("pending:{nonce}"));
-                match (result, pending) {
-                    (Ok(sent), Some(i)) => {
+                let Some(i) = log.messages.iter().position(|m| m.id == pending_id) else { return };
+                match result {
+                    Ok(sent) => {
+                        log.failed.remove(&pending_id);
                         if log.messages.iter().any(|m| m.id == sent.id) {
                             log.messages.remove(i);
                             cx.emit(ClientEvent::MessageRemoved { channel_id: channel_id.clone(), index: i });
@@ -1087,46 +1213,257 @@ impl Client {
                         }
                         this.ack_latest(&channel_id, cx);
                     }
-                    (Err(err), Some(i)) => {
-                        log.messages.remove(i);
-                        cx.emit(ClientEvent::MessageRemoved { channel_id: channel_id.clone(), index: i });
+                    Err(err) => {
+                        log.failed.insert(pending_id.clone());
+                        cx.emit(ClientEvent::MessageChanged { channel_id: channel_id.clone(), index: i });
                         this.error = Some(format!("Couldn't send message: {}", friendly(&err)).into());
                     }
-                    _ => {}
                 }
                 cx.notify();
             })
             .ok();
-        });
-        task.detach();
+        })
+        .detach();
     }
 
-    /// Uploads a file to the home server's media origin, then posts it.
-    pub fn send_file(&mut self, channel_id: String, path: std::path::PathBuf, caption: String, cx: &mut Context<Self>) {
+    pub fn retry_failed(&mut self, channel_id: String, pending_id: String, cx: &mut Context<Self>) {
+        if let Some(log) = self.logs.get_mut(&channel_id) {
+            log.failed.remove(&pending_id);
+        }
+        self.post(channel_id, pending_id, cx);
+        cx.notify();
+    }
+
+    pub fn discard_failed(&mut self, channel_id: String, pending_id: String, cx: &mut Context<Self>) {
+        let Some(log) = self.logs.get_mut(&channel_id) else { return };
+        log.failed.remove(&pending_id);
+        if let Some(i) = log.messages.iter().position(|m| m.id == pending_id) {
+            log.messages.remove(i);
+            cx.emit(ClientEvent::MessageRemoved { channel_id, index: i });
+        }
+        cx.notify();
+    }
+
+    pub fn is_failed(&self, channel_id: &str, message_id: &str) -> bool {
+        self.logs.get(channel_id).is_some_and(|l| l.failed.contains(message_id))
+    }
+
+    // ---------------------------------------------------------------- staged uploads
+
+    pub fn staged(&self, channel_id: &str) -> &[Staged] {
+        self.staged.get(channel_id).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Reads a file from disk and uploads it right away; it goes out with the next message.
+    pub fn stage_path(&mut self, channel_id: String, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let mime = guess_mime(&name).to_owned();
+        let id = self.push_staged(&channel_id, name.clone(), mime.clone(), size, None);
+        self.upload_staged(channel_id, id, name, mime, Upload::Path(path), cx);
+    }
+
+    /// Uploads bytes (a pasted image); `preview` lets the chip show it before the upload is done.
+    pub fn stage_bytes(
+        &mut self,
+        channel_id: String,
+        name: String,
+        mime: String,
+        bytes: Vec<u8>,
+        preview: Option<std::sync::Arc<gpui::Image>>,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.push_staged(&channel_id, name.clone(), mime.clone(), bytes.len() as u64, preview);
+        self.upload_staged(channel_id, id, name, mime, Upload::Bytes(bytes), cx);
+    }
+
+    pub fn unstage(&mut self, channel_id: &str, id: u64, cx: &mut Context<Self>) {
+        if let Some(list) = self.staged.get_mut(channel_id) {
+            list.retain(|s| s.id != id);
+        }
+        cx.notify();
+    }
+
+    fn push_staged(&mut self, channel_id: &str, name: String, mime: String, size: u64, preview: Option<std::sync::Arc<gpui::Image>>) -> u64 {
+        let id = next_nonce();
+        self.staged.entry(channel_id.to_owned()).or_default().push(Staged {
+            id,
+            name,
+            mime,
+            size,
+            state: StagedState::Uploading,
+            preview,
+        });
+        id
+    }
+
+    fn upload_staged(&mut self, channel_id: String, id: u64, name: String, mime: String, source: Upload, cx: &mut Context<Self>) {
         let Some(home) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let guild_id = self.guild_of_channel(&channel_id).map(|g| g.guild.id.clone()).unwrap_or_default();
         let io = self.io.clone();
-        let task = cx.spawn(async move |this, cx| {
+        let chan = channel_id.clone();
+        cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move {
-                let bytes = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || std::fs::read(path)
-                })
-                .await??;
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_owned();
-                let mime = guess_mime(&name);
-                Ok(home.upload(&name, mime, bytes).await?)
+                let bytes = match source {
+                    Upload::Bytes(bytes) => bytes,
+                    Upload::Path(path) => tokio::task::spawn_blocking(move || std::fs::read(path)).await??,
+                };
+                Ok(home.upload_attachment(&name, &mime, bytes, &chan, &guild_id).await?)
             }))
             .await;
-            this.update(cx, |this, cx| match result {
-                Ok(attachment) => this.send_message(channel_id, caption, vec![attachment], cx),
-                Err(err) => {
-                    this.error = Some(format!("Upload failed: {}", friendly(&err)).into());
-                    cx.notify();
-                }
+            this.update(cx, |this, cx| {
+                let Some(entry) = this.staged.get_mut(&channel_id).and_then(|l| l.iter_mut().find(|s| s.id == id)) else {
+                    return;
+                };
+                entry.state = match result {
+                    Ok(attachment) => StagedState::Ready(Box::new(attachment)),
+                    Err(err) => StagedState::Failed(friendly(&err)),
+                };
+                cx.notify();
             })
             .ok();
-        });
-        task.detach();
+        })
+        .detach();
+    }
+
+    // ---------------------------------------------------------------- replies & jumping
+
+    /// The newest message this user wrote in a channel, for "edit last message".
+    pub fn last_own_message(&self, channel_id: &str) -> Option<&Message> {
+        let me = self.user_id()?;
+        self.logs.get(channel_id)?.messages.iter().rev().find(|m| m.author == me && !m.id.starts_with("pending:"))
+    }
+
+    pub fn find_message(&self, channel_id: &str, message_id: &str) -> Option<&Message> {
+        self.logs.get(channel_id)?.messages.iter().find(|m| m.id == message_id)
+    }
+
+    /// Where the "New messages" line goes, if anywhere.
+    pub fn divider_index(&self, channel_id: &str) -> Option<usize> {
+        let divider = self.dividers.get(channel_id)?;
+        let log = self.logs.get(channel_id)?;
+        log.messages.iter().position(|m| {
+            !m.id.starts_with("pending:")
+                && match divider {
+                    Divider::After(id) => m.id.as_str() > id.as_str(),
+                    Divider::At(id) => m.id.as_str() >= id.as_str(),
+                }
+        })
+    }
+
+    /// Scrolls to a message, paging older history (up to five pages) when it isn't loaded yet.
+    pub fn jump_to(&mut self, channel_id: String, message_id: String, cx: &mut Context<Self>) {
+        if let Some(index) = self.logs.get(&channel_id).and_then(|l| l.messages.iter().position(|m| m.id == message_id)) {
+            cx.emit(ClientEvent::Jump { channel_id, index });
+            return;
+        }
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let Some(oldest) = self.logs.get(&channel_id).and_then(|l| l.messages.iter().find(|m| !m.id.starts_with("pending:"))).map(|m| m.id.clone()) else {
+            return;
+        };
+        let io = self.io.clone();
+        let chan = channel_id.clone();
+        let target = message_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                let mut older: Vec<Message> = Vec::new();
+                let mut before = oldest;
+                for _ in 0..5 {
+                    let page = api.messages(&chan, Some(&before), PAGE).await?;
+                    let done = page.is_empty() || page.iter().any(|m| m.id == target) || (page.len() as u32) < PAGE;
+                    if let Some(first) = page.first() {
+                        before = first.id.clone();
+                    }
+                    older.splice(0..0, page);
+                    if done {
+                        break;
+                    }
+                }
+                Ok(older)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                let Ok(older) = result else { return };
+                let Some(log) = this.logs.get_mut(&channel_id) else { return };
+                let count = older.len();
+                let full_history = count < (PAGE as usize);
+                log.messages.splice(0..0, older);
+                if full_history {
+                    log.reached_start = true;
+                }
+                cx.emit(ClientEvent::MessagesPrepended { channel_id: channel_id.clone(), count });
+                match log.messages.iter().position(|m| m.id == message_id) {
+                    Some(index) => cx.emit(ClientEvent::Jump { channel_id, index }),
+                    None => this.error = Some("The message this replies to is not available any more.".into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ---------------------------------------------------------------- embeds
+
+    fn embed_key(&self, channel_id: &str, url: &str) -> Option<String> {
+        Some(format!("{}\0{url}", self.server_of_channel(channel_id)?))
+    }
+
+    pub fn embed(&self, channel_id: &str, url: &str) -> Option<&EmbedState> {
+        self.embeds.get(&self.embed_key(channel_id, url)?)
+    }
+
+    /// Asks the channel's guild server to unfurl a link, unless that is already known or pending.
+    pub fn request_embed(&mut self, channel_id: &str, url: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.embed_key(channel_id, url) else { return };
+        match self.embeds.get(&key) {
+            Some(EmbedState::Loading | EmbedState::Ready(_)) => return,
+            Some(EmbedState::Empty { retry_at }) if Instant::now() < *retry_at => return,
+            _ => {}
+        }
+        let Some(api) = self.api_for_channel(channel_id) else { return };
+        self.embeds.insert(key.clone(), EmbedState::Loading);
+        let io = self.io.clone();
+        let url = url.to_owned();
+        cx.spawn(async move |this, cx| {
+            let base = api.base().to_owned();
+            let asked = url.clone();
+            let result = join(io.spawn(async move { Ok(api.embed(&asked).await?) })).await;
+            this.update(cx, |this, cx| {
+                let state = match &result {
+                    Ok(payload) => match crate::embed::read(payload, &base, &url) {
+                        Some(embed) => EmbedState::Ready(embed),
+                        None => EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(300) },
+                    },
+                    // Refused (403) or failed upstream: quiet; a network error is retried sooner.
+                    Err(err) => {
+                        let wait = match err.downcast_ref::<rhein_net::ApiError>().and_then(|e| e.status()) {
+                            Some(_) => 300,
+                            None => 15,
+                        };
+                        EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(wait) }
+                    }
+                };
+                this.embeds.insert(key, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A custom emoji's picture, from the server that owns it when we are connected there,
+    /// otherwise through the guild's server.
+    pub fn emoji_url(&self, guild_id: Option<&str>, emoji_id: &str, origin: Option<&str>) -> Option<String> {
+        let base = origin
+            .and_then(|o| self.server(o))
+            .and_then(|s| s.doc.as_ref())
+            .map(|d| d.api.clone())
+            .or_else(|| {
+                let server = self.guild(guild_id?)?.server.clone();
+                self.server(&server)?.doc.as_ref().map(|d| d.api.clone())
+            })?;
+        Some(format!("{base}/_telium/v1/emoji/{emoji_id}"))
     }
 
     pub fn edit_message(&mut self, channel_id: String, message_id: String, content: String, cx: &mut Context<Self>) {
@@ -1346,6 +1683,11 @@ fn apply_reaction(
 /// Mirrors the server's mention rule: a literal `@user:server`, or `@everyone` / `@here`.
 fn mentions_user(content: &str, user_id: &str) -> bool {
     content.contains(user_id) || content.contains("@everyone") || content.contains("@here")
+}
+
+enum Upload {
+    Bytes(Vec<u8>),
+    Path(std::path::PathBuf),
 }
 
 pub fn parse_invite(text: &str, default_server: Option<&str>) -> Option<(String, String)> {
