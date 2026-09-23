@@ -1,0 +1,12 @@
+[package]
+name = "rhein-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rhein's design system: theme tokens, fonts, icons and components (gpui only)"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+log.workspace = true
+unicode-segmentation = "1.12"

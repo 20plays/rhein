@@ -1,0 +1,9 @@
+{
+  "name": "rhein-demo",
+  "private": true,
+  "type": "module",
+  "description": "Seeds a local Telium dev server with demo accounts and a guild for Rhein.",
+  "dependencies": {
+    "@serenity-kit/opaque": "1.1.0"
+  }
+}
