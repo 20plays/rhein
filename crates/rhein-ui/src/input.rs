@@ -36,6 +36,7 @@ actions!(
         Down,
         Newline,
         Cancel,
+        Tab,
     ]
 );
 
@@ -58,6 +59,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", Up, ctx),
         KeyBinding::new("down", Down, ctx),
         KeyBinding::new("escape", Cancel, ctx),
+        KeyBinding::new("tab", Tab, ctx),
     ];
     for m in ["ctrl", "cmd"] {
         out.push(KeyBinding::new(&format!("{m}-a"), SelectAll, ctx));
@@ -78,6 +80,17 @@ pub enum InputEvent {
     Cancel,
     /// The clipboard held files or an image rather than text.
     PasteFiles(ClipboardItem),
+    /// While navigation is captured (an open suggestion list), keys that would move the cursor
+    /// or submit are reported instead.
+    Navigate(Nav),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Up,
+    Down,
+    Accept,
+    Close,
 }
 
 pub struct TextInput {
@@ -95,6 +108,7 @@ pub struct TextInput {
     max_lines: usize,
     multi: Option<MultiLayout>,
     scroll_top: Pixels,
+    capture_nav: bool,
 }
 
 /// The last painted multi-line layout: one wrapped line per paragraph, with its byte offset
@@ -124,6 +138,7 @@ impl TextInput {
             max_lines: 1,
             multi: None,
             scroll_top: px(0.),
+            capture_nav: false,
         }
     }
 
@@ -160,6 +175,34 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         cx.notify();
+    }
+
+    /// Byte offset of the caret.
+    pub fn cursor(&self) -> usize {
+        self.cursor_offset()
+    }
+
+    /// Replaces `range` (byte offsets) and puts the caret after the new text.
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let range = range.start.min(self.content.len())..range.end.min(self.content.len());
+        self.content = (self.content[..range.start].to_owned() + text + &self.content[range.end..]).into();
+        let at = range.start + text.len();
+        self.selected_range = at..at;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.emit(InputEvent::Changed);
+        cx.notify();
+    }
+
+    /// Inserts at the caret, replacing any selection.
+    pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
+        let range = self.selected_range.clone();
+        self.replace_range(range, text, cx);
+    }
+
+    /// Route Up/Down/Enter/Tab/Escape to `InputEvent::Navigate` (for a suggestion popup).
+    pub fn capture_navigation(&mut self, capture: bool) {
+        self.capture_nav = capture;
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -204,7 +247,19 @@ impl TextInput {
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.capture_nav {
+            cx.emit(InputEvent::Navigate(Nav::Accept));
+            return;
+        }
         cx.emit(InputEvent::Submit);
+    }
+
+    fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.capture_nav {
+            cx.emit(InputEvent::Navigate(Nav::Accept));
+        } else {
+            cx.propagate();
+        }
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -214,15 +269,27 @@ impl TextInput {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.capture_nav {
+            cx.emit(InputEvent::Navigate(Nav::Close));
+            return;
+        }
         cx.emit(InputEvent::Cancel);
         cx.propagate();
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.capture_nav {
+            cx.emit(InputEvent::Navigate(Nav::Up));
+            return;
+        }
         self.vertical(-1.0, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.capture_nav {
+            cx.emit(InputEvent::Navigate(Nav::Down));
+            return;
+        }
         self.vertical(1.0, cx);
     }
 
@@ -765,6 +832,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

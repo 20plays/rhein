@@ -6,7 +6,8 @@
 #   scripts/dev-server.sh b     server_name "b.localhost", http://localhost:8449
 #
 # Both instances federate with each other over plain HTTP through `federation.peers`, so the
-# second one can host guilds for accounts whose home is the first.
+# second one can host guilds for accounts whose home is the first. Sign-in rate limits are raised
+# so the live tests and the demo seed can register accounts back to back.
 #
 # State lives in .dev/servers/<name>/ and survives restarts; delete that folder to start over.
 set -euo pipefail
@@ -39,6 +40,7 @@ sed -i \
   -e "s|^public_base_url = .*|public_base_url = \"http://localhost:$port\"|" \
   -e "s|^bind = .*|bind = \"127.0.0.1:$port\"|" \
   -e "/^\[federation\]/,/^\[/{s|^allow_http = .*|allow_http = true|}" \
+  -e "/^\[rate_limit\]/,/^\[/{s|^auth_burst = .*|auth_burst = 1000|;s|^auth_per_sec = .*|auth_per_sec = 100.0|}" \
   telium.toml
 # Where each logical server actually answers; a domain is an identity, not a hostname.
 python3 - telium.toml <<'EOF'

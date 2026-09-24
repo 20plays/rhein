@@ -1,6 +1,8 @@
 pub mod chat;
+pub mod emoji_picker;
 pub mod login;
 pub mod message_text;
+pub mod panels;
 pub mod rows;
 pub mod shell;
 

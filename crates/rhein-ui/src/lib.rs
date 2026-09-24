@@ -23,7 +23,7 @@ pub use badge::{CountBadge, Tag, UnreadDot};
 pub use button::{Button, ButtonKind, IconButton};
 pub use controls::{ListRow, Switch, Tabs, Toast, ToastKind, section_label};
 pub use icon::{Icon, icon, icon_sized};
-pub use input::{InputEvent, TextInput};
+pub use input::{InputEvent, Nav, TextInput};
 pub use menu::{Menu, MenuEntry, MenuHost};
 pub use modal::Modal;
 pub use theme::{ActiveTheme, Theme};

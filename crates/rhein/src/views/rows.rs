@@ -107,6 +107,35 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .child(div().truncate().child(label))
     });
 
+    // A message that started a thread links to it (not inside the thread itself).
+    let thread_chip = message.thread_id.clone().filter(|t| t != channel_id).map(|thread_id| {
+        let title = client.thread(&thread_id).map(|t| (t.title.clone(), t.message_count));
+        let label = match title {
+            Some((title, count)) => format!("{title} · {count} message{}", if count == 1 { "" } else { "s" }),
+            None => "View thread".to_owned(),
+        };
+        let view = ctx.view.clone();
+        div()
+            .id(SharedString::from(format!("thread-chip-{ix}")))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(radius::MD)
+            .bg(t.bg_panel)
+            .text_size(text::SM)
+            .text_color(t.accent)
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_selected))
+            .on_click(move |_, _, cx| {
+                let id = thread_id.clone();
+                view.update(cx, |v, cx| v.open_thread(id, cx)).ok();
+            })
+            .child(icon_sized(Icon::MessagesSquare, px(14.)))
+            .child(label)
+    });
+
     let text_ctx = message_text::Context {
         client: &ctx.client,
         view: &ctx.view,
@@ -162,7 +191,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     })),
             )
         })
-        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, &t)));
+        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, &t)))
+        .children(thread_chip);
 
     let group = SharedString::from(format!("msg-{ix}"));
     let gutter = if grouped {
@@ -204,7 +234,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .when(row_bg.is_none(), |d| d.hover(|s| s.bg(t.bg_hover)))
         .children(reply_quote)
         .child(div().flex().gap_4().child(gutter).child(body))
-        .children(actions);
+        .children(actions)
+        .when(!pending, |d| {
+            let (view, m) = (ctx.view.clone(), message.clone());
+            d.on_mouse_down(gpui::MouseButton::Right, move |e, window, cx| {
+                let (m, at) = (m.clone(), e.position);
+                view.update(cx, |v, cx| v.open_message_menu(m, at, window, cx)).ok();
+            })
+        });
 
     let element = div()
         .flex()
@@ -265,6 +302,14 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, mine: bool, group: 
         );
     }
     let view = ctx.view.clone();
+    let react_id = message.id.clone();
+    bar = bar.child(IconButton::new(SharedString::from(format!("react-pick-{ix}")), Icon::SmilePlus).tooltip("Add reaction").on_click(
+        move |e, window, cx| {
+            let (id, at) = (react_id.clone(), e.position());
+            view.update(cx, |v, cx| v.react_picker(at, id, window, cx)).ok();
+        },
+    ));
+    let view = ctx.view.clone();
     let reply_id = message.id.clone();
     bar = bar.child(IconButton::new(SharedString::from(format!("reply-{ix}")), Icon::Reply).tooltip("Reply").on_click(
         move |_, window, cx| {
@@ -280,17 +325,15 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, mine: bool, group: 
                 view.update(cx, |v, cx| v.start_edit(&for_edit, window, cx)).ok();
             },
         ));
-        let client = ctx.client.clone();
-        let (chan, mid) = (ctx.channel_id.clone(), message.id.clone());
-        bar = bar.child(
-            IconButton::new(SharedString::from(format!("del-{ix}")), Icon::Trash).tooltip("Delete").danger(true).on_click(
-                move |_, _, cx| {
-                    let (chan, mid) = (chan.clone(), mid.clone());
-                    client.update(cx, |c, cx| c.delete_message(chan, mid, cx));
-                },
-            ),
-        );
     }
+    let view = ctx.view.clone();
+    let for_menu = message.clone();
+    bar = bar.child(IconButton::new(SharedString::from(format!("more-{ix}")), Icon::Ellipsis).tooltip("More").on_click(
+        move |e, window, cx| {
+            let (m, at) = (for_menu.clone(), e.position());
+            view.update(cx, |v, cx| v.open_message_menu(m, at, window, cx)).ok();
+        },
+    ));
     bar.into_any_element()
 }
 

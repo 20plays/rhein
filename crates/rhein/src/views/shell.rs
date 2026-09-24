@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use gpui::{
+    EventEmitter,
     AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FontWeight, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, point,
     prelude::*, px,
@@ -14,7 +15,8 @@ use rhein_ui::{
     Presence, Tabs, Tag, TextInput, Toast, ToastKind, icon, icon_sized, section_label, tooltip,
 };
 
-use crate::views::chat::{ChatView, ToggleMembers};
+use crate::views::chat::{ChatEvent, ChatView, PanelKind};
+use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DialogTab {
@@ -35,6 +37,16 @@ impl DialogTab {
     }
 }
 
+/// What occupies the right-hand slot. Members is the default and stays remembered via
+/// `show_members`; the others replace it while open.
+enum Panel {
+    None,
+    Pins { channel: String, view: Entity<PinsPanel> },
+    Threads { channel: String, view: Entity<ThreadsPanel> },
+    Search { guild: String, view: Entity<SearchPanel> },
+    Thread { view: Entity<ChatView> },
+}
+
 pub struct Shell {
     client: Entity<Client>,
     chat: Entity<ChatView>,
@@ -42,6 +54,8 @@ pub struct Shell {
     dialog_input: Entity<TextInput>,
     create_on: Option<String>,
     show_members: bool,
+    panel: Panel,
+    panel_subs: Vec<Subscription>,
     /// Categories the user folded away.
     collapsed: HashSet<String>,
     confirm_sign_out: bool,
@@ -55,12 +69,14 @@ impl Shell {
         let chat = cx.new(|cx| ChatView::new(client.clone(), window, cx));
         let dialog_input = cx.new(|cx| TextInput::new("", cx));
         let subs = vec![
-            cx.observe(&client, |_, _, cx| cx.notify()),
-            cx.subscribe(&chat, |this, chat, _: &ToggleMembers, cx| {
-                this.show_members = !this.show_members;
-                let visible = this.show_members;
-                chat.update(cx, |c, cx| c.set_members_visible(visible, cx));
+            cx.observe_in(&client, window, |this, _, window, cx| {
+                this.follow_channel(window, cx);
                 cx.notify();
+            }),
+            cx.subscribe_in(&chat, window, |this, _, event: &ChatEvent, window, cx| match event {
+                ChatEvent::TogglePanel(kind) => this.toggle_panel(*kind, window, cx),
+                ChatEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
+                ChatEvent::ClosePanel => this.close_panel(cx),
             }),
             cx.subscribe_in(&dialog_input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Submit) {
@@ -77,12 +93,151 @@ impl Shell {
             dialog_input,
             create_on: None,
             show_members: true,
+            panel: Panel::None,
+            panel_subs: Vec::new(),
             collapsed: HashSet::new(),
             confirm_sign_out: false,
             modal_focus: cx.focus_handle(),
             menu: MenuHost::default(),
             _subs: subs,
         }
+    }
+
+    fn active_kind(&self) -> Option<PanelKind> {
+        match self.panel {
+            Panel::None if self.show_members => Some(PanelKind::Members),
+            Panel::Pins { .. } => Some(PanelKind::Pins),
+            Panel::Threads { .. } => Some(PanelKind::Threads),
+            Panel::Search { .. } => Some(PanelKind::Search),
+            _ => None,
+        }
+    }
+
+    fn sync_header(&self, cx: &mut Context<Self>) {
+        let kind = self.active_kind();
+        self.chat.update(cx, |c, cx| c.set_active_panel(kind, cx));
+    }
+
+    fn toggle_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_kind() == Some(kind) {
+            if kind == PanelKind::Members {
+                self.show_members = false;
+            }
+            self.close_panel(cx);
+            return;
+        }
+        self.open_panel(kind, window, cx);
+    }
+
+    fn open_panel(&mut self, kind: PanelKind, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let Some(channel) = client.selected_channel().map(str::to_owned) else { return };
+        let guild = client.guild_of_channel(&channel).map(|g| g.guild.id.clone());
+        let chat_view = self.chat.downgrade();
+        self.panel_subs.clear();
+        self.panel = match kind {
+            PanelKind::Members => {
+                self.show_members = true;
+                Panel::None
+            }
+            PanelKind::Pins => {
+                let client = self.client.clone();
+                let ch = channel.clone();
+                let view = cx.new(|cx| PinsPanel::new(client, chat_view, ch, cx));
+                self.panel_subs.push(self.panel_events(&view, window, cx));
+                Panel::Pins { channel, view }
+            }
+            PanelKind::Threads => {
+                let client = self.client.clone();
+                let ch = channel.clone();
+                let view = cx.new(|cx| ThreadsPanel::new(client, ch, window, cx));
+                self.panel_subs.push(self.panel_events(&view, window, cx));
+                Panel::Threads { channel, view }
+            }
+            PanelKind::Search => {
+                let Some(guild) = guild else { return };
+                let client = self.client.clone();
+                let (g, ch) = (guild.clone(), channel.clone());
+                let view = cx.new(|cx| SearchPanel::new(client, chat_view, g, ch, window, cx));
+                self.panel_subs.push(self.panel_events(&view, window, cx));
+                Panel::Search { guild, view }
+            }
+        };
+        self.sync_header(cx);
+        cx.notify();
+    }
+
+    fn panel_events<P: EventEmitter<PanelEvent>>(&self, view: &Entity<P>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(view, window, |this, _, event: &PanelEvent, window, cx| match event {
+            PanelEvent::Close => this.close_panel(cx),
+            PanelEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
+        })
+    }
+
+    fn open_thread(&mut self, thread_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let view = cx.new(|cx| ChatView::fixed(client, thread_id, window, cx));
+        self.panel_subs.clear();
+        self.panel_subs.push(cx.subscribe_in(&view, window, |this, _, event: &ChatEvent, window, cx| match event {
+            ChatEvent::ClosePanel => this.close_panel(cx),
+            ChatEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
+            ChatEvent::TogglePanel(kind) => this.toggle_panel(*kind, window, cx),
+        }));
+        let focus = view.read(cx).composer_focus(cx);
+        window.focus(&focus, cx);
+        self.panel = Panel::Thread { view };
+        self.sync_header(cx);
+        cx.notify();
+    }
+
+    fn close_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel = Panel::None;
+        self.panel_subs.clear();
+        self.sync_header(cx);
+        cx.notify();
+    }
+
+    /// Pins and threads belong to a channel, search to a guild: follow the selection, and close a
+    /// thread that belongs to another guild.
+    fn follow_channel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let channel = client.selected_channel().map(str::to_owned);
+        let guild = channel.as_deref().and_then(|c| client.guild_of_channel(c)).map(|g| g.guild.id.clone());
+        let reopen = match &self.panel {
+            Panel::Pins { channel: c, .. } if Some(c) != channel.as_ref() => Some(PanelKind::Pins),
+            Panel::Threads { channel: c, .. } if Some(c) != channel.as_ref() => Some(PanelKind::Threads),
+            Panel::Search { guild: g, .. } if Some(g) != guild.as_ref() => Some(PanelKind::Search),
+            _ => None,
+        };
+        match reopen {
+            Some(_) if channel.is_none() => self.close_panel(cx),
+            Some(kind) => self.open_panel(kind, window, cx),
+            None => {}
+        }
+    }
+
+    fn render_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = cx.theme().clone();
+        let (content, width): (AnyElement, gpui::Pixels) = match &self.panel {
+            Panel::None => return self.members(cx),
+            Panel::Pins { view, .. } => (view.clone().into_any_element(), px(320.)),
+            Panel::Threads { view, .. } => (view.clone().into_any_element(), px(320.)),
+            Panel::Search { view, .. } => (view.clone().into_any_element(), px(380.)),
+            Panel::Thread { view } => (view.clone().into_any_element(), px(420.)),
+        };
+        Some(
+            div()
+                .w(width)
+                .h_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(t.bg_panel)
+                .border_l_1()
+                .border_color(t.border)
+                .child(content)
+                .into_any_element(),
+        )
     }
 
     fn open_dialog(&mut self, tab: DialogTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -663,7 +818,7 @@ impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let rail = self.rail(cx);
         let sidebar = self.sidebar(cx);
-        let members = self.members(cx);
+        let members = self.render_panel(cx);
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
         let toast = self.toast(cx);

@@ -8,16 +8,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Entity, EventEmitter, ExternalPaths, FocusHandle,
-    Focusable, FollowMode, FontWeight, ImageFormat, IntoElement, KeyBinding, ListAlignment, ListState, ObjectFit,
-    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, StyledImage as _, Subscription,
-    Window, div, img, list, prelude::*, px,
+    Anchor, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, DismissEvent, Entity,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, FollowMode, FontWeight, ImageFormat, IntoElement,
+    KeyBinding, ListAlignment, ListState, ObjectFit, ParentElement as _, PathPromptOptions, Pixels, Point, Render,
+    SharedString, Styled as _, StyledImage as _, Subscription, Window, anchored, deferred, div, img, list,
+    prelude::*, px,
 };
 use rhein_proto::Message;
-use rhein_store::{Client, ClientEvent, StagedState};
+use rhein_store::autocomplete::{self, Trigger};
+use rhein_store::{Client, ClientEvent, StagedState, perms};
 use rhein_ui::theme::{radius, size, text};
-use rhein_ui::{ActiveTheme as _, Button, Dismiss, Icon, IconButton, InputEvent, TextInput, icon};
+use rhein_ui::{
+    ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, MenuEntry, MenuHost, Modal, Nav,
+    TextInput, icon,
+};
 
+use crate::views::emoji_picker::{EmojiPicker, Picked};
 use crate::views::rows::{RowCtx, format_size, render_row};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
@@ -37,7 +43,15 @@ pub struct ChatView {
     editing: Option<String>,
     replying: Option<String>,
     last_typing: Option<Instant>,
-    members_visible: bool,
+    /// Which side panel the shell shows, so the header can highlight its button.
+    active_panel: Option<PanelKind>,
+    /// A thread shown in the side panel: this view is pinned to that channel.
+    fixed: Option<String>,
+    picker: Option<OpenPicker>,
+    suggest: Option<Suggest>,
+    menu: MenuHost,
+    confirm_delete: Option<Message>,
+    modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
     pub(crate) revealed: HashSet<(String, usize)>,
     /// A message briefly highlighted after a jump.
@@ -47,13 +61,60 @@ pub struct ChatView {
     _subs: Vec<Subscription>,
 }
 
-/// Asks the shell to show or hide the member list; the shell owns that panel.
-pub struct ToggleMembers;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelKind {
+    Members,
+    Pins,
+    Threads,
+    Search,
+}
 
-impl EventEmitter<ToggleMembers> for ChatView {}
+/// Requests for the shell, which owns the side panel.
+pub enum ChatEvent {
+    TogglePanel(PanelKind),
+    OpenThread(String),
+    ClosePanel,
+}
+
+impl EventEmitter<ChatEvent> for ChatView {}
+
+/// An open emoji picker: the view, where it is anchored, what it is for, its subscriptions.
+type OpenPicker = (Entity<EmojiPicker>, Point<Pixels>, PickerTarget, Vec<Subscription>);
+
+#[derive(Clone)]
+enum PickerTarget {
+    Composer,
+    React { channel_id: String, message_id: String },
+}
+
+/// One autocomplete row: what to show and what to insert.
+#[derive(Clone)]
+struct Suggestion {
+    label: String,
+    hint: String,
+    insert: String,
+    avatar: Option<(String, Option<String>)>,
+    glyph: Option<String>,
+    icon: Option<Icon>,
+}
+
+struct Suggest {
+    start: usize,
+    items: Vec<Suggestion>,
+    selected: usize,
+}
 
 impl ChatView {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(client, None, window, cx)
+    }
+
+    /// A view pinned to one channel (a thread in the side panel).
+    pub fn fixed(client: Entity<Client>, channel_id: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(client, Some(channel_id), window, cx)
+    }
+
+    fn build(client: Entity<Client>, fixed: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let list = ListState::new(0, ListAlignment::Bottom, px(600.));
         list.set_follow_mode(FollowMode::Tail);
         let channel: Rc<RefCell<Option<String>>> = Rc::default();
@@ -79,12 +140,23 @@ impl ChatView {
         let subs = vec![
             cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Submit => this.submit(window, cx),
-                InputEvent::Changed => this.typed(cx),
+                InputEvent::Changed => {
+                    this.typed(cx);
+                    this.update_suggestions(cx);
+                }
+                InputEvent::Navigate(nav) => this.navigate_suggestions(*nav, cx),
                 InputEvent::UpAtStart => this.edit_last(window, cx),
                 InputEvent::Cancel => this.cancel(cx),
                 InputEvent::PasteFiles(item) => this.paste_files(item.clone(), cx),
             }),
             cx.subscribe(&client, |this, _, event: &ClientEvent, cx| this.on_client(event, cx)),
+            cx.subscribe(&client, |this, _, event: &ClientEvent, cx| {
+                if let ClientEvent::OpenThread { thread_id } = event
+                    && this.fixed.is_none()
+                {
+                    cx.emit(ChatEvent::OpenThread(thread_id.clone()));
+                }
+            }),
             cx.observe(&client, |this, _, cx| this.sync_channel(cx)),
         ];
         let mut this = Self {
@@ -95,7 +167,13 @@ impl ChatView {
             editing: None,
             replying: None,
             last_typing: None,
-            members_visible: true,
+            active_panel: None,
+            fixed,
+            picker: None,
+            suggest: None,
+            menu: MenuHost::default(),
+            confirm_delete: None,
+            modal_focus: cx.focus_handle(),
             revealed: HashSet::new(),
             highlight: None,
             lightbox: None,
@@ -106,8 +184,8 @@ impl ChatView {
         this
     }
 
-    pub fn set_members_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.members_visible = visible;
+    pub fn set_active_panel(&mut self, panel: Option<PanelKind>, cx: &mut Context<Self>) {
+        self.active_panel = panel;
         cx.notify();
     }
 
@@ -126,7 +204,10 @@ impl ChatView {
 
     /// Follows the client's selected channel; a switch resets the list to that channel's history.
     fn sync_channel(&mut self, cx: &mut Context<Self>) {
-        let selected = self.client.read(cx).selected_channel().map(str::to_owned);
+        let selected = match &self.fixed {
+            Some(id) => Some(id.clone()),
+            None => self.client.read(cx).selected_channel().map(str::to_owned),
+        };
         if *self.channel.borrow() == selected {
             return;
         }
@@ -144,6 +225,13 @@ impl ChatView {
         });
         self.list.reset(self.count(cx));
         self.list.set_follow_mode(FollowMode::Tail);
+        // A thread in the side panel is not the selected channel, so nobody else loads it.
+        if let Some(id) = self.fixed.clone() {
+            let needs = self.client.read(cx).logs.get(&id).is_none_or(|l| !l.loaded && !l.loading);
+            if needs {
+                self.client.update(cx, |c, cx| c.load_history(id, false, cx));
+            }
+        }
         cx.notify();
     }
 
@@ -340,6 +428,411 @@ impl ChatView {
         }
     }
 
+    // ---------------------------------------------------------------- emoji picker
+
+    fn open_picker(&mut self, at: Point<Pixels>, target: PickerTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let guild = self.current().and_then(|c| self.client.read(cx).guild_of_channel(&c).map(|g| g.guild.id.clone()));
+        let client = self.client.clone();
+        let picker = cx.new(|cx| EmojiPicker::new(client, guild, window, cx));
+        let sub = cx.subscribe_in(&picker, window, |this, _, picked: &Picked, window, cx| {
+            let Some((_, _, target, _)) = this.picker.take() else { return };
+            match target {
+                PickerTarget::Composer => {
+                    this.composer.update(cx, |c, cx| c.insert(&picked.0, cx));
+                    let focus = this.composer_focus(cx);
+                    window.focus(&focus, cx);
+                }
+                PickerTarget::React { channel_id, message_id } => {
+                    let emoji = picked.0.clone();
+                    this.client.update(cx, |c, cx| c.toggle_reaction(channel_id, message_id, emoji, cx));
+                }
+            }
+            cx.notify();
+        });
+        let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
+            this.picker = None;
+            let focus = this.composer_focus(cx);
+            window.focus(&focus, cx);
+            cx.notify();
+        });
+        self.picker = Some((picker, at, target, vec![sub, dismiss]));
+        cx.notify();
+    }
+
+    pub(crate) fn react_picker(&mut self, at: Point<Pixels>, message_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel_id) = self.current() else { return };
+        self.open_picker(at, PickerTarget::React { channel_id, message_id }, window, cx);
+    }
+
+    // ---------------------------------------------------------------- autocomplete
+
+    fn update_suggestions(&mut self, cx: &mut Context<Self>) {
+        let (text, caret) = {
+            let c = self.composer.read(cx);
+            (c.text().to_owned(), c.cursor())
+        };
+        let token = autocomplete::token_at(&text, caret);
+        let Some(token) = token else {
+            self.close_suggestions(cx);
+            return;
+        };
+        let items = self.suggestions_for(token.trigger, &token.query, cx);
+        if items.is_empty() {
+            self.close_suggestions(cx);
+            return;
+        }
+        let selected = self.suggest.as_ref().map_or(0, |s| s.selected.min(items.len() - 1));
+        self.suggest = Some(Suggest { start: token.start, items, selected });
+        self.composer.update(cx, |c, _| c.capture_navigation(true));
+        cx.notify();
+    }
+
+    fn close_suggestions(&mut self, cx: &mut Context<Self>) {
+        if self.suggest.take().is_some() {
+            self.composer.update(cx, |c, _| c.capture_navigation(false));
+            cx.notify();
+        }
+    }
+
+    fn suggestions_for(&mut self, trigger: Trigger, query: &str, cx: &mut Context<Self>) -> Vec<Suggestion> {
+        const LIMIT: usize = 8;
+        let Some(channel) = self.current() else { return Vec::new() };
+        let q = query.to_lowercase();
+        let guild_id = self.client.read(cx).guild_of_channel(&channel).map(|g| g.guild.id.clone());
+        let mut out = Vec::new();
+        match trigger {
+            Trigger::Mention => {
+                let Some(gid) = guild_id else { return out };
+                let members = self.client.update(cx, |c, cx| c.lookup_members(&gid, &q, cx));
+                let client = self.client.read(cx);
+                for m in members.iter().take(LIMIT) {
+                    out.push(Suggestion {
+                        label: m.shown_name().to_owned(),
+                        hint: m.user_id.clone(),
+                        insert: format!("<{}>", m.user_id),
+                        avatar: Some((m.user_id.clone(), client.avatar_url(Some(&gid), &m.user_id))),
+                        glyph: None,
+                        icon: None,
+                    });
+                }
+                if let Some(entry) = client.guild(&gid) {
+                    for role in entry.guild.roles.iter().filter(|r| r.id != gid && r.name.to_lowercase().contains(&q)) {
+                        out.push(Suggestion {
+                            label: format!("@{}", role.name),
+                            hint: "Role".into(),
+                            insert: format!("<@&{}>", role.id),
+                            avatar: None,
+                            glyph: None,
+                            icon: Some(Icon::Users),
+                        });
+                    }
+                }
+                if client.can(&channel, perms::MENTION_EVERYONE) {
+                    for (word, hint) in [("everyone", "Notify everyone in the channel"), ("here", "Notify everyone online")] {
+                        if word.starts_with(&q) {
+                            out.push(Suggestion {
+                                label: format!("@{word}"),
+                                hint: hint.into(),
+                                insert: format!("@{word}"),
+                                avatar: None,
+                                glyph: None,
+                                icon: Some(Icon::AtSign),
+                            });
+                        }
+                    }
+                }
+            }
+            Trigger::Channel => {
+                let client = self.client.read(cx);
+                if let Some(entry) = guild_id.as_deref().and_then(|g| client.guild(g)) {
+                    for ch in entry.ordered_channels().into_iter().filter(|c| c.is_textual() && c.name.to_lowercase().contains(&q)) {
+                        out.push(Suggestion {
+                            label: ch.name.clone(),
+                            hint: ch.topic.clone().unwrap_or_default(),
+                            insert: format!("<#{}>", ch.id),
+                            avatar: None,
+                            glyph: None,
+                            icon: Some(if ch.kind == "announcement" { Icon::Megaphone } else { Icon::Hash }),
+                        });
+                    }
+                }
+            }
+            Trigger::Emoji => {
+                let client = self.client.read(cx);
+                if let Some(gid) = guild_id.as_deref() {
+                    for e in client.guild_emoji(gid).iter().filter(|e| e.name.to_lowercase().contains(&q)) {
+                        out.push(Suggestion {
+                            label: format!(":{}:", e.name),
+                            hint: "Custom emoji".into(),
+                            insert: format!("<{}:{}>", e.name, e.id),
+                            avatar: None,
+                            glyph: client.emoji_url(Some(gid), &e.id, None),
+                            icon: None,
+                        });
+                    }
+                }
+                for e in rhein_store::emoji::search(&q, LIMIT) {
+                    out.push(Suggestion {
+                        label: e.shortcode().map(|s| format!(":{s}:")).unwrap_or_else(|| e.name().to_owned()),
+                        hint: e.name().to_owned(),
+                        insert: e.as_str().to_owned(),
+                        avatar: None,
+                        glyph: None,
+                        icon: None,
+                    });
+                }
+            }
+        }
+        out.truncate(LIMIT);
+        out
+    }
+
+    fn navigate_suggestions(&mut self, nav: Nav, cx: &mut Context<Self>) {
+        let Some(suggest) = self.suggest.as_mut() else { return };
+        let n = suggest.items.len();
+        match nav {
+            Nav::Up => suggest.selected = (suggest.selected + n - 1) % n,
+            Nav::Down => suggest.selected = (suggest.selected + 1) % n,
+            Nav::Accept => {
+                let ix = suggest.selected;
+                self.accept_suggestion(ix, cx);
+                return;
+            }
+            Nav::Close => {
+                self.close_suggestions(cx);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    fn accept_suggestion(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(suggest) = self.suggest.take() else { return };
+        let Some(item) = suggest.items.get(ix).cloned() else { return };
+        let caret = self.composer.read(cx).cursor();
+        let insert = format!("{} ", item.insert);
+        self.composer.update(cx, |c, cx| {
+            c.capture_navigation(false);
+            c.replace_range(suggest.start..caret, &insert, cx);
+        });
+        if item.glyph.is_some() || !item.insert.starts_with('<') && !item.insert.starts_with('@') {
+            self.client.update(cx, |c, _| c.use_emoji(item.insert.clone()));
+        }
+        self.suggest = None;
+        cx.notify();
+    }
+
+    fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let suggest = self.suggest.as_ref()?;
+        let t = cx.theme().clone();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(64.))
+                .left(px(16.))
+                .right(px(16.))
+                .p_1()
+                .rounded(radius::LG)
+                .bg(t.bg_raised)
+                .border_1()
+                .border_color(t.border_strong)
+                .shadow_lg()
+                .flex()
+                .flex_col()
+                .children(suggest.items.iter().enumerate().map(|(i, item)| {
+                    let selected = i == suggest.selected;
+                    let leading: AnyElement = match (&item.avatar, &item.glyph, item.icon) {
+                        (Some((id, url)), _, _) => Avatar::new(id.clone(), item.label.clone())
+                            .size(px(24.))
+                            .image(url.clone().map(Into::into))
+                            .into_any_element(),
+                        (_, Some(url), _) => img(url.clone()).size(px(22.)).into_any_element(),
+                        (_, _, Some(i)) => icon(i).text_color(t.text_muted).into_any_element(),
+                        _ => div().w(px(24.)).text_size(px(18.)).child(item.insert.clone()).into_any_element(),
+                    };
+                    div()
+                        .id(("suggestion", i))
+                        .px_2()
+                        .py_1()
+                        .rounded(radius::MD)
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .when(selected, |d| d.bg(t.bg_selected))
+                        .hover(|s| s.bg(t.bg_hover))
+                        .on_click(cx.listener(move |this, _, _, cx| this.accept_suggestion(i, cx)))
+                        .child(leading)
+                        .child(div().text_size(text::MD).child(item.label.clone()))
+                        .child(div().flex_1().min_w_0().truncate().text_size(text::SM).text_color(t.text_faint).child(item.hint.clone()))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    // ---------------------------------------------------------------- context menu
+
+    pub(crate) fn open_message_menu(&mut self, message: Message, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel) = self.current() else { return };
+        let client = self.client.read(cx);
+        let mine = client.user_id() == Some(message.author.as_str());
+        let moderate = client.can(&channel, perms::MANAGE_MESSAGES);
+        let pinned = client.is_pinned(&channel, &message.id);
+        let in_thread = client.channel(&channel).is_some_and(|c| c.is_thread());
+        let this = cx.weak_entity();
+        let mut entries = Vec::new();
+        {
+            let (this, id) = (this.clone(), message.id.clone());
+            entries.push(
+                MenuEntry::item("Add reaction", move |window, cx| {
+                    let at = window.mouse_position();
+                    let id = id.clone();
+                    this.update(cx, |v, cx| v.react_picker(at, id, window, cx)).ok();
+                })
+                .with_icon(Icon::SmilePlus),
+            );
+        }
+        {
+            let (this, id) = (this.clone(), message.id.clone());
+            entries.push(
+                MenuEntry::item("Reply", move |window, cx| {
+                    let id = id.clone();
+                    this.update(cx, |v, cx| v.start_reply(id, window, cx)).ok();
+                })
+                .with_icon(Icon::Reply),
+            );
+        }
+        if !in_thread {
+            let (client, chan, id) = (self.client.clone(), channel.clone(), message.id.clone());
+            let title: String = message.content.lines().next().unwrap_or("Thread").chars().take(60).collect();
+            let title = if title.trim().is_empty() { "Thread".to_owned() } else { title };
+            entries.push(
+                MenuEntry::item("Start a thread", move |_, cx| {
+                    let (chan, id, title) = (chan.clone(), id.clone(), title.clone());
+                    client.update(cx, |c, cx| c.create_thread(chan, title, Some(id), cx));
+                })
+                .with_icon(Icon::MessagesSquare),
+            );
+        }
+        if mine {
+            let (this, m) = (this.clone(), message.clone());
+            entries.push(
+                MenuEntry::item("Edit message", move |window, cx| {
+                    this.update(cx, |v, cx| v.start_edit(&m, window, cx)).ok();
+                })
+                .with_icon(Icon::Pencil),
+            );
+        }
+        entries.push(MenuEntry::Separator);
+        {
+            let content = message.content.clone();
+            entries.push(
+                MenuEntry::item("Copy text", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(content.clone())))
+                    .with_icon(Icon::Copy),
+            );
+            let id = message.id.clone();
+            entries.push(
+                MenuEntry::item("Copy message ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone())))
+                    .with_icon(Icon::Copy),
+            );
+        }
+        if moderate {
+            let (client, chan, id) = (self.client.clone(), channel.clone(), message.id.clone());
+            entries.push(
+                MenuEntry::item(if pinned { "Unpin message" } else { "Pin message" }, move |_, cx| {
+                    let (chan, id) = (chan.clone(), id.clone());
+                    client.update(cx, |c, cx| {
+                        c.set_pinned(chan.clone(), id, !pinned, cx);
+                        c.load_pins(chan, cx);
+                    });
+                })
+                .with_icon(Icon::Pin),
+            );
+        }
+        if mine || moderate {
+            entries.push(MenuEntry::Separator);
+            let (this, m) = (this.clone(), message.clone());
+            entries.push(
+                MenuEntry::item("Delete message", move |window, cx| {
+                    let m = m.clone();
+                    this.update(cx, |v, cx| v.ask_delete(m, window, cx)).ok();
+                })
+                .with_icon(Icon::Trash)
+                .danger(),
+            );
+        }
+        // Know which messages are pinned before the menu is opened next time.
+        if moderate && self.client.read(cx).pins(&channel).is_none() {
+            let chan = channel.clone();
+            self.client.update(cx, |c, cx| c.load_pins(chan, cx));
+        }
+        self.menu.show(at, entries, |v: &mut ChatView| &mut v.menu, window, cx);
+    }
+
+    fn ask_delete(&mut self, message: Message, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete = Some(message);
+        window.focus(&self.modal_focus, cx);
+        cx.notify();
+    }
+
+    fn close_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_delete = None;
+        let focus = self.composer_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn render_delete_confirm(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let message = self.confirm_delete.clone()?;
+        let t = cx.theme().clone();
+        let this = cx.weak_entity();
+        let (client, chan, id) = (self.client.clone(), message.channel_id.clone(), message.id.clone());
+        let preview: String = message.content.chars().take(200).collect();
+        Some(
+            Modal::new("delete-message")
+                .title("Delete message?")
+                .width(px(420.))
+                .focus(&self.modal_focus)
+                .on_dismiss(move |window, cx| {
+                    this.update(cx, |v, cx| v.close_delete(window, cx)).ok();
+                })
+                .child(
+                    div()
+                        .p_3()
+                        .rounded(radius::MD)
+                        .bg(t.bg_main)
+                        .text_color(t.text_muted)
+                        .child(if preview.is_empty() { "(attachment)".to_owned() } else { preview }),
+                )
+                .footer(Button::new("delete-cancel", "Cancel").ghost().on_click(cx.listener(|this, _, window, cx| this.close_delete(window, cx))))
+                .footer(Button::new("delete-confirm", "Delete").danger().icon(Icon::Trash).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        let (chan, id) = (chan.clone(), id.clone());
+                        client.update(cx, |c, cx| c.delete_message(chan, id, cx));
+                        this.close_delete(window, cx);
+                    },
+                )))
+                .into_any_element(),
+        )
+    }
+
+    pub(crate) fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        cx.emit(ChatEvent::OpenThread(thread_id));
+    }
+
+    fn render_picker(&self) -> Option<AnyElement> {
+        let (picker, at, target, _) = self.picker.as_ref()?;
+        let anchor = match target {
+            PickerTarget::Composer => Anchor::BottomRight,
+            PickerTarget::React { .. } => Anchor::TopRight,
+        };
+        Some(
+            deferred(anchored().position(*at).anchor(anchor).snap_to_window_with_margin(px(8.)).child(picker.clone()))
+                .with_priority(2)
+                .into_any_element(),
+        )
+    }
+
     fn render_composer(&self, channel_id: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
@@ -451,7 +944,16 @@ impl ChatView {
                                 .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                         ),
                     )
-                    .child(div().flex_1().min_w_0().child(self.composer.clone())),
+                    .child(div().flex_1().min_w_0().child(self.composer.clone()))
+                    .child(
+                        div().pt_1().child(
+                            IconButton::new("composer-emoji", Icon::Smile)
+                                .tooltip("Emoji")
+                                .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| {
+                                    this.open_picker(e.position(), PickerTarget::Composer, window, cx)
+                                })),
+                        ),
+                    ),
             )
             .child(div().h(px(18.)).pt_0p5().text_size(text::XS).text_color(t.text_muted).child(match typing.len() {
                 0 => String::new(),
@@ -566,8 +1068,8 @@ impl Render for ChatView {
             .gap_2()
             .border_b_1()
             .border_color(t.border)
-            .child(icon(Icon::Hash).text_color(t.text_faint))
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+            .child(icon(if self.fixed.is_some() { Icon::MessagesSquare } else { Icon::Hash }).text_color(t.text_faint))
+            .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(name.clone()))
             .children(topic.map(|topic| {
                 div()
                     .ml_2()
@@ -580,12 +1082,27 @@ impl Render for ChatView {
                     .child(topic)
             }))
             .child(div().flex_1())
-            .child(
-                IconButton::new("toggle-members", Icon::Users)
-                    .tooltip(if self.members_visible { "Hide members" } else { "Show members" })
-                    .active(self.members_visible)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(ToggleMembers))),
-            );
+            .map(|header| {
+                if self.fixed.is_some() {
+                    return header.child(
+                        IconButton::new("close-thread", Icon::X)
+                            .tooltip("Close thread")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::ClosePanel))),
+                    );
+                }
+                let active = self.active_panel;
+                let button = |id: &'static str, glyph: Icon, tip: &'static str, kind: PanelKind, cx: &mut Context<Self>| {
+                    IconButton::new(id, glyph)
+                        .tooltip(tip)
+                        .active(active == Some(kind))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::TogglePanel(kind))))
+                };
+                header
+                    .child(button("panel-threads", Icon::MessagesSquare, "Threads", PanelKind::Threads, cx))
+                    .child(button("panel-pins", Icon::Pin, "Pinned messages", PanelKind::Pins, cx))
+                    .child(button("panel-search", Icon::Search, "Search", PanelKind::Search, cx))
+                    .child(button("panel-members", Icon::Users, "Members", PanelKind::Members, cx))
+            });
 
         let top_note = if loading {
             Some("Loading messages…".to_owned())
@@ -620,6 +1137,9 @@ impl Render for ChatView {
 
         let composer = self.render_composer(&channel_id, cx);
         let lightbox = self.render_lightbox(cx);
+        let suggestions = self.render_suggestions(cx);
+        let delete_confirm = self.render_delete_confirm(cx);
+        let picker = self.render_picker();
         let drop_channel = channel_id.clone();
 
         div()
@@ -640,7 +1160,11 @@ impl Render for ChatView {
             .children(top_note.map(|note| div().px_4().pt_3().text_size(text::SM).text_color(t.text_faint).child(note)))
             .child(div().relative().flex_1().min_h_0().child(messages).children(jump))
             .child(composer)
+            .children(suggestions)
             .children(lightbox)
+            .children(delete_confirm)
+            .children(picker)
+            .children(self.menu.element())
             .into_any_element()
     }
 }

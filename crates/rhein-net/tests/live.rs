@@ -11,6 +11,21 @@ use rhein_net::gateway::{self, GatewayConfig};
 use rhein_net::{Api, GatewayEvent, auth, discover};
 use rhein_proto::{Event, SendMessage, USER_INTENTS};
 
+
+/// Registers, waiting out the server's registration rate limit (429) instead of failing.
+async fn register_retrying(home: &Api, localpart: &str, ksf: &SerenityKsf) -> auth::SignedIn {
+    for _ in 0..30 {
+        match auth::register(home, localpart, "correct horse battery", &DeviceKey::generate(), "rhein test", ksf).await {
+            Ok(signed) => return signed,
+            Err(err) if err.downcast_ref::<rhein_net::ApiError>().and_then(|e| e.status()) == Some(429) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(err) => panic!("register: {err:#}"),
+        }
+    }
+    panic!("register: still rate limited")
+}
+
 #[tokio::test]
 async fn register_login_session_gateway_message() {
     let Ok(server) = std::env::var("RHEIN_LIVE") else {
@@ -24,10 +39,7 @@ async fn register_login_session_gateway_message() {
     let home = Api::new(http.clone(), &doc.api, None);
     let ksf = SerenityKsf::memory_constrained();
     let localpart = format!("rhein{}", std::process::id());
-    let device = DeviceKey::generate();
-    let registered = auth::register(&home, &localpart, "correct horse battery", &device, "rhein test", &ksf)
-        .await
-        .expect("register");
+    let registered = register_retrying(&home, &localpart, &ksf).await;
     println!("registered {}", registered.session.user_id);
 
     // A second sign-in from a fresh device must yield the same export key.
@@ -126,9 +138,7 @@ async fn guild_on_foreign_server() {
     let home = Api::new(http.clone(), &home_doc.api, None);
     let ksf = SerenityKsf::argon2id(1, 8, 1);
     let localpart = format!("fed{}", std::process::id());
-    auth::register(&home, &localpart, "correct horse battery", &DeviceKey::generate(), "rhein fed", &ksf)
-        .await
-        .expect("register at home");
+    register_retrying(&home, &localpart, &ksf).await;
 
     let doc = discover(&http, &other).await.expect("foreign discovery");
     assert_ne!(doc.server_name, home_doc.server_name);
@@ -173,9 +183,7 @@ async fn embed_preview() {
     let doc = discover(&http, &server).await.expect("discovery");
     let home = Api::new(http.clone(), &doc.api, None);
     let ksf = SerenityKsf::argon2id(1, 8, 1);
-    auth::register(&home, &format!("embed{}", std::process::id()), "correct horse battery", &DeviceKey::generate(), "rhein", &ksf)
-        .await
-        .expect("register");
+    register_retrying(&home, &format!("embed{}", std::process::id()), &ksf).await;
     let guild = Api::new(http, &doc.api, None);
     auth::guild_session(&home, &guild, &doc.server_name).await.expect("session");
     match guild.embed("https://example.com").await {
@@ -186,4 +194,56 @@ async fn embed_preview() {
         Err(err) if err.status() == Some(403) => println!("ok: server refuses previews"),
         Err(err) => panic!("embed: {err}"),
     }
+}
+
+/// Pins, threads, search and the expressions list against a live server.
+#[tokio::test]
+async fn pins_threads_search() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let home = Api::new(http.clone(), &doc.api, None);
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    register_retrying(&home, &format!("p4{}", std::process::id()), &ksf).await;
+    let api = Api::new(http, &doc.api, None);
+    auth::guild_session(&home, &api, &doc.server_name).await.expect("session");
+    let guild = api.create_guild("Phase four").await.expect("guild");
+    let text = api.channels(&guild.id).await.unwrap().into_iter().find(|c| c.is_textual()).unwrap();
+    let marker = format!("needle{}", std::process::id());
+    let sent = api
+        .send_message(&text.id, &SendMessage { content: format!("find the {marker} here"), ..Default::default() })
+        .await
+        .expect("send");
+
+    api.set_pinned(&text.id, &sent.id, true).await.expect("pin");
+    assert!(api.pins(&text.id).await.expect("pins").iter().any(|m| m.id == sent.id));
+    api.set_pinned(&text.id, &sent.id, false).await.expect("unpin");
+    assert!(api.pins(&text.id).await.expect("pins").is_empty());
+
+    let thread = api.create_thread(&text.id, "A thread", Some(&sent.id)).await.expect("thread");
+    api.send_message(&thread.id, &SendMessage { content: "inside the thread".into(), ..Default::default() })
+        .await
+        .expect("post in thread");
+    assert!(api.threads(&text.id, false).await.expect("threads").iter().any(|t| t.id == thread.id));
+    assert_eq!(api.messages(&thread.id, None, 50).await.expect("thread history").len(), 1);
+
+    // The search index may lag the write slightly.
+    let mut found = false;
+    for _ in 0..20 {
+        let results = api
+            .search(&guild.id, &rhein_proto::SearchQuery { q: Some(marker.clone()), limit: 10, ..Default::default() })
+            .await
+            .expect("search");
+        if results.results.iter().any(|m| m.id == sent.id) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(found, "search did not find the message");
+    assert!(api.expressions(&guild.id).await.expect("expressions").is_empty());
+    println!("ok: pins, thread {} and search work", thread.id);
 }

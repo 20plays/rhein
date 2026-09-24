@@ -111,6 +111,10 @@ pub enum Event {
     MemberListUpdate(Value),
     PresenceUpdate { user_id: String, status: String },
     VoiceStateUpdate(crate::model::VoiceState),
+    PinsUpdate { channel_id: String, message_id: String, pinned: bool },
+    ThreadUpsert(crate::rest::Thread),
+    ThreadDelete { id: String, parent_id: Option<String> },
+    EmojiUpdate { guild_id: String },
     Other { t: String, d: Value },
 }
 
@@ -175,6 +179,20 @@ impl Event {
                 user_id: str_of(&d, "user_id"),
                 status: str_of(&d, "status"),
             },
+            "CHANNEL_PINS_UPDATE" => Event::PinsUpdate {
+                channel_id: str_of(&d, "channel_id"),
+                message_id: str_of(&d, "message_id"),
+                pinned: d.get("pinned").and_then(Value::as_bool).unwrap_or(false),
+            },
+            "THREAD_CREATE" | "THREAD_UPDATE" => match decode(&d) {
+                Ok(t) => Event::ThreadUpsert(t),
+                Err(_) => Event::Other { t: t.into(), d },
+            },
+            "THREAD_DELETE" => Event::ThreadDelete {
+                id: str_of(&d, "id"),
+                parent_id: d.get("parent_id").and_then(Value::as_str).map(str::to_owned),
+            },
+            "GUILD_EMOJI_UPDATE" => Event::EmojiUpdate { guild_id: str_of(&d, "guild_id") },
             "VOICE_STATE_UPDATE" => match decode(&d) {
                 Ok(v) => Event::VoiceStateUpdate(v),
                 Err(_) => Event::Other { t: t.into(), d },

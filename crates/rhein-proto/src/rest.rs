@@ -217,3 +217,72 @@ pub struct ChannelReadState {
     pub unread: u32,
     pub mentions: u32,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PinList {
+    pub pins: Vec<Message>,
+}
+
+/// A thread: a channel of type `thread` under a text channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Thread {
+    pub id: String,
+    pub parent_id: String,
+    pub guild_id: Option<String>,
+    pub starter_id: Option<String>,
+    pub owner: Option<String>,
+    pub title: String,
+    pub archived: bool,
+    pub locked: bool,
+    pub message_count: i64,
+    pub last_active: Option<Millis>,
+    pub created_at: Option<Millis>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ThreadList {
+    pub threads: Vec<Thread>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateThread<'a> {
+    pub title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub channel_id: Option<String>,
+    pub author: Option<String>,
+    pub has: Option<String>,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SearchResults {
+    pub results: Vec<Message>,
+    pub count: u32,
+    pub total: u32,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CustomEmoji {
+    pub id: String,
+    pub name: String,
+    pub animated: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Expressions {
+    pub emojis: Vec<CustomEmoji>,
+}

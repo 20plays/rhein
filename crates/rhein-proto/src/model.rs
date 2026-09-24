@@ -50,7 +50,11 @@ impl Channel {
     }
 
     pub fn is_textual(&self) -> bool {
-        matches!(self.kind.as_str(), "text" | "announcement")
+        matches!(self.kind.as_str(), "text" | "announcement" | "thread")
+    }
+
+    pub fn is_thread(&self) -> bool {
+        self.kind == "thread"
     }
 }
 

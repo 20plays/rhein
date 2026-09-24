@@ -121,6 +121,27 @@ const upload = await fetch(`${base}/_telium/v1/media`, {
 await call('POST', `/channels/${general.id}/messages`, { content: 'A tiny picture of the river:', attachments: [upload] }, annaGuild);
 await call('POST', `/channels/${general.id}/messages`, { content: `Bring friends: ${base}/invite/${invite.code}` }, benGuild);
 
+// A custom emoji, pins and a thread.
+const wave = await call(
+  'POST',
+  `/guilds/${guild.id}/emojis`,
+  { name: 'riverwave', data: riverPng(64, 64).toString('base64url'), mime: 'image/png' },
+  annaGuild,
+);
+await call('POST', `/channels/${general.id}/messages`, { content: `Our own emoji: <riverwave:${wave.id}>` }, annaGuild);
+const rules = await call('POST', `/channels/${general.id}/messages`, { content: '**House rules:** be kind, stay on topic, no spam.' }, annaGuild);
+await call('PUT', `/channels/${general.id}/pins/${rules.id}`, null, annaGuild);
+await call('PUT', `/channels/${general.id}/pins/${first.id}`, null, annaGuild);
+const question = await call('POST', `/channels/${general.id}/messages`, { content: 'Which feature should come next: voice or DMs?' }, benGuild);
+const thread = await call('POST', `/channels/${general.id}/threads`, { title: 'Voice or DMs?', message_id: question.id }, benGuild);
+for (const [token, content] of [
+  [annaGuild, 'DMs first – end-to-end encryption matters.'],
+  [benGuild, 'Voice would be fun though 🎙️'],
+  [annaGuild, 'Both are on the roadmap: M3 is DMs, M4 is voice.'],
+]) {
+  await call('POST', `/channels/${thread.id}/messages`, { content }, token);
+}
+
 const dir = process.argv[2] ?? '.dev/config-demo';
 mkdirSync(dir, { recursive: true });
 writeFileSync(

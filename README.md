@@ -10,7 +10,7 @@ Rhein talks to Telium servers directly and is meant to work next to the official
 | --- | --- |
 | M0 – workspace, local test servers | done |
 | M1 – login (OPAQUE), guild chat | done: history, sending, editing, deleting, reactions, typing, members, file upload |
-| UI phases 1–3 | done: design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
+| UI phases 1–4 | done: emoji picker, autocomplete, message context menu, pins, threads, search; design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
 | M2 – multiple servers (federation) | done: extra servers, invites across servers, one gateway per server |
 | M3 – DMs (MLS) | not started |
 | M4 – voice/video | not started |
@@ -57,8 +57,10 @@ cargo test --workspace
 
 # against running dev servers:
 RHEIN_LIVE=localhost:8448 RHEIN_LIVE_B=localhost:8449 \
-  cargo test -p rhein-net --test live -- --nocapture
+  cargo test -p rhein-net --test live -- --test-threads=1 --nocapture
 ```
+
+The live tests run one at a time: each registers a fresh account, and a Telium server on SQLite answers concurrent registrations with "database is locked".
 
 `login_account_made_by_web_client` also takes `RHEIN_WEB_ACCOUNT=localpart:password:exportKey`, from an account registered with serenity-kit. It checks that Rhein can log into web-client accounts and derives the same export key.
 

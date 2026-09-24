@@ -213,6 +213,42 @@ impl Api {
         self.get(&format!("/embed?url={}", urlencoding::encode(url))).await
     }
 
+    pub async fn pins(&self, channel_id: &str) -> ApiResult<Vec<Message>> {
+        Ok(self.get::<PinList>(&format!("/channels/{channel_id}/pins")).await?.pins)
+    }
+
+    pub async fn set_pinned(&self, channel_id: &str, message_id: &str, pinned: bool) -> ApiResult<serde_json::Value> {
+        let path = format!("/channels/{channel_id}/pins/{message_id}");
+        if pinned { self.put_empty(&path).await } else { self.delete(&path).await }
+    }
+
+    pub async fn threads(&self, channel_id: &str, archived: bool) -> ApiResult<Vec<Thread>> {
+        Ok(self.get::<ThreadList>(&format!("/channels/{channel_id}/threads?archived={archived}")).await?.threads)
+    }
+
+    pub async fn create_thread(&self, channel_id: &str, title: &str, message_id: Option<&str>) -> ApiResult<Thread> {
+        self.post(&format!("/channels/{channel_id}/threads"), &CreateThread { title, message_id }).await
+    }
+
+    pub async fn search(&self, guild_id: &str, query: &SearchQuery) -> ApiResult<SearchResults> {
+        let mut path = format!("/guilds/{guild_id}/search?limit={}&offset={}", query.limit.clamp(1, 100), query.offset);
+        for (key, value) in [("q", &query.q), ("channel_id", &query.channel_id), ("author", &query.author), ("has", &query.has)] {
+            if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
+                path.push_str(&format!("&{key}={}", urlencoding::encode(value)));
+            }
+        }
+        self.get(&path).await
+    }
+
+    pub async fn expressions(&self, guild_id: &str) -> ApiResult<Vec<CustomEmoji>> {
+        Ok(self.get::<Expressions>(&format!("/guilds/{guild_id}/expressions")).await?.emojis)
+    }
+
+    /// Server-side member lookup by name, for autocomplete beyond the loaded roster.
+    pub async fn search_members(&self, guild_id: &str, q: &str, limit: u32) -> ApiResult<MemberList> {
+        self.get(&format!("/guilds/{guild_id}/members?q={}&limit={limit}", urlencoding::encode(q))).await
+    }
+
     pub async fn read_state(&self, guild_id: &str) -> ApiResult<ReadStateList> {
         self.get(&format!("/guilds/{guild_id}/read-state")).await
     }

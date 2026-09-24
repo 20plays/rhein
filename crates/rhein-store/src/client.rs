@@ -89,7 +89,7 @@ impl GuildEntry {
     /// Channels in display order: uncategorised first, then each category followed by its
     /// children, everything by `position`.
     pub fn ordered_channels(&self) -> Vec<&Channel> {
-        let mut chans: Vec<&Channel> = self.guild.channels.iter().collect();
+        let mut chans: Vec<&Channel> = self.guild.channels.iter().filter(|c| !c.is_thread()).collect();
         chans.sort_by_key(|c| (c.position, c.id.clone()));
         let mut out = Vec::with_capacity(chans.len());
         for c in chans.iter().filter(|c| c.parent_id.is_none() && !c.is_category()) {
@@ -161,6 +161,17 @@ pub enum StagedState {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchState {
+    pub guild_id: String,
+    pub query: rhein_proto::SearchQuery,
+    pub results: Vec<Message>,
+    pub total: u32,
+    pub has_more: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+}
+
 pub enum EmbedState {
     Loading,
     Ready(crate::embed::Embed),
@@ -184,6 +195,8 @@ pub enum ClientEvent {
     MessageRemoved { channel_id: String, index: usize },
     /// Scroll to and highlight a message.
     Jump { channel_id: String, index: usize },
+    /// A thread was created from this client and should open.
+    OpenThread { thread_id: String },
     Notice(SharedString),
 }
 
@@ -208,6 +221,12 @@ pub struct Client {
     selected_channel: HashMap<String, String>,
     pub logs: HashMap<String, ChannelLog>,
     pub members: HashMap<String, Vec<Member>>,
+    pins: HashMap<String, Vec<Message>>,
+    threads: HashMap<String, Vec<rhein_proto::Thread>>,
+    emoji: HashMap<String, Vec<rhein_proto::CustomEmoji>>,
+    pub search: Option<SearchState>,
+    member_lookup: HashMap<String, Vec<Member>>,
+    pub recent_emoji: Vec<String>,
     typing: HashMap<String, Vec<(String, Instant)>>,
     signin: Option<Task<()>>,
 }
@@ -234,6 +253,12 @@ impl Client {
             selected_channel: HashMap::new(),
             logs: HashMap::new(),
             members: HashMap::new(),
+            pins: HashMap::new(),
+            threads: HashMap::new(),
+            emoji: HashMap::new(),
+            search: None,
+            member_lookup: HashMap::new(),
+            recent_emoji: crate::prefs::load().recent_emoji,
             typing: HashMap::new(),
             showing_home: false,
             read: HashMap::new(),
@@ -390,6 +415,11 @@ impl Client {
         self.guilds.clear();
         self.logs.clear();
         self.members.clear();
+        self.pins.clear();
+        self.threads.clear();
+        self.emoji.clear();
+        self.search = None;
+        self.member_lookup.clear();
         self.typing.clear();
         self.read.clear();
         self.dividers.clear();
@@ -807,6 +837,27 @@ impl Client {
                     }
                 }
             }
+            Event::PinsUpdate { channel_id, .. } => {
+                if self.pins.contains_key(&channel_id) {
+                    self.load_pins(channel_id, cx);
+                }
+            }
+            Event::ThreadUpsert(thread) => self.remember_thread(thread),
+            Event::ThreadDelete { id, parent_id } => {
+                if let Some(parent) = parent_id
+                    && let Some(list) = self.threads.get_mut(&parent)
+                {
+                    list.retain(|t| t.id != id);
+                }
+                for g in &mut self.guilds {
+                    g.guild.channels.retain(|c| c.id != id);
+                }
+            }
+            Event::EmojiUpdate { guild_id } => {
+                if !guild_id.is_empty() {
+                    self.load_emoji(guild_id, cx);
+                }
+            }
             Event::MemberListUpdate(_) | Event::Other { .. } => {}
         }
     }
@@ -881,6 +932,9 @@ impl Client {
         });
         if let Some(channel) = channel {
             self.select_channel(channel, cx);
+        }
+        if !self.emoji.contains_key(&id) {
+            self.load_emoji(id.clone(), cx);
         }
         if !self.members.contains_key(&id) {
             self.load_members(id, cx);
@@ -1065,6 +1119,312 @@ impl Client {
             .unwrap_or_default();
         users.sort();
         users
+    }
+
+    // ---------------------------------------------------------------- permissions
+
+    /// This user's permissions in a channel, from READY's roles and overwrites. Threads inherit
+    /// their parent's.
+    pub fn permissions(&self, channel_id: &str) -> u64 {
+        let Some(entry) = self.guild_of_channel(channel_id) else { return 0 };
+        let Some(me) = entry.guild.me.as_ref() else { return 0 };
+        let Some(user_id) = self.user_id() else { return 0 };
+        let mut channel = entry.guild.channels.iter().find(|c| c.id == channel_id);
+        if let Some(c) = channel.filter(|c| c.is_thread())
+            && let Some(parent) = c.parent_id.as_deref()
+        {
+            channel = entry.guild.channels.iter().find(|p| p.id == parent).or(channel);
+        }
+        let str_field = |key: &str| me.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+        let roles: Vec<String> = me
+            .get("roles")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let timed_out = me.get("timeout_until").and_then(|v| v.as_i64()).is_some_and(|until| until > now_ms());
+        let owner = entry.guild.owner.as_deref() == Some(user_id)
+            || me.get("is_owner").and_then(|v| v.as_bool()).unwrap_or(false);
+        let member = crate::perms::Member {
+            user_id,
+            guild_id: &entry.guild.id,
+            guild_permissions: if owner { u64::MAX } else { crate::perms::parse_bits(str_field("permissions")) },
+            role_ids: &roles,
+            timed_out,
+        };
+        let overwrites = channel.map(|c| c.permission_overwrites.as_slice()).unwrap_or_default();
+        crate::perms::channel_permissions(&member, overwrites)
+    }
+
+    pub fn can(&self, channel_id: &str, bit: u64) -> bool {
+        self.permissions(channel_id) & bit != 0
+    }
+
+    // ---------------------------------------------------------------- pins
+
+    pub fn pins(&self, channel_id: &str) -> Option<&[Message]> {
+        self.pins.get(channel_id).map(Vec::as_slice)
+    }
+
+    pub fn is_pinned(&self, channel_id: &str, message_id: &str) -> bool {
+        self.pins.get(channel_id).is_some_and(|p| p.iter().any(|m| m.id == message_id))
+    }
+
+    pub fn load_pins(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let io = self.io.clone();
+        let chan = channel_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.pins(&chan).await?) })).await;
+            this.update(cx, |this, cx| {
+                if let Ok(pins) = result {
+                    this.pins.insert(channel_id, pins);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn set_pinned(&mut self, channel_id: String, message_id: String, pinned: bool, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        self.fire(cx, async move { api.set_pinned(&channel_id, &message_id, pinned).await.map(drop) });
+    }
+
+    // ---------------------------------------------------------------- threads
+
+    pub fn threads_of(&self, channel_id: &str) -> Option<&[rhein_proto::Thread]> {
+        self.threads.get(channel_id).map(Vec::as_slice)
+    }
+
+    pub fn thread(&self, thread_id: &str) -> Option<&rhein_proto::Thread> {
+        self.threads.values().flatten().find(|t| t.id == thread_id)
+    }
+
+    /// Keeps a thread in its parent's list and makes it addressable as a channel, so history,
+    /// sending and permissions work for it like for any other channel.
+    fn remember_thread(&mut self, thread: rhein_proto::Thread) {
+        let parent = thread.parent_id.clone();
+        if let Some(entry) = self.guilds.iter_mut().find(|g| g.guild.channels.iter().any(|c| c.id == parent)) {
+            match entry.guild.channels.iter_mut().find(|c| c.id == thread.id) {
+                Some(c) => c.name = thread.title.clone(),
+                None => entry.guild.channels.push(Channel {
+                    id: thread.id.clone(),
+                    guild_id: Some(entry.guild.id.clone()),
+                    kind: "thread".into(),
+                    name: thread.title.clone(),
+                    parent_id: Some(parent.clone()),
+                    ..Default::default()
+                }),
+            }
+        }
+        let list = self.threads.entry(parent).or_default();
+        match list.iter_mut().find(|t| t.id == thread.id) {
+            Some(existing) => *existing = thread,
+            None => list.insert(0, thread),
+        }
+    }
+
+    pub fn load_threads(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let io = self.io.clone();
+        let chan = channel_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                let mut all = api.threads(&chan, false).await?;
+                all.extend(api.threads(&chan, true).await?);
+                Ok(all)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                if let Ok(threads) = result {
+                    this.threads.insert(channel_id.clone(), Vec::new());
+                    for t in threads {
+                        this.remember_thread(t);
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Creates a thread (optionally from a message) and reports its id through `ClientEvent::OpenThread`.
+    pub fn create_thread(&mut self, channel_id: String, title: String, message_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                Ok(api.create_thread(&channel_id, title.trim(), message_id.as_deref()).await?)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(thread) => {
+                        let id = thread.id.clone();
+                        this.remember_thread(thread);
+                        cx.emit(ClientEvent::OpenThread { thread_id: id });
+                    }
+                    Err(err) => this.error = Some(format!("Couldn't create thread: {}", friendly(&err)).into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ---------------------------------------------------------------- custom emoji
+
+    pub fn guild_emoji(&self, guild_id: &str) -> &[rhein_proto::CustomEmoji] {
+        self.emoji.get(guild_id).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    fn load_emoji(&mut self, guild_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let io = self.io.clone();
+        let gid = guild_id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.expressions(&gid).await?) })).await;
+            this.update(cx, |this, cx| {
+                this.emoji.insert(guild_id, result.unwrap_or_default());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remembers an emoji as recently used (unicode character or `<name:id>` token).
+    pub fn use_emoji(&mut self, emoji: String) {
+        self.recent_emoji.retain(|e| *e != emoji);
+        self.recent_emoji.insert(0, emoji);
+        self.recent_emoji.truncate(32);
+        let mut prefs = crate::prefs::load();
+        prefs.recent_emoji = self.recent_emoji.clone();
+        crate::prefs::store(&prefs);
+    }
+
+    // ---------------------------------------------------------------- search
+
+    pub fn run_search(&mut self, guild_id: String, query: rhein_proto::SearchQuery, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let append = query.offset > 0;
+        if !append {
+            self.search = Some(SearchState { guild_id: guild_id.clone(), query: query.clone(), ..Default::default() });
+        }
+        if let Some(state) = self.search.as_mut() {
+            state.loading = true;
+            state.error = None;
+        }
+        cx.notify();
+        let io = self.io.clone();
+        let asked = query.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.search(&guild_id, &asked).await?) })).await;
+            this.update(cx, |this, cx| {
+                let Some(state) = this.search.as_mut() else { return };
+                if state.query.q != query.q || state.query.channel_id != query.channel_id || state.query.author != query.author || state.query.has != query.has {
+                    return; // a newer search replaced this one
+                }
+                state.loading = false;
+                match result {
+                    Ok(page) => {
+                        state.total = page.total;
+                        state.has_more = page.has_more;
+                        state.query.offset = query.offset + page.results.len() as u32;
+                        state.results.extend(page.results);
+                    }
+                    Err(err) => state.error = Some(friendly(&err)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn search_more(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.search.as_ref().filter(|s| s.has_more && !s.loading) else { return };
+        let (guild, query) = (state.guild_id.clone(), state.query.clone());
+        self.run_search(guild, query, cx);
+    }
+
+    pub fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search = None;
+        cx.notify();
+    }
+
+    /// Opens the channel a message lives in and scrolls to it.
+    pub fn open_message(&mut self, channel_id: String, message_id: String, cx: &mut Context<Self>) {
+        if self.selected_channel() != Some(channel_id.as_str()) {
+            self.select_channel(channel_id.clone(), cx);
+            // History for the channel is loading; jump once it is there.
+            cx.spawn(async move |this, cx| {
+                for _ in 0..50 {
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                    let ready = this
+                        .read_with(cx, |this, _| this.logs.get(&channel_id).is_some_and(|l| l.loaded))
+                        .unwrap_or(false);
+                    if ready {
+                        break;
+                    }
+                }
+                this.update(cx, |this, cx| this.jump_to(channel_id, message_id, cx)).ok();
+            })
+            .detach();
+        } else {
+            self.jump_to(channel_id, message_id, cx);
+        }
+    }
+
+    // ---------------------------------------------------------------- member lookup
+
+    /// Members matching a name: the loaded roster immediately, the server's answer once it arrives.
+    pub fn lookup_members(&mut self, guild_id: &str, query: &str, cx: &mut Context<Self>) -> Vec<Member> {
+        let q = query.to_lowercase();
+        let mut found: Vec<Member> = self
+            .members
+            .get(guild_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|m| m.user_id.to_lowercase().contains(&q) || m.shown_name().to_lowercase().contains(&q))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let key = format!("{guild_id}\0{q}");
+        match self.member_lookup.get(&key) {
+            Some(remote) => {
+                for m in remote {
+                    if !found.iter().any(|f| f.user_id == m.user_id) {
+                        found.push(m.clone());
+                    }
+                }
+            }
+            None if !q.is_empty() => {
+                self.member_lookup.insert(key.clone(), Vec::new());
+                if let Some(api) = self.api_for_guild(guild_id) {
+                    let io = self.io.clone();
+                    let (gid, query) = (guild_id.to_owned(), q.clone());
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(Duration::from_millis(200)).await;
+                        let result = join(io.spawn(async move { Ok(api.search_members(&gid, &query, 25).await?) })).await;
+                        this.update(cx, |this, cx| {
+                            if let Ok(list) = result {
+                                this.member_lookup.insert(key, list.members);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+            }
+            None => {}
+        }
+        found
     }
 
     pub fn load_members(&mut self, guild_id: String, cx: &mut Context<Self>) {

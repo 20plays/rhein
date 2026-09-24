@@ -15,6 +15,7 @@ log.workspace = true
 regex.workspace = true
 url.workspace = true
 unicode-segmentation.workspace = true
+emojis.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
