@@ -1003,7 +1003,7 @@ impl Render for TextInput {
             .rounded(radius::MD)
             .bg(t.bg_raised)
             .border_1()
-            .border_color(if focused { t.accent } else { t.border })
+            .border_color(if focused { t.text_faint } else { t.border_strong })
             .text_size(text::MD)
             .text_color(t.text)
             .overflow_hidden()

@@ -1,6 +1,6 @@
 use gpui::{App, FontWeight, IntoElement, ParentElement as _, RenderOnce, Styled as _, Window, div, px};
 
-use crate::theme::{ActiveTheme as _, text};
+use crate::theme::{ActiveTheme as _, FONT_MONO, text};
 
 /// A small dot for "something unread here".
 #[derive(IntoElement)]
@@ -29,9 +29,10 @@ impl RenderOnce for CountBadge {
             .flex()
             .items_center()
             .justify_center()
+            .font_family(FONT_MONO)
             .text_size(text::XS)
-            .font_weight(FontWeight::BOLD)
-            .text_color(t.text_on_accent)
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::white())
             .child(label)
     }
 }
@@ -46,10 +47,12 @@ impl RenderOnce for Tag {
         div()
             .px_1()
             .rounded(px(3.))
-            .bg(t.accent_soft)
-            .text_color(t.accent)
+            .border_1()
+            .border_color(t.border_strong)
+            .text_color(t.text_muted)
+            .font_family(FONT_MONO)
             .text_size(text::XS)
-            .font_weight(FontWeight::BOLD)
-            .child(self.0)
+            .font_weight(FontWeight::MEDIUM)
+            .child(self.0.to_lowercase())
     }
 }

@@ -96,9 +96,9 @@ impl RenderOnce for Button {
         let t = cx.theme();
         let (bg, hover, fg) = match self.kind {
             ButtonKind::Primary => (t.accent, t.accent_hover, t.text_on_accent),
-            ButtonKind::Secondary => (t.bg_raised, t.bg_selected, t.text),
+            ButtonKind::Secondary => (gpui::transparent_black().into(), t.bg_hover, t.text),
             ButtonKind::Ghost => (gpui::transparent_black().into(), t.bg_hover, t.text_muted),
-            ButtonKind::Danger => (t.danger, t.danger, t.text_on_accent),
+            ButtonKind::Danger => (t.danger, t.danger, gpui::white().into()),
         };
         let hover_fg = if self.kind == ButtonKind::Ghost { t.text } else { fg };
         let disabled = self.disabled;
@@ -112,6 +112,7 @@ impl RenderOnce for Button {
             .gap_2()
             .rounded(radius::MD)
             .bg(bg)
+            .when(self.kind == ButtonKind::Secondary, |d| d.border_1().border_color(t.border_strong))
             .text_color(fg)
             .text_size(text::MD)
             .font_weight(FontWeight::MEDIUM)

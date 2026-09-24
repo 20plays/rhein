@@ -1,5 +1,5 @@
 //! Which parts of a text are emoji, so they can be drawn with the colour emoji font. UI fonts
-//! such as Inter carry monochrome glyphs for some emoji (❤ ✈ ☀), and GPUI prefers those.
+//! such as Geist carry monochrome glyphs for some emoji (❤ ✈ ☀), and GPUI prefers those.
 
 use std::ops::Range;
 
@@ -69,7 +69,7 @@ mod tests {
     fn runs_cover_text_and_switch_font_for_emoji() {
         let base = TextRun {
             len: 0,
-            font: gpui::font("Inter"),
+            font: gpui::font("Geist"),
             color: gpui::black(),
             background_color: None,
             underline: None,
@@ -79,7 +79,7 @@ mod tests {
         let runs = runs_with_emoji(text, &base);
         assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
         let families: Vec<&str> = runs.iter().map(|r| r.font.family.as_ref()).collect();
-        assert_eq!(families, vec!["Inter", FONT_EMOJI, "Inter", FONT_EMOJI]);
+        assert_eq!(families, vec!["Geist", FONT_EMOJI, "Geist", FONT_EMOJI]);
         assert_eq!(runs_with_emoji("", &base).len(), 1);
     }
 }

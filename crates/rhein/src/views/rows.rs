@@ -8,7 +8,7 @@ use gpui::{
 use rhein_proto::{Attachment, Message};
 use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::{Client, EmbedState, markdown};
-use rhein_ui::theme::{FONT_EMOJI, radius, size, text};
+use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
 use crate::views::chat::ChatView;
@@ -184,11 +184,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                             })
                             .child(author_name.clone())
                     })
-                    .child(div().text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
+                    .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
             )
         })
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
-        .when(message.edited_at.is_some(), |d| d.child(div().text_size(text::XS).text_color(t.text_faint).child("(edited)")))
+        .when(message.edited_at.is_some(), |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("(edited)")))
         .children(images.into_iter().enumerate().map(|(i, a)| image_attachment(ctx, ix, i, a, &t)))
         .children(files.into_iter().enumerate().map(|(i, a)| file_chip(ix, i, a, &t)))
         .children(cards)
@@ -626,9 +626,9 @@ fn day_separator(ms: i64, t: &Theme) -> AnyElement {
         .px_4()
         .pt_4()
         .pb_1()
-        .child(div().flex_1().h(px(1.)).bg(t.border_strong))
-        .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child(day_label(ms)))
-        .child(div().flex_1().h(px(1.)).bg(t.border_strong))
+        .child(div().flex_1().h(px(1.)).bg(t.border))
+        .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(day_label(ms).to_lowercase()))
+        .child(div().flex_1().h(px(1.)).bg(t.border))
         .into_any_element()
 }
 
@@ -644,11 +644,10 @@ fn new_messages_line(t: &Theme) -> AnyElement {
             div()
                 .px_1p5()
                 .rounded(px(3.))
-                .bg(t.danger)
+                .font_family(FONT_MONO)
                 .text_size(text::XS)
-                .font_weight(FontWeight::BOLD)
-                .text_color(t.text_on_accent)
-                .child("NEW"),
+                .text_color(t.danger)
+                .child("new"),
         )
         .into_any_element()
 }

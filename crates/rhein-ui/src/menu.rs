@@ -90,8 +90,8 @@ impl Render for Menu {
                 MenuEntry::Item { label, icon: glyph, danger, action } => {
                     let action = action.clone();
                     let color = if *danger { t.danger } else { t.text };
-                    let hover_bg = if *danger { t.danger } else { t.accent };
-                    let hover_fg = t.text_on_accent;
+                    let hover_bg = if *danger { t.danger_soft } else { t.bg_selected };
+                    let hover_fg = if *danger { t.danger } else { t.text };
                     list.child(
                         div()
                             .id(("menu-item", i))

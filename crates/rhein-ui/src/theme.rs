@@ -1,8 +1,8 @@
 //! Colour, type and spacing tokens. Views and components never write a literal colour or size;
 //! they read `cx.theme()` or one of the constants here.
 //!
-//! The look: near-black surfaces separated by small tonal steps rather than borders, three text
-//! levels, and a single accent.
+//! The look: pure black surfaces separated by 1px lines, three grey text levels, white as the only
+//! accent, and colour reserved for status (success, warning, danger).
 
 use gpui::{App, Global, Hsla, Pixels, Rgba, px};
 
@@ -44,31 +44,31 @@ impl Global for Theme {}
 impl Theme {
     pub fn dark() -> Self {
         Self {
-            bg_base: rgb(0x0e0f11),
-            bg_panel: rgb(0x141518),
-            bg_main: rgb(0x18191c),
-            bg_raised: rgb(0x1f2125),
-            bg_hover: rgb(0x23252a),
-            bg_selected: rgb(0x2a2d33),
-            border: rgb(0x23252a),
-            border_strong: rgb(0x33363d),
+            bg_base: rgb(0x000000),
+            bg_panel: rgb(0x000000),
+            bg_main: rgb(0x000000),
+            bg_raised: rgb(0x0a0a0a),
+            bg_hover: rgb(0x111111),
+            bg_selected: rgb(0x1a1a1a),
+            border: rgb(0x1f1f1f),
+            border_strong: rgb(0x2e2e2e),
 
-            text: rgb(0xe8e9ec),
-            text_muted: rgb(0xa2a6ad),
-            text_faint: rgb(0x6c707a),
-            text_on_accent: rgb(0xffffff),
+            text: rgb(0xededed),
+            text_muted: rgb(0xa1a1a1),
+            text_faint: rgb(0x666666),
+            text_on_accent: rgb(0x000000),
 
-            accent: rgb(0x7c86ff),
-            accent_hover: rgb(0x8f98ff),
-            accent_soft: rgba(0x7c86ff26),
-            danger: rgb(0xf0565c),
-            danger_soft: rgba(0xf0565c26),
-            success: rgb(0x3fcf8e),
-            warning: rgb(0xf2b448),
+            accent: rgb(0xededed),
+            accent_hover: rgb(0xffffff),
+            accent_soft: rgba(0xffffff14),
+            danger: rgb(0xee4444),
+            danger_soft: rgba(0xee444426),
+            success: rgb(0x3ecf8e),
+            warning: rgb(0xf5a524),
 
-            selection: rgba(0x7c86ff55),
+            selection: rgba(0xffffff33),
             overlay: rgba(0x000000b3),
-            shadow: gpui::hsla(0., 0., 0., 0.5),
+            shadow: gpui::hsla(0., 0., 0., 0.6),
         }
     }
 }
@@ -110,6 +110,8 @@ pub mod size {
     pub const SIDEBAR: Pixels = px(240.);
     pub const PANEL: Pixels = px(260.);
     pub const HEADER: Pixels = px(48.);
+    /// The status line along the bottom of the window.
+    pub const STATUS: Pixels = px(28.);
     pub const ICON: Pixels = px(16.);
     pub const ICON_BUTTON: Pixels = px(28.);
 }
@@ -118,11 +120,11 @@ pub mod radius {
     use super::*;
     pub const SM: Pixels = px(4.);
     pub const MD: Pixels = px(6.);
-    pub const LG: Pixels = px(10.);
+    pub const LG: Pixels = px(8.);
 }
 
-pub const FONT_UI: &str = "Inter";
-pub const FONT_MONO: &str = "JetBrains Mono";
+pub const FONT_UI: &str = "Geist";
+pub const FONT_MONO: &str = "Geist Mono";
 /// Colour emoji; forced for emoji ranges because UI fonts carry monochrome glyphs for some of them.
 pub const FONT_EMOJI: &str = "Noto Color Emoji";
 

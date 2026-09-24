@@ -13,6 +13,7 @@ mod icon;
 pub mod input;
 mod menu;
 mod modal;
+pub mod motion;
 pub mod theme;
 mod tooltip;
 

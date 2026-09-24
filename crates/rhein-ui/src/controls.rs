@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::icon::{Icon, icon};
-use crate::theme::{ActiveTheme as _, radius, text};
+use crate::theme::{ActiveTheme as _, FONT_MONO, radius, text};
 
 type Click = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type Select = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -93,7 +93,7 @@ impl RenderOnce for Switch {
             .flex()
             .when(on, |d| d.justify_end())
             .cursor_pointer()
-            .child(div().size(px(16.)).rounded_full().bg(t.text))
+            .child(div().size(px(16.)).rounded_full().bg(if on { t.bg_base } else { t.text_muted }))
             .when_some(self.on_toggle, |d, h| d.on_click(move |_, window, cx| h(!on, window, cx)))
     }
 }
@@ -212,16 +212,16 @@ impl RenderOnce for ListRow {
     }
 }
 
-/// Small uppercase heading above a group of rows.
+/// Small lowercase mono heading above a group of rows.
 pub fn section_label(label: impl Into<SharedString>, cx: &App) -> gpui::Div {
     div()
         .px_2()
         .pt_4()
         .pb_1()
+        .font_family(FONT_MONO)
         .text_size(text::XS)
-        .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().text_faint)
-        .child(label.into().to_uppercase())
+        .child(label.into().to_lowercase())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

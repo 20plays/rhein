@@ -541,7 +541,7 @@ impl SettingsView {
             .child(div().text_size(text::XL).font_weight(FontWeight::SEMIBOLD).text_color(t.text).child("Rhein"))
             .child(format!("Version {} – a native client for Telium, written in Rust with GPUI.", env!("CARGO_PKG_VERSION")))
             .child("Licensed under the Apache License 2.0.")
-            .child("Bundled: Inter and JetBrains Mono (SIL Open Font License 1.1), Lucide icons (ISC licence), Unicode emoji data via the emojis crate.")
+            .child("Bundled: Geist and Geist Mono (SIL Open Font License 1.1), Lucide icons (ISC licence), Unicode emoji data via the emojis crate.")
             .into_any_element()
     }
 }
