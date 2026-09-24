@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
