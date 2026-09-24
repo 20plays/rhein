@@ -134,6 +134,27 @@ impl Shell {
         ];
         let focus = chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
+        // Debug builds can start on a given screen, for screenshots without input:
+        // RHEIN_DEV_OPEN=home|settings|join|switcher|signout.
+        #[cfg(debug_assertions)]
+        if let Ok(what) = std::env::var("RHEIN_DEV_OPEN") {
+            cx.defer_in(window, move |this: &mut Self, window, cx| match what.as_str() {
+                // After READY, which selects a guild of its own.
+                "home" => {
+                    let client = this.client.clone();
+                    cx.spawn(async move |_, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                        client.update(cx, |c, cx| c.show_home(cx));
+                    })
+                    .detach();
+                }
+                "settings" => this.open_settings(window, cx),
+                "join" => this.open_dialog(DialogTab::Join, window, cx),
+                "switcher" => this.open_switcher(window, cx),
+                "signout" => this.ask_sign_out(window, cx),
+                _ => {}
+            });
+        }
         Self {
             client,
             chat,
@@ -823,7 +844,7 @@ impl Shell {
             )
             .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| {
                 div().flex().flex_col().gap_1()
-                    .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ABOUT ME"))
+                    .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("about me"))
                     .child(div().text_size(text::SM).child(bio))
             }))
             .children({
@@ -856,7 +877,7 @@ impl Shell {
             })
             .when(!roles.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_1()
-                    .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ROLES"))
+                    .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("roles"))
                     .child(div().flex().flex_wrap().gap_1().children(roles.into_iter().map(|r| {
                         div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
                     }))))
@@ -930,22 +951,32 @@ impl Shell {
         let home = client.showing_home;
         let selected = client.selected_guild.clone();
 
-        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().px_2().py_2().flex().flex_col();
+        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().px_2().pb_2().flex().flex_col();
 
-        // Direct messages.
+        // Direct messages: the row sits in a strip as tall as the chat header, so both share one
+        // line underneath; its conversations open below it.
+        let mut top = div()
+            .h(size::HEADER)
+            .flex_none()
+            .px_2()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(t.border);
         {
             let requests = client.incoming_friend_requests() as u32;
             let dm_unread = client.conversations.iter().any(|c| client.conversation_unread(&c.id));
             let c = self.client.clone();
-            tree = tree.child(
+            top = top.child(div().flex_1().child(
                 ListRow::new("tree-home", "Direct messages")
                     .icon(Icon::MessagesSquare)
-                    .selected(home && client.home_conversation.is_none())
-                    .strong(dm_unread)
+                    // Friends and conversations below carry the selection; this row just marks home.
+                    .strong(dm_unread || home)
                     .when(requests > 0, |r| r.trailing(CountBadge(requests)))
                     .on_click(move |_, _, cx| c.update(cx, |c, cx| c.show_home(cx))),
-            );
+            ));
             if home {
+                tree = tree.child(div().h_2());
                 for row in self.conversation_rows(cx) {
                     tree = tree.child(row);
                 }
@@ -1088,6 +1119,7 @@ impl Shell {
             .bg(t.bg_panel)
             .border_r_1()
             .border_color(t.border)
+            .child(top)
             .child(tree)
             .child(self.profile_strip(cx))
             .into_any_element()
@@ -1115,7 +1147,7 @@ impl Shell {
             _ => "online".into(),
         });
         div()
-            .h(px(48.))
+            .h(size::STATUS)
             .flex_none()
             .px_2()
             .flex()
@@ -1128,7 +1160,7 @@ impl Shell {
                     .id("profile-strip")
                     .flex_1()
                     .min_w_0()
-                    .h(px(36.))
+                    .h(px(32.))
                     .px_1()
                     .rounded(radius::MD)
                     .flex()
@@ -1138,15 +1170,15 @@ impl Shell {
                     .hover(|s| s.bg(t.bg_hover))
                     .tooltip(tooltip("Set status"))
                     .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
-                    .child(Avatar::new(me.clone(), name.clone()).size(px(28.)).image(avatar.map(Into::into)).presence(Some(presence)))
+                    .child(Avatar::new(me.clone(), name.clone()).size(px(24.)).image(avatar.map(Into::into)).presence(Some(presence)))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(text::SM).font_weight(FontWeight::MEDIUM).truncate().child(name))
-                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status)),
+                            .child(div().text_size(text::SM).line_height(px(15.)).font_weight(FontWeight::MEDIUM).truncate().child(name))
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).line_height(px(14.)).text_color(t.text_faint).truncate().child(status)),
                     ),
             )
             .child(
@@ -1341,23 +1373,42 @@ impl Shell {
                     weak2.update(cx, |v, cx| v.member_menu(u, at, window, cx)).ok();
                 })
         };
-        let online_label = section_label(format!("Online — {}", online.len()), cx);
+        let online_label = section_label(format!("Online — {}", online.len()), cx).pt_2();
         let offline_label = (!offline.is_empty()).then(|| section_label(format!("Offline — {}", offline.len()), cx));
         Some(
             div()
-                .id("members")
                 .w(size::PANEL)
                 .h_full()
                 .flex_none()
+                .flex()
+                .flex_col()
                 .bg(t.bg_panel)
                 .border_l_1()
                 .border_color(t.border)
-                .px_2()
-                .overflow_y_scroll()
-                .child(online_label)
-                .children(online.into_iter().map(row))
-                .children(offline_label)
-                .children(offline.into_iter().map(row))
+                .child(
+                    div()
+                        .h(size::HEADER)
+                        .flex_none()
+                        .px_4()
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(t.border)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Members"),
+                )
+                .child(
+                    div()
+                        .id("members")
+                        .flex_1()
+                        .min_h_0()
+                        .px_2()
+                        .overflow_y_scroll()
+                        .child(online_label)
+                        .children(online.into_iter().map(row))
+                        .children(offline_label)
+                        .children(offline.into_iter().map(row)),
+                )
                 .into_any_element(),
         )
     }

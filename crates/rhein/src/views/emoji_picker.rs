@@ -235,7 +235,8 @@ impl Render for EmojiPicker {
                         .text_size(text::XS)
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(t.text_faint)
-                        .child(title.to_uppercase())
+                        .font_family(rhein_ui::theme::FONT_MONO)
+                        .child(title.to_lowercase())
                         .into_any_element(),
                     Row::Cells(cells) => div()
                         .h(px(CELL))

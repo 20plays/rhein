@@ -204,11 +204,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     .text_color(t.danger)
                     .child(icon(Icon::CircleAlert).text_color(t.danger))
                     .child("Not sent.")
-                    .child(Button::new(SharedString::from(format!("retry-{ix}")), "Retry").ghost().on_click(move |_, _, cx| {
+                    .child(Button::new(SharedString::from(format!("retry-{ix}")), "Retry").small().ghost().on_click(move |_, _, cx| {
                         let (ch, id) = (ch1.clone(), id1.clone());
                         c1.update(cx, |c, cx| c.retry_failed(ch, id, cx));
                     }))
-                    .child(Button::new(SharedString::from(format!("discard-{ix}")), "Discard").ghost().on_click(move |_, _, cx| {
+                    .child(Button::new(SharedString::from(format!("discard-{ix}")), "Discard").small().ghost().on_click(move |_, _, cx| {
                         let (ch, id) = (ch2.clone(), id2.clone());
                         c2.update(cx, |c, cx| c.discard_failed(ch, id, cx));
                     })),

@@ -353,7 +353,7 @@ impl SettingsView {
                             .child(if d.current {
                                 div().text_size(text::SM).text_color(t.success).child("This device").into_any_element()
                             } else {
-                                Button::new(("revoke", i), "Sign out")
+                                Button::new(("revoke", i), "Sign out").small()
                                     .ghost()
                                     .on_click(cx.listener(move |v, _, _, cx| {
                                         let id = id.clone();
@@ -413,7 +413,7 @@ impl SettingsView {
                             ))),
                     )
                     .when(!is_home, |d| {
-                        d.child(Button::new(("remove-server", i), "Remove").ghost().on_click(cx.listener(move |v, _, _, cx| {
+                        d.child(Button::new(("remove-server", i), "Remove").small().ghost().on_click(cx.listener(move |v, _, _, cx| {
                             let name = name.clone();
                             v.client.update(cx, |c, cx| c.remove_server(&name, cx));
                         })))
@@ -564,7 +564,7 @@ impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut nav = div().w(px(220.)).flex_none().flex().flex_col().gap_0p5().p_3().bg(t.bg_panel);
-        nav = nav.child(div().px_2().pb_2().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("SETTINGS"));
+        nav = nav.child(div().px_2().pb_2().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
         for section in Section::ALL {
             nav = nav.child(
                 ListRow::new(SharedString::from(format!("settings-{}", section.label())), section.label())

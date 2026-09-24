@@ -29,7 +29,7 @@ fn panel_header(title: &str, t: &Theme, on_close: impl Fn(&gpui::ClickEvent, &mu
         .border_b_1()
         .border_color(t.border)
         .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
-        .child(IconButton::new("panel-close", Icon::X).tooltip("Close").on_click(on_close))
+        .child(IconButton::new("panel-close", Icon::X).large().tooltip("Close").on_click(on_close))
 }
 
 /// A compact message: avatar, author, time, rendered text; click jumps to it.

@@ -110,9 +110,15 @@ pub mod size {
     pub const PANEL: Pixels = px(260.);
     pub const HEADER: Pixels = px(48.);
     /// The status line along the bottom of the window.
-    pub const STATUS: Pixels = px(28.);
+    pub const STATUS: Pixels = px(40.);
+    /// Height shared by text fields and the buttons that sit beside them.
+    pub const CONTROL: Pixels = px(36.);
+    /// Buttons inside dense rows (list items, inline notices).
+    pub const CONTROL_SM: Pixels = px(28.);
     pub const ICON: Pixels = px(16.);
     pub const ICON_BUTTON: Pixels = px(28.);
+    /// Icon buttons in headers and next to the composer.
+    pub const ICON_BUTTON_LG: Pixels = px(32.);
 }
 
 pub mod radius {

@@ -2,11 +2,11 @@ use std::rc::Rc;
 
 use gpui::{
     App, ClickEvent, ElementId, FontWeight, IntoElement, MouseButton, ParentElement as _, RenderOnce,
-    SharedString, Styled as _, Window, div, prelude::*,
+    SharedString, Styled as _, Window, div, prelude::*, px,
 };
 
 use crate::icon::{Icon, icon};
-use crate::theme::{ActiveTheme as _, radius, text};
+use crate::theme::{ActiveTheme as _, radius, size, text};
 use crate::tooltip::tooltip;
 
 type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -30,6 +30,7 @@ pub struct Button {
     kind: ButtonKind,
     disabled: bool,
     full_width: bool,
+    small: bool,
     tooltip: Option<SharedString>,
     on_click: Option<Handler>,
 }
@@ -43,6 +44,7 @@ impl Button {
             kind: ButtonKind::Secondary,
             disabled: false,
             full_width: false,
+            small: false,
             tooltip: None,
             on_click: None,
         }
@@ -75,6 +77,12 @@ impl Button {
         self
     }
 
+    /// The compact height, for buttons inside list rows and inline notices.
+    pub fn small(mut self) -> Self {
+        self.small = true;
+        self
+    }
+
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
         self
@@ -104,8 +112,9 @@ impl RenderOnce for Button {
         let disabled = self.disabled;
         div()
             .id(self.id)
-            .h_8()
-            .px_3()
+            .h(if self.small { size::CONTROL_SM } else { size::CONTROL })
+            .flex_none()
+            .px(if self.small { px(10.) } else { px(14.) })
             .flex()
             .items_center()
             .justify_center()
@@ -114,7 +123,7 @@ impl RenderOnce for Button {
             .bg(bg)
             .when(self.kind == ButtonKind::Secondary, |d| d.border_1().border_color(t.border_strong))
             .text_color(fg)
-            .text_size(text::MD)
+            .text_size(if self.small { text::SM } else { text::MD })
             .font_weight(FontWeight::MEDIUM)
             .when(self.full_width, |d| d.w_full())
             .when(disabled, |d| d.opacity(0.5))
@@ -138,12 +147,13 @@ pub struct IconButton {
     tooltip: Option<SharedString>,
     active: bool,
     danger: bool,
+    large: bool,
     on_click: Option<Handler>,
 }
 
 impl IconButton {
     pub fn new(id: impl Into<ElementId>, icon: Icon) -> Self {
-        Self { id: id.into(), icon, tooltip: None, active: false, danger: false, on_click: None }
+        Self { id: id.into(), icon, tooltip: None, active: false, danger: false, large: false, on_click: None }
     }
 
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
@@ -154,6 +164,12 @@ impl IconButton {
     /// Shown in the accent colour, for toggles that are on.
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
+        self
+    }
+
+    /// The larger size, for headers and the composer.
+    pub fn large(mut self) -> Self {
+        self.large = true;
         self
     }
 
@@ -182,7 +198,7 @@ impl RenderOnce for IconButton {
         let hover_color = if self.danger || self.active { color } else { t.text };
         div()
             .id(self.id)
-            .size(crate::theme::size::ICON_BUTTON)
+            .size(if self.large { size::ICON_BUTTON_LG } else { size::ICON_BUTTON })
             .flex_none()
             .flex()
             .items_center()

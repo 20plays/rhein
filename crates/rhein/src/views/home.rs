@@ -92,7 +92,7 @@ impl HomeView {
             _ => f.user_id.clone(),
         };
         let action = |label: &'static str, id: String, what: FriendAction, primary: bool, cx: &mut Context<Self>| {
-            let b = Button::new(SharedString::from(format!("{label}-{i}")), label);
+            let b = Button::new(SharedString::from(format!("{label}-{i}")), label).small();
             let b = if primary { b.primary() } else { b.ghost() };
             b.on_click(cx.listener(move |this, _, _, cx| {
                 let id = id.clone();
@@ -100,7 +100,7 @@ impl HomeView {
             }))
         };
         let id = f.user_id.clone();
-        let mut actions = div().flex().gap_1();
+        let mut actions = div().flex().flex_none().gap_2();
         actions = match f.state.as_str() {
             "pending_in" => actions
                 .child(action("Accept", id.clone(), FriendAction::Accept, true, cx))
@@ -231,7 +231,7 @@ impl HomeView {
                     .child(icon(if conversation.kind == "gc" { Icon::Users } else { Icon::AtSign }).text_color(t.text_faint))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
                     .when(conversation.request_state.as_deref() == Some("pending"), |d| {
-                        d.child(div().text_size(text::XS).px_1p5().rounded(radius::SM).bg(t.accent_soft).text_color(t.accent).child("REQUEST"))
+                        d.child(rhein_ui::Tag("REQUEST"))
                     }),
             )
             .child(

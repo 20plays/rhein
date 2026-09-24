@@ -1123,16 +1123,17 @@ impl ChatView {
                     .flex()
                     .items_start()
                     .gap_1()
-                    .px_1()
-                    .py_1()
+                    .pl_1()
+                    .pr(px(4.))
+                    .py(px(4.))
                     .rounded(radius::MD)
                     .bg(t.bg_raised)
                     .border_1()
                     .border_color(if focused { t.text_faint } else { t.border_strong })
                     .child(
                         div()
-                            .h(size::ICON_BUTTON)
-                            .w(px(18.))
+                            .h(size::ICON_BUTTON_LG)
+                            .w(px(20.))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -1141,14 +1142,16 @@ impl ChatView {
                             .text_color(if focused { t.text } else { t.text_faint })
                             .child("›"),
                     )
-                    .child(div().flex_1().min_w_0().py(px(4.)).child(self.composer.clone()))
+                    .child(div().flex_1().min_w_0().py(px(5.)).child(self.composer.clone()))
                     .child(
                         IconButton::new("attach", Icon::Paperclip)
+                            .large()
                             .tooltip("Attach files")
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
                     .child(
                         IconButton::new("composer-emoji", Icon::Smile)
+                            .large()
                             .tooltip("Emoji")
                             .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| {
                                 this.open_picker(e.position(), PickerTarget::Composer, window, cx)
@@ -1301,6 +1304,7 @@ impl Render for ChatView {
                 if self.fixed.is_some() {
                     return header.child(
                         IconButton::new("close-thread", Icon::X)
+                            .large()
                             .tooltip("Close thread")
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(ChatEvent::ClosePanel))),
                     );
@@ -1308,6 +1312,7 @@ impl Render for ChatView {
                 let active = self.active_panel;
                 let button = |id: &'static str, glyph: Icon, tip: &'static str, kind: PanelKind, cx: &mut Context<Self>| {
                     IconButton::new(id, glyph)
+                        .large()
                         .tooltip(tip)
                         .active(active == Some(kind))
                         .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::TogglePanel(kind))))

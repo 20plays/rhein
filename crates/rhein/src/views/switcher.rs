@@ -154,7 +154,7 @@ impl Render for QuickSwitcher {
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .child(self.input.clone())
             .when(empty_query && !items.is_empty(), |d| {
-                d.child(div().px_1().text_size(text::XS).text_color(t.text_faint).child("RECENT AND UNREAD"))
+                d.child(div().px_1().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("recent and unread"))
             })
             .children(items.iter().enumerate().map(|(i, item)| {
                 let selected = i == self.selected;

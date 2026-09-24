@@ -14,7 +14,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::theme::{ActiveTheme as _, radius, text};
+use crate::theme::{ActiveTheme as _, radius, size as sizes, text};
 
 actions!(
     rhein_input,
@@ -1055,8 +1055,9 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
             .when(!self.bare, |d| {
+                // Single-line fields share the button height, so a field and its button line up.
                 d.px_3()
-                    .py_2()
+                    .map(|d| if self.multiline { d.py_2().min_h(sizes::CONTROL) } else { d.h(sizes::CONTROL).flex().items_center() })
                     .rounded(radius::MD)
                     .bg(t.bg_raised)
                     .border_1()
@@ -1251,14 +1252,24 @@ impl Element for MultiLineElement {
             let at = point(origin.x + cursor_at.x, origin.y + cursor_at.y);
             let offset = input.cursor_offset();
             let next = input.next_boundary(offset);
-            let glyph = (!empty && next > offset).then(|| input.content[offset..next].to_owned()).filter(|g| g != "\n");
+            // Empty, the block sits on the placeholder's first letter and shows it inverted, like a
+            // terminal prompt, instead of hiding it.
+            let placeholder_first = empty.then(|| input.placeholder.graphemes(true).next().map(str::to_owned)).flatten();
+            let glyph = if empty {
+                placeholder_first.clone()
+            } else {
+                (next > offset).then(|| input.content[offset..next].to_owned()).filter(|g| g != "\n")
+            };
             // As wide as the character under it; a space's width at the end of a line.
             let space = font_size * 0.55;
-            let width = glyph
-                .as_ref()
-                .map(|_| position(next))
-                .filter(|p| (p.y - cursor_at.y).abs() < px(0.5) && p.x > cursor_at.x)
-                .map_or(space, |p| p.x - cursor_at.x);
+            let width = match &placeholder_first {
+                Some(g) => window.text_system().shape_line(g.clone().into(), font_size, &[TextRun { len: g.len(), ..run.clone() }], None).width,
+                None => glyph
+                    .as_ref()
+                    .map(|_| position(next))
+                    .filter(|p| (p.y - cursor_at.y).abs() < px(0.5) && p.x > cursor_at.x)
+                    .map_or(space, |p| p.x - cursor_at.x),
+            };
             let alpha = if !window.is_window_active() || cx.reduce_motion() {
                 1.
             } else {
