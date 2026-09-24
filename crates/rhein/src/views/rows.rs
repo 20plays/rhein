@@ -153,7 +153,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     };
     let body_text = (!message.content.trim().is_empty()).then(|| message_text::render(&doc, &text_ctx, cx));
 
-    let (images, files): (Vec<&Attachment>, Vec<&Attachment>) = message.attachments.iter().partition(|a| a.is_image());
+    // Indexed by position in the message, which is how an encrypted attachment is found again.
+    let (images, files): (Vec<(usize, &Attachment)>, Vec<(usize, &Attachment)>) = message.attachments.iter().enumerate().partition(|(_, a)| a.is_image());
     let body = div()
         .flex()
         .flex_col()
@@ -189,8 +190,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         })
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
         .when(message.edited_at.is_some(), |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("(edited)")))
-        .children(images.into_iter().enumerate().map(|(i, a)| image_attachment(ctx, ix, i, a, &t)))
-        .children(files.into_iter().enumerate().map(|(i, a)| file_chip(ix, i, a, &t)))
+        .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t)))
+        .children(files.into_iter().map(|(i, a)| file_chip(ctx, ix, i, &message.id, a, &t)))
         .children(cards)
         .when(failed, |d| {
             let (c1, c2) = (ctx.client.clone(), ctx.client.clone());
@@ -409,8 +410,8 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Pixels) {
     }
 }
 
-fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, a: &Attachment, t: &Theme) -> AnyElement {
-    let Some(url) = a.url.clone() else { return file_chip(ix, i, a, t).into_any_element() };
+fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme) -> AnyElement {
+    let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
     let (w, h) = fit(a.width, a.height);
     let view = ctx.view.clone();
     let (open, name) = (url.clone(), a.filename.clone());
@@ -450,8 +451,10 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, a: &Attachment, t: &Theme
         .into_any_element()
 }
 
-fn file_chip(ix: usize, i: usize, a: &Attachment, t: &Theme) -> impl IntoElement {
+fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme) -> impl IntoElement {
     let url = a.url.clone();
+    // An encrypted DM attachment has no URL to open: the client fetches and opens it.
+    let (client, conversation, message) = (ctx.client.clone(), ctx.channel_id.clone(), message_id.to_owned());
     div()
         .id(SharedString::from(format!("att-{ix}-{i}")))
         .max_w(px(420.))
@@ -466,10 +469,9 @@ fn file_chip(ix: usize, i: usize, a: &Attachment, t: &Theme) -> impl IntoElement
         .items_center()
         .cursor_pointer()
         .hover(|s| s.bg(t.bg_selected))
-        .on_click(move |_, _, cx| {
-            if let Some(url) = &url {
-                cx.open_url(url);
-            }
+        .on_click(move |_, _, cx| match &url {
+            Some(url) => cx.open_url(url),
+            None => client.update(cx, |c, cx| c.open_dm_attachment(&conversation, &message, i, cx)),
         })
         .child(icon(if a.is_image() { Icon::Image } else { Icon::File }).text_color(t.text_muted))
         .child(div().flex_1().truncate().text_color(t.accent).child(a.filename.clone()))

@@ -540,6 +540,8 @@ impl Engine {
         }
         let mut synced = Synced::default();
         let mut rejoins: Vec<(String, String)> = Vec::new();
+        // The newest message from someone else we opened: acknowledged as delivered afterwards.
+        let mut delivered: Option<(String, u64)> = None;
 
         for frame in &frames {
             let seq = frame["seq"].as_u64().unwrap_or(0);
@@ -597,6 +599,9 @@ impl Engine {
                     let (user, device) = sender.unwrap_or_default();
                     if self.absorb(conversation, frame, &user, &device, Payload::decode(&plaintext)) {
                         synced.opened += 1;
+                        if user != self.user_id {
+                            delivered = Some((frame["id"].as_str().unwrap_or_default().to_owned(), seq));
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -632,6 +637,13 @@ impl Engine {
                 0
             });
             self.publish_group_info(api, conversation).await;
+            // A delivery acknowledgement, as the web client sends one: this device has it.
+            if let Some((id, seq)) = delivered {
+                let ack = json!({ "device": self.device_id, "seq": seq, "id": id });
+                if let Err(err) = self.send(api, conversation, Payload::Delivered(ack)).await {
+                    log::info!("delivery acknowledgement: {err:#}");
+                }
+            }
         }
         self.flush_mirror(api).await;
         self.save()?;

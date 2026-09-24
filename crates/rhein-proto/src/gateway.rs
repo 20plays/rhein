@@ -110,6 +110,10 @@ pub fn heartbeat() -> Value {
     json!({ "op": "HEARTBEAT" })
 }
 
+pub fn dm_typing(conversation_id: &str, active: bool) -> Value {
+    json!({ "op": if active { "DM_TYPING_START" } else { "DM_TYPING_STOP" }, "d": { "conversation_id": conversation_id } })
+}
+
 pub fn typing(channel_id: &str) -> Value {
     json!({ "op": "TYPING", "d": { "channel_id": channel_id } })
 }
@@ -190,6 +194,12 @@ impl Event {
             }
             "TYPING_START" => Event::TypingStart {
                 channel_id: str_of(&d, "channel_id"),
+                user_id: str_of(&d, "user_id"),
+            },
+            // Typing in an encrypted conversation is a plaintext gateway signal, keyed by the
+            // conversation as a channel would be.
+            "DM_TYPING_START" => Event::TypingStart {
+                channel_id: str_of(&d, "conversation_id"),
                 user_id: str_of(&d, "user_id"),
             },
             "CHANNEL_CREATE" | "CHANNEL_UPDATE" => match decode(&d) {

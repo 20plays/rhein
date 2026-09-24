@@ -2709,6 +2709,11 @@ impl Client {
 
     pub fn send_typing(&mut self, channel_id: &str) {
         if self.is_dm(channel_id) {
+            // Through the home server's gateway, which relays it to the conversation.
+            let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
+            if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {
+                gw.send(rhein_proto::dm_typing(channel_id, true));
+            }
             return;
         }
         let Some(server) = self.server_of_channel(channel_id) else { return };
