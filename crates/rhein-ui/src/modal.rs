@@ -5,7 +5,7 @@ use gpui::{
     Styled as _, Window, div, prelude::*, px,
 };
 
-use crate::Dismiss;
+use crate::{Dismiss, motion};
 use crate::theme::{ActiveTheme as _, radius, text};
 
 pub const MODAL_CONTEXT: &str = "Modal";
@@ -71,8 +71,10 @@ impl RenderOnce for Modal {
         let t = cx.theme();
         let backdrop_dismiss = self.on_dismiss.clone();
         let key_dismiss = self.on_dismiss;
+        let card_id = SharedString::from(format!("{}-card", self.id));
         let card = div()
-            .id(SharedString::from(format!("{}-card", self.id)))
+            .id(card_id.clone())
+            .relative()
             .key_context(MODAL_CONTEXT)
             .when_some(self.focus, |d, f| d.track_focus(&f))
             .when_some(key_dismiss, |d, h| d.on_action(move |_: &Dismiss, window, cx| h(window, cx)))
@@ -94,7 +96,8 @@ impl RenderOnce for Modal {
             })
             .children(self.body)
             .when(!self.footer.is_empty(), |d| d.child(div().flex().justify_end().gap_2().children(self.footer)));
-        div()
+        let fade_id = SharedString::from(format!("{}-fade", self.id));
+        let backdrop = div()
             .id(self.id)
             .absolute()
             .inset_0()
@@ -103,6 +106,7 @@ impl RenderOnce for Modal {
             .items_center()
             .justify_center()
             .when_some(backdrop_dismiss, |d, h| d.on_click(move |_, window, cx| h(window, cx)))
-            .child(card)
+            .child(motion::pop_in(card, SharedString::from(format!("{card_id}-in"))));
+        motion::fade_in(backdrop, fade_id, motion::FAST)
     }
 }

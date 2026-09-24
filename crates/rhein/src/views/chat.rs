@@ -18,13 +18,13 @@ use rhein_proto::Message;
 use rhein_store::autocomplete::{self, Trigger};
 use rhein_store::{Client, ClientEvent, StagedState, perms};
 use rhein_ui::theme::{FONT_MONO, radius, size, text};
-use rhein_ui::{
+use rhein_ui::{motion, 
     ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, MenuEntry, MenuHost, Modal, Nav,
     TextInput, icon,
 };
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
-use crate::views::rows::{RowCtx, format_size, render_row};
+use crate::views::rows::{RowCtx, format_size, message_key, render_row};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(1600);
@@ -54,10 +54,14 @@ pub struct ChatView {
     modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
     pub(crate) revealed: HashSet<(String, usize)>,
+    /// Messages that arrived while the channel was open, animating in (see `rows::message_key`).
+    pub(crate) fresh: HashSet<String>,
     /// A message briefly highlighted after a jump.
     pub(crate) highlight: Option<(String, Instant)>,
     lightbox: Option<(String, String)>,
     lightbox_focus: FocusHandle,
+    /// A running glide to the newest message; replaced by the next one.
+    glide: Option<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -179,9 +183,11 @@ impl ChatView {
             confirm_delete: None,
             modal_focus: cx.focus_handle(),
             revealed: HashSet::new(),
+            fresh: HashSet::new(),
             highlight: None,
             lightbox: None,
             lightbox_focus: cx.focus_handle(),
+            glide: None,
             _subs: subs,
         };
         this.sync_channel(cx);
@@ -253,6 +259,15 @@ impl ChatView {
             ClientEvent::MessageAppended { channel_id } if is_current(channel_id) => {
                 let n = self.list.item_count();
                 self.list.splice(n..n, 1);
+                let key = self.client.read(cx).logs.get(channel_id).and_then(|l| l.messages.last()).map(|m| message_key(m).to_owned());
+                if let Some(key) = key {
+                    self.fresh.insert(key.clone());
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(motion::BASE * 2).await;
+                        this.update(cx, |this, _| this.fresh.remove(&key)).ok();
+                    })
+                    .detach();
+                }
             }
             ClientEvent::MessageChanged { channel_id, index } if is_current(channel_id) => {
                 // The next row's header depends on this one, so re-measure both.
@@ -370,9 +385,55 @@ impl ChatView {
             if let Some(channel) = self.current() {
                 self.client.update(cx, |c, cx| c.mark_read(channel, cx));
             }
-            self.list.scroll_to_end();
-            self.list.set_follow_mode(FollowMode::Tail);
+            self.glide_to_end(cx);
         }
+        cx.notify();
+    }
+
+    /// Scrolls to the newest message with an ease-out glide, then follows the tail again. From
+    /// far back it first jumps to a viewport away, so the glide is always short.
+    fn glide_to_end(&mut self, cx: &mut Context<Self>) {
+        let finish = |this: &mut Self, cx: &mut Context<Self>| {
+            this.list.scroll_to_end();
+            this.list.set_follow_mode(FollowMode::Tail);
+            this.glide = None;
+            cx.notify();
+        };
+        let remaining = self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y;
+        let viewport = self.list.viewport_bounds().size.height;
+        if cx.reduce_motion() || remaining <= px(1.) || viewport <= px(0.) {
+            finish(self, cx);
+            return;
+        }
+        let mut total = remaining;
+        if remaining > viewport * 3. {
+            self.list.scroll_by(remaining - viewport);
+            total = viewport;
+        }
+        let start = Instant::now();
+        self.glide = Some(cx.spawn(async move |this, cx| {
+            let mut done = px(0.);
+            loop {
+                cx.background_executor().timer(Duration::from_millis(8)).await;
+                let t = start.elapsed().as_secs_f32() / motion::SCROLL.as_secs_f32();
+                let keep_going = this
+                    .update(cx, |this, cx| {
+                        if t >= 1. {
+                            finish(this, cx);
+                            return false;
+                        }
+                        let target = total * motion::ease_out(t);
+                        this.list.scroll_by(target - done);
+                        done = target;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        }));
         cx.notify();
     }
 
@@ -650,7 +711,8 @@ impl ChatView {
     fn render_suggestions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let suggest = self.suggest.as_ref()?;
         let t = cx.theme().clone();
-        Some(
+        // Anchored by its bottom edge, so it fades rather than rises.
+        Some(motion::fade_in(
             div()
                 .absolute()
                 .bottom(px(64.))
@@ -690,8 +752,11 @@ impl ChatView {
                         .child(leading)
                         .child(div().text_size(text::MD).child(item.label.clone()))
                         .child(div().flex_1().min_w_0().truncate().text_size(text::SM).text_color(t.text_faint).child(item.hint.clone()))
-                }))
-                .into_any_element(),
+                })),
+                "suggest-in",
+                motion::FAST,
+            )
+            .into_any_element(),
         )
     }
 
@@ -942,7 +1007,7 @@ impl ChatView {
             PickerTarget::React { .. } => Anchor::TopRight,
         };
         Some(
-            deferred(anchored().position(*at).anchor(anchor).snap_to_window_with_margin(px(8.)).child(picker.clone()))
+            deferred(anchored().position(*at).anchor(anchor).snap_to_window_with_margin(px(8.)).child(motion::pop_in(div().relative().child(picker.clone()), "picker-in")))
                 .with_priority(2)
                 .into_any_element(),
         )
@@ -1277,11 +1342,7 @@ impl Render for ChatView {
                 Button::new("jump-present", "Jump to present")
                     .icon(Icon::ArrowDown)
                     .primary()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.list.scroll_to_end();
-                        this.list.set_follow_mode(FollowMode::Tail);
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.glide_to_end(cx))),
             )
         });
 
@@ -1308,7 +1369,20 @@ impl Render for ChatView {
             }))
             .child(header)
             .children(top_note.map(|note| div().px_4().pt_3().text_size(text::SM).text_color(t.text_faint).child(note)))
-            .child(div().relative().flex_1().min_h_0().pb_4().child(messages).children(jump))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .pb_4()
+                    // Switching channels fades the new history in instead of swapping it hard.
+                    .child(motion::fade_in(
+                        div().size_full().child(messages),
+                        SharedString::from(format!("history-{channel_id}")),
+                        motion::FAST,
+                    ))
+                    .children(jump),
+            )
             .child(composer)
             .children(suggestions)
             .children(lightbox)

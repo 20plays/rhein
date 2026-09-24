@@ -1,4 +1,5 @@
-//! The signed-in window: sidebar tree | chat | side panel over a status line, plus its modals.
+//! The signed-in window: sidebar tree with your profile | chat and side panel over a status line,
+//! plus its modals.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -11,7 +12,7 @@ use gpui::{
 use rhein_store::{Client, ServerStatus, perms};
 use rhein_ui::theme::{FONT_MONO, radius, size, text};
 use rhein_ui::{
-    ActiveTheme as _, Avatar, Button, CountBadge, Icon, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
+    ActiveTheme as _, motion, Avatar, Button, CountBadge, Icon, IconButton, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
     Presence, Tabs, Tag, TextInput, Toast, ToastKind, UnreadDot, icon, icon_sized, section_label, tooltip,
 };
 
@@ -860,7 +861,7 @@ impl Shell {
                         div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
                     }))))
             });
-        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(2).into_any_element())
+        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card.relative(), "profile-card-in"))).with_priority(2).into_any_element())
     }
 
     // ---------------------------------------------------------------- settings & switcher
@@ -1088,6 +1089,76 @@ impl Shell {
             .border_r_1()
             .border_color(t.border)
             .child(tree)
+            .child(self.profile_strip(cx))
+            .into_any_element()
+    }
+
+    /// You, at the foot of the sidebar: avatar, name and status (a click sets it), settings and
+    /// sign-out.
+    fn profile_strip(&self, cx: &Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let me = client.user_id().unwrap_or_default().to_owned();
+        let name = client.display_name(None, &me);
+        let avatar = client.avatar_url(None, &me);
+        let prefs = &client.prefs;
+        let presence = match prefs.status.as_str() {
+            "idle" => Presence::Idle,
+            "dnd" => Presence::Dnd,
+            "invisible" => Presence::Offline,
+            _ => Presence::Online,
+        };
+        let status = prefs.custom_status.clone().unwrap_or_else(|| match prefs.status.as_str() {
+            "idle" => "idle".into(),
+            "dnd" => "do not disturb".into(),
+            "invisible" => "invisible".into(),
+            _ => "online".into(),
+        });
+        div()
+            .h(px(48.))
+            .flex_none()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .border_t_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .id("profile-strip")
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(36.))
+                    .px_1()
+                    .rounded(radius::MD)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg_hover))
+                    .tooltip(tooltip("Set status"))
+                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
+                    .child(Avatar::new(me.clone(), name.clone()).size(px(28.)).image(avatar.map(Into::into)).presence(Some(presence)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(text::SM).font_weight(FontWeight::MEDIUM).truncate().child(name))
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status)),
+                    ),
+            )
+            .child(
+                IconButton::new("open-settings", Icon::Settings)
+                    .tooltip("Settings (Ctrl+,)")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+            .child(
+                IconButton::new("sign-out", Icon::LogOut)
+                    .tooltip("Sign out")
+                    .on_click(cx.listener(|this, _, window, cx| this.ask_sign_out(window, cx))),
+            )
             .into_any_element()
     }
 
@@ -1421,21 +1492,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.sidebar(cx);
-        let status = {
-            let (a, b, c) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
-            StatusLine::new(
-                self.client.clone(),
-                move |at, window, cx| {
-                    a.update(cx, |v, cx| v.status_menu(at, window, cx)).ok();
-                },
-                move |window, cx| {
-                    b.update(cx, |v, cx| v.open_settings(window, cx)).ok();
-                },
-                move |window, cx| {
-                    c.update(cx, |v, cx| v.ask_sign_out(window, cx)).ok();
-                },
-            )
-        };
+        let status = StatusLine::new(self.client.clone());
         let members = self.render_panel(cx);
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
@@ -1443,9 +1500,23 @@ impl Render for Shell {
         let modal = self.render_modal(cx);
         let card = self.render_profile_card(cx);
         let switcher = self.switcher.as_ref().map(|(view, _)| {
-            div().absolute().inset_0().bg(cx.theme().overlay).flex().justify_center().pt(px(120.)).child(view.clone())
+            motion::fade_in(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().overlay)
+                    .flex()
+                    .justify_center()
+                    .pt(px(120.))
+                    .child(motion::pop_in(div().relative().child(view.clone()), "switcher-in")),
+                "switcher-fade",
+                motion::FAST,
+            )
         });
-        let settings = self.settings.as_ref().map(|(view, _)| view.clone());
+        let settings = self
+            .settings
+            .as_ref()
+            .map(|(view, _)| motion::fade_in(div().absolute().inset_0().child(view.clone()), "settings-in", motion::FAST));
         div()
             .key_context(SHELL_CONTEXT)
             .on_action(cx.listener(|this, _: &OpenSwitcher, window, cx| this.open_switcher(window, cx)))
@@ -1457,17 +1528,24 @@ impl Render for Shell {
             .relative()
             .size_full()
             .flex()
-            .flex_col()
+            .child(sidebar)
             .child(
                 div()
                     .flex_1()
-                    .min_h_0()
+                    .min_w_0()
+                    .h_full()
                     .flex()
-                    .child(sidebar)
-                    .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
-                    .children(members),
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
+                            .children(members),
+                    )
+                    .child(status),
             )
-            .child(status)
             .children(toast)
             .children(dialog)
             .children(sign_out)

@@ -256,8 +256,9 @@ impl RenderOnce for Toast {
             ToastKind::Info => (Icon::Info, t.accent),
             ToastKind::Error => (Icon::CircleAlert, t.danger),
         };
-        div()
+        let toast = div()
             .id("toast")
+            .relative()
             .max_w(px(560.))
             .px_3()
             .py_2()
@@ -272,7 +273,7 @@ impl RenderOnce for Toast {
             .text_size(text::MD)
             .text_color(t.text)
             .child(icon(glyph).text_color(color))
-            .child(div().flex_1().child(self.text))
+            .child(div().flex_1().child(self.text.clone()))
             .when_some(self.on_dismiss, |d, h| {
                 d.child(
                     div()
@@ -283,6 +284,9 @@ impl RenderOnce for Toast {
                         .on_click(move |e, window, cx| h(e, window, cx))
                         .child(icon(Icon::X)),
                 )
-            })
+            });
+        // Keyed by the text, so a new message rises in again.
+        let key = SharedString::from(format!("toast-{}", self.text));
+        crate::motion::rise_in(toast, key, 8., crate::motion::BASE)
     }
 }

@@ -9,7 +9,7 @@ use rhein_proto::{Attachment, Message};
 use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::{Client, EmbedState, markdown};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
-use rhein_ui::{ActiveTheme as _, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
+use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
 use crate::views::chat::ChatView;
 use crate::views::message_text;
@@ -57,9 +57,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
 
     let view_state = ctx.view.upgrade().map(|v| {
         let v = v.read(cx);
-        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()))
+        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)))
     });
-    let (revealed, highlighted) = view_state.unwrap_or_default();
+    let (revealed, highlighted, fresh) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
     let doc = markdown::parse(&message.content);
@@ -279,9 +279,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .flex()
         .flex_col()
         .when(new_day, |d| d.child(day_separator(message.created_at, &t)))
-        .when(divider_here, |d| d.child(new_messages_line(&t)))
-        .child(row)
-        .into_any_element();
+        .when(divider_here, |d| d.child(new_messages_line(&t)));
+    // A message that just arrived rises into place; history renders as it is.
+    let element = if fresh {
+        let key = SharedString::from(format!("fresh-{}", message_key(&message)));
+        element.child(motion::rise_in(row, key, 6., motion::BASE)).into_any_element()
+    } else {
+        element.child(row).into_any_element()
+    };
     // Unknown previews are asked for after this frame, never during it.
     if !missing.is_empty() {
         let client = ctx.client.clone();
@@ -701,4 +706,10 @@ pub fn format_size(bytes: i64) -> String {
     } else {
         format!("{:.1} MB", b / 1024.0 / 1024.0)
     }
+}
+
+/// Identifies a message across the swap from its pending copy to the server's: the nonce when we
+/// sent it, the id otherwise.
+pub fn message_key(message: &Message) -> &str {
+    message.nonce.as_deref().unwrap_or(&message.id)
 }
