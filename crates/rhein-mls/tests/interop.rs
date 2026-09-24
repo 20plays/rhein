@@ -53,8 +53,8 @@ fn policy(creator: &str) -> Policy {
     Policy { v: 1, creator: creator.into(), add: Rule::Anyone, remove: Rule::Creator, policy: Rule::Creator, admins: vec![] }
 }
 
-fn accept(_: &openmls::prelude::MlsGroup, _: &openmls::prelude::StagedCommit) -> anyhow::Result<()> {
-    Ok(())
+fn accept(group: &openmls::prelude::MlsGroup, committer: Option<&(String, String)>, staged: &openmls::prelude::StagedCommit) -> anyhow::Result<()> {
+    rhein_mls::judge_commit(group, committer, staged)
 }
 
 fn text(processed: Processed) -> String {
@@ -225,4 +225,31 @@ fn kept_signature_key_interoperates() {
     let out = rhein.send(&mut group, &message("kept key")).unwrap();
     let got = web.call(json!({ "op": "process", "id": "w", "group_id": "conv-k", "message": b64(&out) }));
     assert_eq!(got["text"], "kept key");
+}
+
+/// The membership policy is enforced on commits from the web: a member who may not add people
+/// is refused, the creator is not.
+#[test]
+fn policy_is_enforced() {
+    let Some(mut web) = Web::start() else { return };
+    let rhein = Device::new("@rhein:x|r1").unwrap();
+    web.call(json!({ "op": "new", "id": "creator", "identity": "@creator:x|c1" }));
+    web.call(json!({ "op": "new", "id": "member", "identity": "@member:x|m1" }));
+    web.call(json!({ "op": "new", "id": "late", "identity": "@late:x|l1" }));
+    let strict = Policy { v: 1, creator: "@creator:x".into(), add: Rule::Creator, remove: Rule::Creator, policy: Rule::Creator, admins: vec![] };
+    let kp_member = web.call(json!({ "op": "key_package", "id": "member" }));
+    let created = web.call(json!({
+        "op": "create_group", "id": "creator", "group_id": "conv-p", "policy": strict,
+        "key_packages": [b64(&rhein.key_package().unwrap()), kp_member["key_package"]],
+    }));
+    let mut group = rhein.join(&Web::bytes(&created, "welcome")).unwrap();
+    web.call(json!({ "op": "join", "id": "member", "welcome": created["welcome"] }));
+
+    // The member (not the creator) adds somebody: refused, and the group stays where it was.
+    let kp_late = web.call(json!({ "op": "key_package", "id": "late" }));
+    let sneaky = web.call(json!({ "op": "add", "id": "member", "group_id": "conv-p", "key_packages": [kp_late["key_package"]] }));
+    let epoch = group.epoch();
+    let refused = rhein.process(&mut group, &Web::bytes(&sneaky, "commit"), accept).unwrap_err();
+    assert!(refused.to_string().contains("may not add"), "{refused}");
+    assert_eq!(group.epoch(), epoch);
 }

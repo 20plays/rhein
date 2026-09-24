@@ -11,6 +11,7 @@
 //!
 //! Frames are whole `MLSMessage`s; callers base64 them for the wire.
 
+pub mod payload;
 pub mod policy;
 pub mod trust;
 pub mod vault;
@@ -210,7 +211,12 @@ impl Device {
 
     /// Processes one frame, merging commits. `judge` decides whether a commit may be applied
     /// (the membership policy); a refused commit is an error and the group stays where it was.
-    pub fn process(&self, group: &mut MlsGroup, frame: &[u8], judge: impl Fn(&MlsGroup, &StagedCommit) -> Result<()>) -> Result<Processed> {
+    pub fn process(
+        &self,
+        group: &mut MlsGroup,
+        frame: &[u8],
+        judge: impl Fn(&MlsGroup, Option<&(String, String)>, &StagedCommit) -> Result<()>,
+    ) -> Result<Processed> {
         let message = MlsMessageIn::tls_deserialize_exact(frame).context("frame")?;
         let protocol: ProtocolMessage = message.try_into_protocol_message().map_err(|e| anyhow!("not a protocol message: {e:?}"))?;
         let processed = group.process_message(&self.provider, protocol).map_err(|e| anyhow!("processing: {e:?}"))?;
@@ -218,7 +224,7 @@ impl Device {
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(app) => Ok(Processed::Application { plaintext: app.into_bytes(), sender }),
             ProcessedMessageContent::StagedCommitMessage(staged) => {
-                judge(group, &staged)?;
+                judge(group, sender.as_ref(), &staged)?;
                 group.merge_staged_commit(&self.provider, *staged).map_err(|e| anyhow!("merging commit: {e:?}"))?;
                 Ok(Processed::Commit { sender })
             }
@@ -266,6 +272,56 @@ impl Device {
     pub fn export(&self, group: &MlsGroup, label: &str, context: &[u8], length: usize) -> Result<Vec<u8>> {
         group.export_secret(self.provider.crypto(), label, context, length).map_err(|e| anyhow!("exporter: {e:?}"))
     }
+}
+
+/// `judgeCommit`: whether a commit keeps to the group's membership policy. Adding a further
+/// device of someone already in the group, removing yourself and groups without a policy are
+/// always fine; everything else needs the right the policy names.
+pub fn judge_commit(group: &MlsGroup, committer: Option<&(String, String)>, staged: &StagedCommit) -> Result<()> {
+    let policy = policy_of(group).map_err(|_| anyhow!("this group's membership policy does not parse"))?;
+    let who = committer.map(|(u, _)| u.as_str());
+    let present: std::collections::HashSet<String> = group.members().filter_map(|m| identity_of(&m.credential)).map(|(u, _)| u).collect();
+    let allowed = |rule: policy::Rule| policy.as_ref().is_none_or(|p| who.is_some_and(|w| p.allows(rule, w)));
+    let committer_name = who.unwrap_or("somebody outside the group");
+    for add in staged.add_proposals() {
+        let added = identity_of(add.add_proposal().key_package().leaf_node().credential())
+            .map(|(u, _)| u)
+            .ok_or_else(|| anyhow!("an add that names nobody"))?;
+        if !present.contains(&added) && !policy.as_ref().is_none_or(|p| allowed(p.add)) {
+            bail!("{committer_name} may not add people to this group");
+        }
+    }
+    for remove in staged.remove_proposals() {
+        let removed = group.member(remove.remove_proposal().removed()).and_then(identity_of).map(|(u, _)| u);
+        if removed.as_deref() != who && !policy.as_ref().is_none_or(|p| allowed(p.remove)) {
+            bail!("{committer_name} may not remove people from this group");
+        }
+    }
+    let next = policy_in(staged.group_context().extensions()).map_err(|_| anyhow!("a membership policy that does not parse"))?;
+    match (&policy, &next) {
+        (None, Some(n)) if Some(n.creator.as_str()) != who => bail!("a membership policy must name the member adopting it as creator"),
+        (None, _) => {}
+        (Some(_), None) => bail!("a group's membership policy cannot be taken away"),
+        (Some(p), Some(n)) if n.creator != p.creator => bail!("the creator of a group cannot be changed"),
+        (Some(p), Some(n)) if n != p && !allowed(p.policy) => bail!("{committer_name} may not change this group's policy"),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Who a published key package says it is: its credential identity and signature key. `None`
+/// when it isn't a valid key package of our suite.
+pub fn key_package_identity(bytes: &[u8]) -> Option<(String, Vec<u8>)> {
+    let message = MlsMessageIn::tls_deserialize_exact(bytes).ok()?;
+    let MlsMessageBodyIn::KeyPackage(kp) = message.extract() else { return None };
+    let crypto = openmls_rust_crypto::RustCrypto::default();
+    let kp = kp.validate(&crypto, ProtocolVersion::Mls10).ok()?;
+    if kp.ciphersuite() != CIPHERSUITE {
+        return None;
+    }
+    let leaf = kp.leaf_node();
+    let identity = BasicCredential::try_from(leaf.credential().clone()).ok()?;
+    Some((String::from_utf8(identity.identity().to_vec()).ok()?, leaf.signature_key().as_slice().to_vec()))
 }
 
 /// A fresh Ed25519 MLS signature key: (private, public).

@@ -60,6 +60,22 @@ pub fn open(key: &Key, blob: &str) -> Result<Vec<u8>> {
     cipher.decrypt(Nonce::from_slice(&iv), unb64(ct)?.as_slice()).map_err(|_| anyhow!("this key does not open it"))
 }
 
+/// An attachment sealed for a DM: AES-256-GCM under a fresh key, as the web client's
+/// `uploadEncrypted` does. Returns the ciphertext and the key and IV (base64url) for the body.
+pub fn seal_attachment(plain: &[u8]) -> (Vec<u8>, String, String) {
+    let key: Key = rand_bytes();
+    let iv: [u8; 12] = rand_bytes();
+    let sealed = Aes256Gcm::new((&key).into()).encrypt(Nonce::from_slice(&iv), plain).expect("AES-GCM encrypts any length");
+    (sealed, b64url(&key), b64url(&iv))
+}
+
+pub fn open_attachment(sealed: &[u8], key_b64: &str, iv_b64: &str) -> Result<Vec<u8>> {
+    let key: Key = unb64(key_b64)?.try_into().map_err(|_| anyhow!("bad attachment key"))?;
+    let iv = unb64(iv_b64)?;
+    anyhow::ensure!(iv.len() == 12, "bad attachment iv");
+    Aes256Gcm::new((&key).into()).decrypt(Nonce::from_slice(&iv), sealed).map_err(|_| anyhow!("this attachment does not open with its key"))
+}
+
 pub fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
     getrandom::fill(&mut out).expect("the OS random source");
@@ -202,6 +218,14 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn attachments_round_trip() {
+        let (sealed, key, iv) = seal_attachment(b"picture bytes");
+        assert_eq!(sealed.len(), 13 + 16);
+        assert_eq!(open_attachment(&sealed, &key, &iv).unwrap(), b"picture bytes");
+        assert!(open_attachment(&sealed, &b64url(&[0; 32]), &iv).is_err());
     }
 
     #[test]

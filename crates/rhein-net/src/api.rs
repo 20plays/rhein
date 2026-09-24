@@ -171,6 +171,24 @@ impl Api {
         self.post(&format!("/users/{}/keypackages/claim", urlencoding::encode(user_id)), &serde_json::json!({})).await
     }
 
+    /// Starts a conversation (`kind` is `dm` or `gc`); a DM with someone we already have one with
+    /// comes back as that one.
+    pub async fn create_conversation(&self, kind: &str, members: &[String], policy: Option<&serde_json::Value>) -> ApiResult<serde_json::Value> {
+        let mut body = serde_json::json!({ "kind": kind, "members": members });
+        if let Some(policy) = policy {
+            body["policy"] = policy.clone();
+        }
+        self.post("/conversations", &body).await
+    }
+
+    pub async fn accept_message_request(&self, conversation_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/request/accept", urlencoding::encode(conversation_id)), &serde_json::json!({})).await
+    }
+
+    pub async fn decline_message_request(&self, conversation_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/request/decline", urlencoding::encode(conversation_id)), &serde_json::json!({})).await
+    }
+
     /// Frames of a conversation after `after` (seq), oldest first.
     pub async fn dm_frames(&self, conversation_id: &str, after: Option<u64>, limit: u32) -> ApiResult<serde_json::Value> {
         let mut path = format!("/conversations/{}/messages?limit={limit}", urlencoding::encode(conversation_id));

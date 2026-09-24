@@ -6183,6 +6183,8 @@ dependencies = [
  "emojis",
  "gpui",
  "log",
+ "openmls",
+ "openmls_rust_crypto",
  "regex",
  "reqwest",
  "rhein-auth",
