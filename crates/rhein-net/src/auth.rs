@@ -86,6 +86,26 @@ pub async fn register(
     Ok(SignedIn { session, export_key: finished.export_key })
 }
 
+/// Proves the password again inside a signed-in session (no new device session), and hands back
+/// the OPAQUE export key: how a restored session unlocks the encrypted-DM vault.
+pub async fn reauthenticate(home: &Api, password: &str, ksf: &SerenityKsf) -> Result<Vec<u8>> {
+    let start = rhein_auth::login_start(password)?;
+    let answer: serde_json::Value = home
+        .post("/auth/opaque/reauth/start", &serde_json::json!({ "start_login_request": start.request.clone() }))
+        .await
+        .context("reauthentication")?;
+    let login_response = answer["login_response"].as_str().context("no login response")?;
+    let finished = start.finish(password, login_response, ksf).context("That password was not accepted.")?;
+    let _: serde_json::Value = home
+        .post(
+            "/auth/opaque/reauth/finish",
+            &serde_json::json!({ "login_id": answer["login_id"], "finish_login_request": finished.message }),
+        )
+        .await
+        .context("That password was not accepted.")?;
+    Ok(finished.export_key)
+}
+
 /// Trades a short-lived, audience-bound assertion from the home server for a session on the guild
 /// server named `audience`. After this the home server is off the guild's hot path.
 pub async fn guild_session(home: &Api, guild: &Api, audience: &str) -> Result<GuildSession> {

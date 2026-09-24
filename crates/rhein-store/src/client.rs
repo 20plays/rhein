@@ -18,6 +18,8 @@ use rhein_proto::{
 };
 
 use crate::io::{Io, join};
+
+mod dm_view;
 use crate::persist::{self, Saved};
 
 const PAGE: u32 = 50;
@@ -163,6 +165,8 @@ pub struct Staged {
 pub enum StagedState {
     Uploading,
     Ready(Box<Attachment>),
+    /// For an encrypted DM: the bytes stay on this device until they are sealed and sent.
+    Local(std::sync::Arc<Vec<u8>>),
     Failed(String),
 }
 
@@ -240,6 +244,7 @@ pub struct Client {
     pub dm: Option<crate::dm::DmStatus>,
     pub dm_error: Option<String>,
     dm_task: Option<Task<()>>,
+    dm_engine: Option<dm_view::SharedEngine>,
     /// While adding an account: the one we came from (user id, name), to go back to.
     pub returning_to: Option<(String, String)>,
     /// Everything the sources found, before the sharing preferences filter it.
@@ -319,6 +324,7 @@ impl Client {
             dm: None,
             dm_error: None,
             dm_task: None,
+            dm_engine: None,
             local_activities: Vec::new(),
             rpc_status: rhein_rpc::Status::default(),
             artwork: HashMap::new(),
@@ -477,6 +483,7 @@ impl Client {
         let me = self.home.as_ref().map(|h| h.user_id.clone());
         if let Some(me) = &me {
             crate::dm::Secrets::remove(me);
+            crate::conversations::Engine::remove(me);
         }
         let next = me.and_then(|id| persist::remove(&id));
         self.reset();
@@ -524,6 +531,35 @@ impl Client {
         cx.notify();
     }
 
+    /// Unlocks encrypted DMs in a session restored without the password: proves the password to
+    /// the home server again (no new device session) and opens the vault with what that yields.
+    pub fn unlock_dm(&mut self, password: String, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        self.dm_error = None;
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                let ksf = SerenityKsf::memory_constrained();
+                auth::reauthenticate(&api, &password, &ksf).await
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(export_key) => {
+                        if let Some(home) = this.home.as_mut() {
+                            home.dm_wrapper = Some(rhein_mls::vault::recovery_wrapper(&export_key));
+                        }
+                        this.bring_up_dm(cx);
+                    }
+                    Err(err) => this.dm_error = Some(friendly(&err)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Opens the DM recovery keyring and brings cross-signing up, in the background.
     fn bring_up_dm(&mut self, cx: &mut Context<Self>) {
         let Some(home) = &self.home else { return };
@@ -535,8 +571,9 @@ impl Client {
                 match result {
                     Ok(status) => {
                         log::info!("DM keys: vault {}, cross-signed {}", status.vault_mode, status.cross_signed);
-                        this.dm = Some(status);
                         this.dm_error = None;
+                        this.open_dm_engine(&status, cx);
+                        this.dm = Some(status);
                     }
                     Err(err) => {
                         log::warn!("DM keys unavailable: {err:#}");
@@ -557,6 +594,7 @@ impl Client {
         self.dm = None;
         self.dm_error = None;
         self.dm_task = None;
+        self.dm_engine = None;
         self.sharing = None;
         self.local_activities.clear();
         self.servers.clear();
@@ -978,6 +1016,11 @@ impl Client {
 
     /// Acknowledges the newest message of a channel, fetching it when the history isn't loaded.
     pub fn mark_read(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        if self.is_dm(&channel_id) {
+            // Read state of an encrypted conversation travels inside it (receipts), not to a server.
+            self.unread_conversations.remove(&channel_id);
+            return;
+        }
         if let Some(mark) = self.read.get_mut(&channel_id) {
             mark.unread = 0;
             mark.mentions = 0;
@@ -1435,7 +1478,12 @@ impl Client {
             Event::FriendRemove { user_id } => crate::social::remove_friend(&mut self.friends, &user_id),
             Event::ConversationActivity { conversation_id, message } => {
                 if message && self.home_conversation.as_deref() != Some(conversation_id.as_str()) {
-                    self.unread_conversations.insert(conversation_id);
+                    self.unread_conversations.insert(conversation_id.clone());
+                }
+                // Keep every conversation's group current, not only the one on screen: its
+                // epochs move whether or not someone is looking.
+                if message && self.dm_engine.is_some() && self.is_dm(&conversation_id) {
+                    self.sync_dm(conversation_id, cx);
                 }
                 self.load_conversations(cx);
             }
@@ -1486,7 +1534,8 @@ impl Client {
 
     pub fn selected_channel(&self) -> Option<&str> {
         if self.showing_home {
-            return None;
+            // An open private conversation is shown in the chat view like a channel.
+            return self.home_conversation.as_deref();
         }
         let guild = self.selected_guild.as_ref()?;
         self.selected_channel.get(guild).map(String::as_str)
@@ -1505,7 +1554,10 @@ impl Client {
         if let Some(id) = &id {
             self.unread_conversations.remove(id);
         }
-        self.home_conversation = id;
+        self.home_conversation = id.clone();
+        if let Some(id) = id {
+            self.sync_dm(id, cx);
+        }
         cx.notify();
     }
 
@@ -1678,6 +1730,13 @@ impl Client {
 
     /// Loads the newest page, or with `older` the page before the oldest message we hold.
     pub fn load_history(&mut self, channel_id: String, older: bool, cx: &mut Context<Self>) {
+        if self.is_dm(&channel_id) {
+            // An encrypted conversation's whole history is local; there is nothing older to page.
+            if !older {
+                self.sync_dm(channel_id, cx);
+            }
+            return;
+        }
         let Some(api) = self.api_for_channel(&channel_id) else { return };
         let log = self.logs.entry(channel_id.clone()).or_default();
         if log.loading || (older && log.reached_start) {
@@ -2159,7 +2218,16 @@ impl Client {
             && let Some(name) = self.home.as_ref().and_then(|h| h.display_name.clone()) {
                 return name;
             }
-        localpart(user_id).to_owned()
+        // Outside a guild (a DM, say): what a friend entry, a fetched profile or any shared
+        // guild says, before falling back to the bare localpart.
+        let known = self
+            .friends
+            .iter()
+            .find(|f| f.user_id == user_id)
+            .and_then(|f| f.display_name.clone())
+            .or_else(|| self.profiles.get(user_id).and_then(|p| p.as_ref()).and_then(|p| p.display_name.clone()))
+            .or_else(|| self.members.values().flatten().find(|m| m.user_id == user_id).map(|m| m.shown_name().to_owned()));
+        known.filter(|n| !n.is_empty()).unwrap_or_else(|| localpart(user_id).to_owned())
     }
 
     /// A user's picture as seen in a guild: the member record's `avatar_ref` through the guild
@@ -2210,6 +2278,15 @@ impl Client {
     /// Sends the composer's text with every finished staged upload, optionally as a reply.
     pub fn send_message(&mut self, channel_id: String, content: String, reply_to: Option<String>, cx: &mut Context<Self>) {
         let content = content.trim().to_owned();
+        if self.is_dm(&channel_id) {
+            if self.staged.get(&channel_id).is_some_and(|l| l.iter().any(|s| matches!(s.state, StagedState::Uploading))) {
+                self.error = Some("Wait until the files are ready.".into());
+                cx.notify();
+                return;
+            }
+            self.send_dm(channel_id, content, reply_to, cx);
+            return;
+        }
         let staged = self.staged.get(&channel_id);
         if staged.is_some_and(|list| list.iter().any(|s| matches!(s.state, StagedState::Uploading))) {
             self.error = Some("Wait until the uploads have finished.".into());
@@ -2370,6 +2447,30 @@ impl Client {
     }
 
     fn upload_staged(&mut self, channel_id: String, id: u64, name: String, mime: String, source: Upload, cx: &mut Context<Self>) {
+        if self.is_dm(&channel_id) {
+            // Never uploaded as is: the bytes wait here and are sealed when the message is sent.
+            let io = self.io.clone();
+            cx.spawn(async move |this, cx| {
+                let result = join(io.spawn(async move {
+                    Ok(match source {
+                        Upload::Bytes(bytes) => bytes,
+                        Upload::Path(path) => tokio::task::spawn_blocking(move || std::fs::read(path)).await??,
+                    })
+                }))
+                .await;
+                this.update(cx, |this, cx| {
+                    let Some(entry) = this.staged.get_mut(&channel_id).and_then(|l| l.iter_mut().find(|s| s.id == id)) else { return };
+                    entry.state = match result {
+                        Ok(bytes) => StagedState::Local(std::sync::Arc::new(bytes)),
+                        Err(err) => StagedState::Failed(friendly(&err)),
+                    };
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
         let Some(home) = self.home.as_ref().map(|h| h.api.clone()) else { return };
         let guild_id = self.guild_of_channel(&channel_id).map(|g| g.guild.id.clone()).unwrap_or_default();
         let io = self.io.clone();
@@ -2571,16 +2672,31 @@ impl Client {
     }
 
     pub fn edit_message(&mut self, channel_id: String, message_id: String, content: String, cx: &mut Context<Self>) {
+        if self.is_dm(&channel_id) {
+            return self.dm_payload(channel_id, rhein_mls::payload::Payload::Edit { target: message_id, text: content }, cx);
+        }
         let Some(api) = self.api_for_channel(&channel_id) else { return };
         self.fire(cx, async move { api.edit_message(&channel_id, &message_id, &content).await.map(drop) });
     }
 
     pub fn delete_message(&mut self, channel_id: String, message_id: String, cx: &mut Context<Self>) {
+        if self.is_dm(&channel_id) {
+            return self.dm_payload(channel_id, rhein_mls::payload::Payload::Delete { target: message_id }, cx);
+        }
         let Some(api) = self.api_for_channel(&channel_id) else { return };
         self.fire(cx, async move { api.delete_message(&channel_id, &message_id).await.map(drop) });
     }
 
     pub fn toggle_reaction(&mut self, channel_id: String, message_id: String, emoji: String, cx: &mut Context<Self>) {
+        let mine = self
+            .logs
+            .get(&channel_id)
+            .and_then(|l| l.messages.iter().find(|m| m.id == message_id))
+            .and_then(|m| m.reactions.iter().find(|r| r.emoji == emoji))
+            .is_some_and(|r| r.me);
+        if self.is_dm(&channel_id) {
+            return self.dm_payload(channel_id, rhein_mls::payload::Payload::Reaction { target: message_id, emoji, add: !mine }, cx);
+        }
         let Some(api) = self.api_for_channel(&channel_id) else { return };
         let mine = self
             .logs
@@ -2592,6 +2708,9 @@ impl Client {
     }
 
     pub fn send_typing(&mut self, channel_id: &str) {
+        if self.is_dm(channel_id) {
+            return;
+        }
         let Some(server) = self.server_of_channel(channel_id) else { return };
         if let Some(gw) = self.server(server).and_then(|s| s.gateway.as_ref()) {
             gw.send(rhein_proto::typing(channel_id));

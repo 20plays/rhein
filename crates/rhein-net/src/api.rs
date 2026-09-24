@@ -189,6 +189,20 @@ impl Api {
         self.post(&format!("/conversations/{}/request/decline", urlencoding::encode(conversation_id)), &serde_json::json!({})).await
     }
 
+    /// One page of the sealed history mirror for a conversation (`scope`).
+    pub async fn backup_page(&self, scope: &str, after: Option<&str>) -> ApiResult<serde_json::Value> {
+        let mut path = format!("/vault/backup?scope={}", urlencoding::encode(scope));
+        if let Some(after) = after {
+            path.push_str(&format!("&after={}", urlencoding::encode(after)));
+        }
+        self.get(&path).await
+    }
+
+    /// Stores sealed mirror rows `{scope, item, ciphertext}`.
+    pub async fn put_backup(&self, items: &[serde_json::Value]) -> ApiResult<serde_json::Value> {
+        self.put("/vault/backup", &serde_json::json!({ "items": items })).await
+    }
+
     /// Frames of a conversation after `after` (seq), oldest first.
     pub async fn dm_frames(&self, conversation_id: &str, after: Option<u64>, limit: u32) -> ApiResult<serde_json::Value> {
         let mut path = format!("/conversations/{}/messages?limit={limit}", urlencoding::encode(conversation_id));

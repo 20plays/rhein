@@ -108,6 +108,10 @@ pub struct Engine {
     keyring: Option<Keyring>,
     stored: Stored,
     groups: HashMap<String, MlsGroup>,
+    /// Conversations whose history mirror was read this session.
+    mirrored: HashSet<String>,
+    /// Mirror rows waiting to be sealed and stored: (conversation, item, value).
+    mirror_out: Vec<(String, String, Value)>,
     provider_path: PathBuf,
     state_path: PathBuf,
 }
@@ -148,6 +152,8 @@ impl Engine {
             keyring,
             stored,
             groups: HashMap::new(),
+            mirrored: HashSet::new(),
+            mirror_out: Vec::new(),
             provider_path,
             state_path,
         })
@@ -356,6 +362,151 @@ impl Engine {
         Ok(wanted.len())
     }
 
+    // ------------------------------------------------------------------ history mirror
+    //
+    // The web client's `Backup`: what a device opened, sealed under the account's recovery
+    // keyring and stored on the home server, so the account's next device (or the web client)
+    // can show history from before it joined. One row per frame id holding its body (1 for a
+    // signal, null for a deleted message), plus `rx` (reactions) and `cx` (edits, deletions,
+    // pins, the call SFU) per conversation.
+
+    fn queue_mirror(&mut self, conversation: &str, item: &str, value: Value) {
+        if self.keyring.is_some() {
+            self.mirror_out.push((conversation.to_owned(), item.to_owned(), value));
+        }
+    }
+
+    /// Queues the fold rows for a conversation from its current state.
+    fn queue_folds(&mut self, conversation: &str) {
+        let Some(state) = self.stored.conversations.get(conversation) else { return };
+        let mut rx = Vec::new();
+        for (target, by_emoji) in &state.reactions {
+            let mut per_user: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for (emoji, users) in by_emoji {
+                for u in users {
+                    per_user.entry(u).or_default().push(emoji);
+                }
+            }
+            for (u, e) in per_user {
+                rx.push(json!({ "t": target, "u": u, "e": e }));
+            }
+        }
+        let cx = json!({
+            "edits": state.messages.iter().filter_map(|m| Some(json!({ "t": m.id, "x": m.edited.as_ref()?, "by": m.sender }))).collect::<Vec<_>>(),
+            "dead": state.messages.iter().filter(|m| m.deleted).map(|m| m.id.clone()).collect::<Vec<_>>(),
+            "pins": state.pins.iter().map(|(t, (by, author, snippet))| json!({ "t": t, "by": by, "author": author, "snippet": snippet })).collect::<Vec<_>>(),
+            "sfu": state.call_sfu,
+        });
+        self.queue_mirror(conversation, "rx", Value::Array(rx));
+        self.queue_mirror(conversation, "cx", cx);
+    }
+
+    async fn flush_mirror(&mut self, api: &Api) {
+        let Some(keyring) = self.keyring.clone() else { return };
+        if self.mirror_out.is_empty() {
+            return;
+        }
+        let rows: Vec<Value> = self
+            .mirror_out
+            .iter()
+            .map(|(scope, item, value)| json!({ "scope": scope, "item": item, "ciphertext": vault::seal(&keyring.key, value.to_string().as_bytes()) }))
+            .collect();
+        for chunk in rows.chunks(512) {
+            if let Err(err) = api.put_backup(chunk).await {
+                log::warn!("history mirror: {err}");
+                return;
+            }
+        }
+        self.mirror_out.clear();
+    }
+
+    /// Reads a conversation's mirror and fills in what this device never opened itself.
+    async fn pull_mirror(&mut self, api: &Api, conversation: &str, frames: &[Value]) -> Result<()> {
+        let Some(keyring) = self.keyring.clone() else { return Ok(()) };
+        if !self.mirrored.insert(conversation.to_owned()) {
+            return Ok(());
+        }
+        let mut rows: HashMap<String, Value> = HashMap::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = api.backup_page(conversation, after.as_deref()).await?;
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            for row in &items {
+                let Ok(bytes) = keyring.open(row["ciphertext"].as_str().unwrap_or_default()) else { continue };
+                let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
+                rows.insert(row["item"].as_str().unwrap_or_default().to_owned(), value);
+            }
+            if page["complete"].as_bool().unwrap_or(true) || items.is_empty() {
+                break;
+            }
+            after = page["cursor"].as_str().map(str::to_owned);
+            if after.is_none() {
+                break;
+            }
+        }
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let state = self.stored.conversations.entry(conversation.to_owned()).or_default();
+        let known: HashSet<String> = state.messages.iter().map(|m| m.id.clone()).collect();
+        for frame in frames.iter().filter(|f| f["kind"] == "application") {
+            let id = frame["id"].as_str().unwrap_or_default();
+            if known.contains(id) {
+                continue;
+            }
+            if let Some(Value::String(raw)) = rows.get(id) {
+                state.messages.push(DmMessage {
+                    id: id.to_owned(),
+                    seq: frame["seq"].as_u64().unwrap_or(0),
+                    sender: frame["sender"].as_str().unwrap_or_default().to_owned(),
+                    sender_device: frame["sender_device"].as_str().unwrap_or_default().to_owned(),
+                    created_at: frame["created_at"].as_i64().unwrap_or(0),
+                    body: Body::decode(raw),
+                    edited: None,
+                    deleted: false,
+                });
+            }
+        }
+        state.messages.sort_by_key(|m| m.seq);
+        if let Some(Value::Array(rx)) = rows.get("rx") {
+            for row in rx {
+                let (Some(t), Some(u)) = (row["t"].as_str(), row["u"].as_str()) else { continue };
+                for e in row["e"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    let users = state.reactions.entry(t.to_owned()).or_default().entry(e.to_owned()).or_default();
+                    if !users.iter().any(|x| x == u) {
+                        users.push(u.to_owned());
+                    }
+                }
+            }
+        }
+        if let Some(cx) = rows.get("cx") {
+            for e in cx["edits"].as_array().into_iter().flatten() {
+                if let (Some(t), Some(x)) = (e["t"].as_str(), e["x"].as_str())
+                    && let Some(m) = state.messages.iter_mut().find(|m| m.id == t)
+                    && m.edited.is_none()
+                {
+                    m.edited = Some(x.to_owned());
+                }
+            }
+            for dead in cx["dead"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if let Some(m) = state.messages.iter_mut().find(|m| m.id == dead) {
+                    m.deleted = true;
+                    m.body = Body::default();
+                }
+            }
+            for p in cx["pins"].as_array().into_iter().flatten() {
+                if let Some(t) = p["t"].as_str() {
+                    let s = |k: &str| p[k].as_str().unwrap_or_default().to_owned();
+                    state.pins.entry(t.to_owned()).or_insert((s("by"), s("author"), s("snippet")));
+                }
+            }
+            if state.call_sfu.is_none() {
+                state.call_sfu = cx["sfu"].as_str().map(str::to_owned);
+            }
+        }
+        Ok(())
+    }
+
     // ------------------------------------------------------------------ frames
 
     async fn frames_after(api: &Api, conversation: &str, after: u64) -> Result<Vec<Value>> {
@@ -381,6 +532,12 @@ impl Engine {
     pub async fn sync(&mut self, api: &Api, conversation: &str) -> Result<Synced> {
         let start = self.stored.conversations.get(conversation).map_or(0, |c| c.last_seq);
         let frames = Self::frames_after(api, conversation, start).await?;
+        if !self.mirrored.contains(conversation) {
+            let everything = if start == 0 { frames.clone() } else { Self::frames_after(api, conversation, 0).await? };
+            if let Err(err) = self.pull_mirror(api, conversation, &everything).await {
+                log::info!("history mirror for {conversation}: {err:#}");
+            }
+        }
         let mut synced = Synced::default();
         let mut rejoins: Vec<(String, String)> = Vec::new();
 
@@ -476,6 +633,7 @@ impl Engine {
             });
             self.publish_group_info(api, conversation).await;
         }
+        self.flush_mirror(api).await;
         self.save()?;
         Ok(synced)
     }
@@ -487,6 +645,7 @@ impl Engine {
         let author_of = |state: &ConversationState, target: &str| state.messages.iter().find(|m| m.id == target).map(|m| m.sender.clone());
         match payload {
             Payload::Message(raw) => {
+                let row = (conversation.to_owned(), id.clone(), Value::String(raw.clone()));
                 state.messages.push(DmMessage {
                     id,
                     seq: frame["seq"].as_u64().unwrap_or(0),
@@ -497,6 +656,9 @@ impl Engine {
                     edited: None,
                     deleted: false,
                 });
+                if self.keyring.is_some() {
+                    self.mirror_out.push(row);
+                }
                 return true;
             }
             Payload::Reaction { target, emoji, add } => {
@@ -519,6 +681,10 @@ impl Engine {
                 }
                 state.reactions.remove(&target);
                 state.pins.remove(&target);
+                // The body leaves the mirror too.
+                if self.keyring.is_some() {
+                    self.mirror_out.push((conversation.to_owned(), target, Value::Null));
+                }
             }
             Payload::Pin { target, add, author, snippet } => {
                 if add {
@@ -532,6 +698,9 @@ impl Engine {
             }
             _ => {}
         }
+        // A signal: the frame is marked as one, and the folds it changed are stored.
+        self.queue_mirror(conversation, &id, json!(1));
+        self.queue_folds(conversation);
         false
     }
 
@@ -585,6 +754,7 @@ impl Engine {
         let frame = json!({ "id": sent["id"], "seq": sent["seq"], "created_at": sent["created_at"] });
         let (user, device) = (self.user_id.clone(), self.device_id.clone());
         self.absorb(conversation, &frame, &user, &device, payload);
+        self.flush_mirror(api).await;
         self.save()?;
         Ok(sent["id"].as_str().unwrap_or_default().to_owned())
     }

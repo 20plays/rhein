@@ -16,6 +16,8 @@ const PATH: &str = "/org/mpris/MediaPlayer2";
 pub const POLL_EVERY: Duration = Duration::from_secs(5);
 /// Position jitter below this is not a seek, so the timestamps stay put.
 const SEEK_TOLERANCE_MS: u64 = 2500;
+const BROWSERS: [&str; 9] = ["firefox", "mozilla", "chrom", "brave", "vivaldi", "opera", "edge", "zen", "librewolf"];
+const MUSIC_SITES: [&str; 6] = ["music.youtube.com", "open.spotify.com", "soundcloud.com", "bandcamp.com", "music.apple.com", "deezer.com"];
 const VIDEO_SITES: [&str; 6] = ["youtube.com", "youtu.be", "twitch.tv", "netflix.com", "vimeo.com", "primevideo.com"];
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -34,9 +36,13 @@ pub struct Track {
 /// draw progress.
 pub fn activity(track: &Track, start: u64) -> Option<Value> {
     let title = track.title.clone()?;
-    let video = track.url.as_deref().and_then(|u| url::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_owned)).is_some_and(|host| {
-        VIDEO_SITES.iter().any(|site| host == *site || host.ends_with(&format!(".{site}")))
-    });
+    // What plays in a browser is usually a video, and what someone watches is more private than
+    // a song, so browsers count as video unless the page is a known music site. Dedicated players
+    // count as music unless the page is a known video site.
+    let host = track.url.as_deref().and_then(|u| url::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_owned));
+    let on = |sites: &[&str]| host.as_deref().is_some_and(|h| sites.iter().any(|s| h == *s || h.ends_with(&format!(".{s}"))));
+    let browser = BROWSERS.iter().any(|b| track.player.to_lowercase().contains(b));
+    let video = if browser { !on(&MUSIC_SITES) } else { on(&VIDEO_SITES) };
     let mut timestamps = json!({ "start": start });
     if let Some(length) = track.length_ms.filter(|l| *l > 0) {
         timestamps["end"] = json!(start + length);
@@ -182,6 +188,15 @@ mod tests {
         assert_eq!(a["state"], "A, B");
         assert_eq!(a["timestamps"]["end"], 201_000);
         assert_eq!(a["assets"]["large_image"], "https://i.scdn.co/image/x");
+    }
+
+    #[test]
+    fn browsers_are_video_unless_music() {
+        let firefox = Track { player: "Mozilla Firefox".into(), url: Some("https://example.org/talk".into()), ..track() };
+        assert_eq!(activity(&firefox, 0).unwrap()["type"], 3);
+        let spotify_web = Track { url: Some("https://open.spotify.com/track/x".into()), ..firefox.clone() };
+        assert_eq!(activity(&spotify_web, 0).unwrap()["type"], 2);
+        assert_eq!(activity(&Track { url: None, ..firefox }, 0).unwrap()["type"], 3);
     }
 
     #[test]

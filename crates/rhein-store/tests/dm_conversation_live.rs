@@ -106,6 +106,10 @@ async fn two_accounts_and_a_new_device() {
     let mut ea2 = device(&a2_home, &a2).await;
     ea2.sync(&a2_home, &id).await.expect("self-join");
     assert!(ea2.has_group(&id), "the new device let itself in");
+    // History from before this device joined comes back from the account's sealed mirror, with
+    // A's edit applied and B's reaction.
+    assert_eq!(texts(&ea2, &id), ["hello, B", "hi A", "a file"]);
+    assert_eq!(ea2.conversation(&id).unwrap().reactions[&hello]["👍"], std::slice::from_ref(&b_user));
     eb.sync(&b_home, &id).await.expect("b sees the external commit");
     eb.send(&b_home, &id, Payload::Message("welcome back".into())).await.unwrap();
     ea2.sync(&a2_home, &id).await.unwrap();
@@ -114,5 +118,64 @@ async fn two_accounts_and_a_new_device() {
     eb.sync(&b_home, &id).await.unwrap();
     assert_eq!(texts(&eb, &id).last().map(String::as_str), Some("from the new device"));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A group chat across two federated servers (`RHEIN_LIVE` and `RHEIN_LIVE_B`): the sequencer
+/// lives on the creator's home server, the other members reach it through theirs.
+#[tokio::test]
+async fn group_across_servers() {
+    let (Ok(server), Ok(other)) = (std::env::var("RHEIN_LIVE"), std::env::var("RHEIN_LIVE_B")) else {
+        eprintln!("RHEIN_LIVE / RHEIN_LIVE_B not set; skipping");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("rhein-dm-fed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // SAFETY: tests here set the same variable only when it is unset, to a per-process dir.
+    if std::env::var("RHEIN_CONFIG_DIR").is_err() {
+        unsafe { std::env::set_var("RHEIN_CONFIG_DIR", &dir) };
+    }
+    let http = reqwest::Client::new();
+    let (doc_a, doc_b) = (discover(&http, &server).await.unwrap(), discover(&http, &other).await.unwrap());
+    let tag = std::process::id();
+    let (home_a, home_b, home_c) = (
+        Api::new(http.clone(), &doc_a.api, None),
+        Api::new(http.clone(), &doc_b.api, None),
+        Api::new(http.clone(), &doc_a.api, None),
+    );
+    let a = register(&home_a, &format!("fa{tag}")).await;
+    let b = register(&home_b, &format!("fb{tag}")).await;
+    let c = register(&home_c, &format!("fc{tag}")).await;
+    let (mut ea, mut eb, mut ec) = (device(&home_a, &a).await, device(&home_b, &b).await, device(&home_c, &c).await);
+    let (ua, ub, uc) = (a.session.user_id.clone(), b.session.user_id.clone(), c.session.user_id.clone());
+
+    let convo = home_a.create_conversation("gc", &[ub.clone(), uc.clone()], None).await.expect("group");
+    let id = convo["id"].as_str().unwrap().to_owned();
+    let claimed = ea.establish(&home_a, &id, &[ua.clone(), ub.clone(), uc.clone()], None).await.unwrap();
+    assert!(claimed.refused.is_empty() && claimed.missing.is_empty(), "{claimed:?}");
+    ea.send(&home_a, &id, Payload::Message("hello, both servers".into())).await.unwrap();
+    for (engine, home) in [(&mut eb, &home_b), (&mut ec, &home_c)] {
+        let _ = home.accept_message_request(&id).await;
+        // Frames reach another server's members through federation, which takes a moment.
+        for _ in 0..20 {
+            engine.sync(home, &id).await.unwrap();
+            if !texts(engine, &id).is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert_eq!(texts(engine, &id), ["hello, both servers"], "{:?}", engine.conversation(&id));
+    }
+    eb.send(&home_b, &id, Payload::Message("from the other server".into())).await.unwrap();
+    for (engine, home) in [(&mut ea, &home_a), (&mut ec, &home_c)] {
+        for _ in 0..20 {
+            engine.sync(home, &id).await.unwrap();
+            if texts(engine, &id).len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        assert_eq!(texts(engine, &id), ["hello, both servers", "from the other server"]);
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

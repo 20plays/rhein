@@ -1,5 +1,5 @@
-//! The home view's main area: the friends page, or a private conversation (whose messages are
-//! end-to-end encrypted and arrive with milestone M3).
+//! The home view's main area: the friends page, with adding friends and starting group chats.
+//! An open private conversation is shown by the chat view instead.
 
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
@@ -44,12 +44,14 @@ pub struct HomeView {
     client: Entity<Client>,
     tab: Tab,
     add: Entity<TextInput>,
+    group: Entity<TextInput>,
     _subs: Vec<Subscription>,
 }
 
 impl HomeView {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let add = cx.new(|cx| TextInput::new("@someone:example.org", cx));
+        let group = cx.new(|cx| TextInput::new("@one:example.org, @two:example.org", cx));
         let subs = vec![
             cx.observe(&client, |_, _, cx| cx.notify()),
             cx.subscribe_in(&add, window, |this, _, event: &InputEvent, _, cx| {
@@ -57,8 +59,35 @@ impl HomeView {
                     this.send_request(cx);
                 }
             }),
+            cx.subscribe_in(&group, window, |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Submit) {
+                    this.start_group(cx);
+                }
+            }),
         ];
-        Self { client, tab: Tab::Online, add, _subs: subs }
+        Self { client, tab: Tab::Online, add, group, _subs: subs }
+    }
+
+    /// An encrypted group chat with the addresses typed in, separated by commas or spaces.
+    fn start_group(&mut self, cx: &mut Context<Self>) {
+        let members: Vec<String> = self
+            .group
+            .read(cx)
+            .text()
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(|m| if m.starts_with('@') { m.to_owned() } else { format!("@{m}") })
+            .collect();
+        if members.is_empty() || members.iter().any(|m| !m.contains(':')) {
+            self.client.update(cx, |c, cx| {
+                c.error = Some("Use full addresses, like @name:server, separated by commas.".into());
+                cx.notify();
+            });
+            return;
+        }
+        self.group.update(cx, |i, cx| i.clear(cx));
+        self.client.update(cx, |c, cx| c.new_group(members, cx));
     }
 
     fn send_request(&mut self, cx: &mut Context<Self>) {
@@ -196,96 +225,27 @@ impl HomeView {
                             .gap_2()
                             .child(div().flex_1().child(self.add.clone()))
                             .child(Button::new("friend-send", "Send request").primary().on_click(cx.listener(|v, _, _, cx| v.send_request(cx)))),
+                    )
+                    .child(div().pt_2().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).child("New group chat"))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_1().child(self.group.clone()))
+                            .child(Button::new("group-start", "Start").icon(Icon::Lock).on_click(cx.listener(|v, _, _, cx| v.start_group(cx)))),
                     ),
             )
             .child(list)
             .into_any_element()
     }
 
-    fn conversation_page(&self, id: &str, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let client = self.client.read(cx);
-        let Some(conversation) = client.conversations.iter().find(|c| c.id == id).cloned() else {
-            return div().p_6().text_color(t.text_faint).child("This conversation is gone.").into_any_element();
-        };
-        let title = client.conversation_title(&conversation);
-        let me = client.user_id().unwrap_or_default().to_owned();
-        let members: Vec<(String, String)> = conversation
-            .members
-            .iter()
-            .map(|m| (m.user_id.clone(), client.friend_or_local_name(&m.user_id)))
-            .collect();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(size::HEADER)
-                    .flex_none()
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(t.border)
-                    .child(icon(if conversation.kind == "gc" { Icon::Users } else { Icon::AtSign }).text_color(t.text_faint))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .when(conversation.request_state.as_deref() == Some("pending"), |d| {
-                        d.child(rhein_ui::Tag("REQUEST"))
-                    }),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_4()
-                    .p_8()
-                    .child(
-                        div()
-                            .flex()
-                            .children(members.iter().filter(|(u, _)| *u != me).take(5).map(|(u, n)| {
-                                div().ml(px(-8.)).child(Avatar::new(u.clone(), n.clone()).size(px(56.)))
-                            })),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_color(t.text_muted)
-                            .child(icon(Icon::Lock).text_color(t.text_faint))
-                            .child("Messages here are end-to-end encrypted."),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(460.))
-                            .text_center()
-                            .text_size(text::SM)
-                            .text_color(t.text_faint)
-                            .child("Rhein can read and send them once encrypted direct messages land (milestone M3). Until then, use the Telium web client for this conversation."),
-                    )
-                    .child(
-                        div()
-                            .text_size(text::XS)
-                            .text_color(t.text_faint)
-                            .child(format!("Members: {}", members.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", "))),
-                    ),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for HomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
-        let open = self.client.read(cx).home_conversation.clone();
-        let page = match open {
-            Some(id) => self.conversation_page(&id, &t, cx),
-            None => self.friends_page(&t, cx),
-        };
+        // An open conversation is drawn by the chat view; this is the friends page.
+        let page = self.friends_page(&t, cx);
         div().flex_1().min_w_0().h_full().bg(t.bg_main).text_color(t.text).child(page)
     }
 }

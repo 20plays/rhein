@@ -141,6 +141,12 @@ impl Shell {
         window.focus(&focus, cx);
         // Debug builds can start on a given screen, for screenshots without input:
         // RHEIN_DEV_OPEN=home|settings|settings=Section|join|switcher|signout|account|switch=@user|profile=@user.
+        // RHEIN_DEV_UNLOCK=<password> unlocks encrypted DMs of a restored session at start.
+        #[cfg(debug_assertions)]
+        if let Ok(password) = std::env::var("RHEIN_DEV_UNLOCK") {
+            let client = client.clone();
+            cx.defer(move |cx| client.update(cx, |c, cx| c.unlock_dm(password, cx)));
+        }
         #[cfg(debug_assertions)]
         if let Ok(what) = std::env::var("RHEIN_DEV_OPEN") {
             cx.defer_in(window, move |this: &mut Self, window, cx| match what.as_str() {
@@ -167,6 +173,18 @@ impl Shell {
                 }
                 // profile=@user:server opens that card once members are in; settings=Activity
                 // opens a settings section.
+                // The first private conversation, once the list is in.
+                "dm" => {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                        this.update(cx, |v, cx| {
+                            let first = v.client.read(cx).conversations.first().map(|c| c.id.clone());
+                            v.client.update(cx, |c, cx| c.open_conversation(first, cx));
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 other if other.starts_with("switch=") => {
                     let user = other.trim_start_matches("switch=").to_owned();
                     this.client.update(cx, |c, cx| c.switch_account(&user, cx));
@@ -573,6 +591,13 @@ impl Shell {
             }).with_icon(Icon::AtSign));
             let u = user_id.clone();
             entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(u.clone()))).with_icon(Icon::Copy));
+        }
+        if !myself {
+            let (c, u) = (self.client.clone(), user_id.clone());
+            entries.insert(1, MenuEntry::item("Message", move |_, cx| {
+                let u = u.clone();
+                c.update(cx, |c, cx| c.message_user(u, cx));
+            }).with_icon(Icon::MessageSquare));
         }
         if !myself && client.friend_state(&user_id).is_none() {
             let (c, u) = (self.client.clone(), user_id.clone());
@@ -1026,15 +1051,35 @@ impl Shell {
                         Some("pending_in") => Some(rhein_store::FriendAction::Accept),
                         _ => None,
                     };
-                    Button::new("profile-friend", label)
-                        .icon(Icon::UserPlus)
-                        .disabled(action.is_none())
-                        .on_click(move |_, _, cx| {
-                            if let Some(a) = action {
-                                let u = u.clone();
-                                c.update(cx, |c, cx| c.friend_action(a, u, cx));
-                            }
-                        })
+                    let (c2, u2, v) = (self.client.clone(), user_id.clone(), cx.weak_entity());
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("profile-message", "Message")
+                                .primary()
+                                .icon(Icon::MessageSquare)
+                                .on_click(move |_, _, cx| {
+                                    let u = u2.clone();
+                                    v.update(cx, |v, cx| {
+                                        v.profile_card = None;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                    c2.update(cx, |c, cx| c.message_user(u, cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("profile-friend", label)
+                                .icon(Icon::UserPlus)
+                                .disabled(action.is_none())
+                                .on_click(move |_, _, cx| {
+                                    if let Some(a) = action {
+                                        let u = u.clone();
+                                        c.update(cx, |c, cx| c.friend_action(a, u, cx));
+                                    }
+                                }),
+                        )
                 })
             })
             .when(!roles.is_empty(), |d| {
@@ -1852,7 +1897,11 @@ impl Render for Shell {
                             .flex_1()
                             .min_h_0()
                             .flex()
-                            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) }),
+                            .map(|d| {
+                                // An open conversation reads like a channel; the friends page is home's own view.
+                                let client = self.client.read(cx);
+                                if client.showing_home && client.home_conversation.is_none() { d.child(self.home.clone()) } else { d.child(self.chat.clone()) }
+                            }),
                     )
                     .child(status),
             )

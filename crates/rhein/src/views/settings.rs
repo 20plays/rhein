@@ -21,13 +21,22 @@ enum Section {
     Servers,
     Appearance,
     Activity,
+    Encryption,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 7] =
-        [Section::Account, Section::Devices, Section::Servers, Section::Appearance, Section::Activity, Section::Shortcuts, Section::About];
+    const ALL: [Section; 8] = [
+        Section::Account,
+        Section::Devices,
+        Section::Servers,
+        Section::Appearance,
+        Section::Activity,
+        Section::Encryption,
+        Section::Shortcuts,
+        Section::About,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -36,6 +45,7 @@ impl Section {
             Section::Servers => "Servers",
             Section::Appearance => "Appearance",
             Section::Activity => "Activity",
+            Section::Encryption => "Encryption",
             Section::Shortcuts => "Keyboard shortcuts",
             Section::About => "About Rhein",
         }
@@ -48,6 +58,7 @@ impl Section {
             Section::Servers => Icon::Server,
             Section::Appearance => Icon::Palette,
             Section::Activity => Icon::Gamepad,
+            Section::Encryption => Icon::Lock,
             Section::Shortcuts => Icon::Keyboard,
             Section::About => Icon::Info,
         }
@@ -99,6 +110,7 @@ pub struct SettingsView {
     status: Option<(bool, String)>,
     devices: Option<Result<Vec<Device>, String>>,
     add_server: Entity<TextInput>,
+    unlock_password: Entity<TextInput>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -131,6 +143,7 @@ impl SettingsView {
             TextInput::new("About me", cx).multiline(5).with_text(cached.as_ref().and_then(|p| p.bio.clone()).unwrap_or_default())
         });
         let add_server = cx.new(|cx| TextInput::new("chat.example.com", cx));
+        let unlock_password = cx.new(|cx| TextInput::new("Your account password", cx).masked());
         let subs = vec![
             cx.observe(&client, |this, _, cx| {
                 this.load_look(cx);
@@ -166,6 +179,7 @@ impl SettingsView {
             status: None,
             devices: None,
             add_server,
+            unlock_password,
             focus,
             _subs: subs,
         }
@@ -847,6 +861,97 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Encrypted DMs on this device: whether the recovery keyring is here, this device's key
+    /// fingerprint, and whether the account's identity vouches for it.
+    fn encryption_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let status = client.dm.clone();
+        let error = client.dm_error.clone();
+        let line = |label: &'static str, value: String, good: Option<bool>| {
+            div()
+                .flex()
+                .gap_4()
+                .py_1()
+                .child(div().w(px(180.)).flex_none().text_color(t.text_muted).child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(FONT_MONO)
+                        .text_size(text::SM)
+                        .text_color(match good {
+                            Some(true) => t.success,
+                            Some(false) => t.warning,
+                            None => t.text,
+                        })
+                        .child(value),
+                )
+        };
+        let mut body = div().flex().flex_col().gap_1().child(
+            div()
+                .pb_3()
+                .text_size(text::SM)
+                .text_color(t.text_faint)
+                .child("Direct messages and group chats are end-to-end encrypted with MLS. Their keys never leave your devices; your home server keeps only a copy sealed with a key derived from your password."),
+        );
+        match &status {
+            None => {
+                body = body.child(line("Status", error.clone().unwrap_or_else(|| "starting…".into()), Some(false)));
+            }
+            Some(s) => {
+                body = body
+                    .child(line("Key recovery", s.vault_mode.replace('_', " "), None))
+                    .child(line(
+                        "Recovery key on this device",
+                        s.locked.clone().map_or("available".into(), |why| format!("locked: {why}")),
+                        Some(s.locked.is_none()),
+                    ))
+                    .child(line("This device's key", s.fingerprint(), None))
+                    .child(line(
+                        "Cross-signing",
+                        match (&s.identity_key, s.cross_signed, &s.identity_problem) {
+                            (_, _, Some(problem)) => format!("problem: {problem}"),
+                            (None, _, _) => "no identity yet (set up by the Telium web client)".into(),
+                            (Some(_), true, _) => "this device is vouched for".into(),
+                            (Some(_), false, _) => "not vouched for yet".into(),
+                        },
+                        Some(s.identity_problem.is_none() && (s.identity_key.is_none() || s.cross_signed)),
+                    ))
+                    .children(s.immutable_id.clone().map(|id| line("Identity", id, None)));
+                if let Some(err) = &error {
+                    body = body.child(div().pt_2().text_size(text::SM).text_color(t.danger).child(err.clone()));
+                }
+            }
+        }
+        // A session restored without the password can't open the vault; proving it again does.
+        if status.as_ref().is_none_or(|s| s.locked.is_some()) {
+            let client = self.client.clone();
+            let input = self.unlock_password.clone();
+            body = body.child(
+                div()
+                    .pt_4()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_weight(FontWeight::MEDIUM).child("Unlock on this device"))
+                    .child(div().text_size(text::SM).text_color(t.text_faint).child("Enter your password once. It is checked with OPAQUE, so it never leaves this device."))
+                    .child(
+                        div().flex().gap_2().child(div().flex_1().child(self.unlock_password.clone())).child(
+                            Button::new("dm-unlock", "Unlock").primary().on_click(move |_, _, cx| {
+                                let password = input.read(cx).text().to_owned();
+                                if password.is_empty() {
+                                    return;
+                                }
+                                input.update(cx, |i, cx| i.clear(cx));
+                                client.update(cx, |c, cx| c.unlock_dm(password, cx));
+                            }),
+                        ),
+                    ),
+            );
+        }
+        body.into_any_element()
+    }
+
     fn shortcuts(&self, t: &Theme) -> AnyElement {
         div()
             .flex()
@@ -919,6 +1024,7 @@ impl Render for SettingsView {
             Section::Servers => self.servers_section(&t, cx),
             Section::Appearance => self.appearance(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
+            Section::Encryption => self.encryption_section(&t, cx),
             Section::Shortcuts => self.shortcuts(&t),
             Section::About => self.about(&t),
         };

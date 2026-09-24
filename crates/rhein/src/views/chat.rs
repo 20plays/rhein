@@ -226,8 +226,13 @@ impl ChatView {
         self.replying = None;
         let name = selected
             .as_deref()
-            .and_then(|id| self.client.read(cx).channel(id))
-            .map(|c| format!("message #{}", c.name))
+            .and_then(|id| {
+                let client = self.client.read(cx);
+                match client.conversations.iter().find(|c| c.id == id) {
+                    Some(c) => Some(format!("message @{}", client.conversation_title(c))),
+                    None => client.channel(id).map(|c| format!("message #{}", c.name)),
+                }
+            })
             .unwrap_or_else(|| "message".into());
         self.composer.update(cx, |c, cx| {
             c.clear(cx);
@@ -1062,6 +1067,7 @@ impl ChatView {
                 let (status, color) = match &s.state {
                     StagedState::Uploading => ("Uploading…".to_owned(), t.text_faint),
                     StagedState::Ready(_) => (format_size(s.size as i64), t.text_faint),
+                    StagedState::Local(_) => (format!("{} · encrypted when sent", format_size(s.size as i64)), t.text_faint),
                     StagedState::Failed(err) => (format!("Failed: {err}"), t.danger),
                 };
                 let thumb: Option<gpui::AnyElement> = match (&s.preview, &s.state) {
@@ -1257,7 +1263,7 @@ impl Render for ChatView {
                 .gap_2()
                 .child(icon(if client.showing_home { Icon::MessageSquare } else { Icon::Hash }).text_color(t.text_faint))
                 .child(if client.showing_home {
-                    "Direct messages arrive with end-to-end encryption in a later version."
+                    "Pick a conversation."
                 } else if client.guilds.is_empty() {
                     "No guilds yet. Create one or join with an invite (+ on the left)."
                 } else {
@@ -1274,8 +1280,17 @@ impl Render for ChatView {
         let loading = log.is_some_and(|l| l.loading);
         let reached_start = log.is_some_and(|l| l.reached_start);
         let history_error = log.and_then(|l| l.error.clone());
-        let name = channel.as_ref().map(|c| c.name.clone()).unwrap_or_default();
-        let topic = channel.as_ref().and_then(|c| c.topic.clone());
+        // A private conversation is shown here like a channel: its title, a lock, no guild tools.
+        let conversation = client.conversations.iter().find(|c| c.id == channel_id).cloned();
+        let is_dm = conversation.is_some();
+        let name = match &conversation {
+            Some(c) => client.conversation_title(c),
+            None => channel.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
+        };
+        let topic = match &conversation {
+            Some(_) => Some("end-to-end encrypted".to_owned()),
+            None => channel.as_ref().and_then(|c| c.topic.clone()),
+        };
 
         let header = div()
             .h(size::HEADER)
@@ -1286,7 +1301,15 @@ impl Render for ChatView {
             .gap_2()
             .border_b_1()
             .border_color(t.border)
-            .child(icon(if self.fixed.is_some() { Icon::MessagesSquare } else { Icon::Hash }).text_color(t.text_faint))
+            .child(
+                icon(match (&conversation, self.fixed.is_some()) {
+                    (Some(c), _) if c.kind == "gc" => Icon::Users,
+                    (Some(_), _) => Icon::AtSign,
+                    (None, true) => Icon::MessagesSquare,
+                    (None, false) => Icon::Hash,
+                })
+                .text_color(t.text_faint),
+            )
             .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(name.clone()))
             .children(topic.map(|topic| {
                 div()
@@ -1300,7 +1323,11 @@ impl Render for ChatView {
                     .child(topic)
             }))
             .child(div().flex_1())
+            .when(is_dm, |d| d.child(icon(Icon::Lock).text_color(t.text_faint)))
             .map(|header| {
+                if is_dm {
+                    return header;
+                }
                 if self.fixed.is_some() {
                     return header.child(
                         IconButton::new("close-thread", Icon::X)
@@ -1328,6 +1355,8 @@ impl Render for ChatView {
             Some("Loading messages…".to_owned())
         } else if let Some(err) = history_error {
             Some(format!("Couldn't load history: {err}"))
+        } else if reached_start && is_dm {
+            Some(format!("This is the start of your encrypted conversation with {name}."))
         } else if reached_start {
             Some(format!("This is the start of #{name}."))
         } else {
@@ -1351,6 +1380,34 @@ impl Render for ChatView {
             )
         });
 
+        // A message request: someone we don't know wrote first. Accept or decline before replying.
+        let request = self.client.read(cx).conversations.iter().find(|c| c.id == channel_id).filter(|c| {
+            c.request_state.as_deref() == Some("pending") && c.creator.as_deref() != self.client.read(cx).user_id()
+        }).map(|c| c.id.clone());
+        let request_bar = request.map(|id| {
+            let (accept, decline) = (self.client.clone(), self.client.clone());
+            let (a, d) = (id.clone(), id);
+            div()
+                .mx_4()
+                .mb_2()
+                .p_3()
+                .rounded(radius::MD)
+                .border_1()
+                .border_color(t.border_strong)
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(icon(Icon::Mail).text_color(t.text_faint))
+                .child(div().flex_1().text_size(text::SM).text_color(t.text_muted).child("This is a message request. Accept it to reply; declining hides the conversation."))
+                .child(Button::new("request-decline", "Decline").ghost().on_click(move |_, _, cx| {
+                    let d = d.clone();
+                    decline.update(cx, |c, cx| c.answer_request(d, false, cx));
+                }))
+                .child(Button::new("request-accept", "Accept").primary().on_click(move |_, _, cx| {
+                    let a = a.clone();
+                    accept.update(cx, |c, cx| c.answer_request(a, true, cx));
+                }))
+        });
         let composer = self.render_composer(&channel_id, window, cx);
         let lightbox = self.render_lightbox(cx);
         let suggestions = self.render_suggestions(cx);
@@ -1388,6 +1445,7 @@ impl Render for ChatView {
                     ))
                     .children(jump),
             )
+            .children(request_bar)
             .child(composer)
             .children(suggestions)
             .children(lightbox)

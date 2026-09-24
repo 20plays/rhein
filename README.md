@@ -13,7 +13,7 @@ Rhein talks to Telium servers directly and is meant to work next to the official
 | UI phases 1–6 | done: friends (requests, accept, block), conversation list, voice stage with live voice states; settings (account, devices, servers, appearance), status, guild/channel/member menus, profile cards, Ctrl+K switcher, keyboard navigation; emoji picker, autocomplete, message context menu, pins, threads, search; design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
 | M2 – multiple servers (federation) | done: extra servers, invites across servers, one gateway per server |
 | Profiles and rich presence | done: banners, accents and card themes (shown and edited); activities of others with artwork through camo; sharing your own from a Discord-compatible RPC server (IPC and WebSocket), game detection and MPRIS |
-| M3 – DMs (MLS) | planned in [`mplan.md`](mplan.md) |
+| M3 – DMs (MLS) | done: openmls with Telium's profile (vendored patch for ts-mls's GroupInfo encoding), recovery vault, cross-signing and identity continuity, the conversation engine with self-join and the history mirror, DMs and group chats in the chat view; interop tested against the web client's own code. Open: receipts, DM typing, opening encrypted attachments from the UI. See [`mplan.md`](mplan.md) |
 | M4 – voice/video | planned in [`mplan.md`](mplan.md) |
 
 The plan and its risks are in `~/.claude/plans/lies-die-das-hier-vectorized-snail.md`.
@@ -26,6 +26,7 @@ The plan and its risks are in `~/.claude/plans/lies-die-das-hier-vectorized-snai
 | `rhein-auth` | OPAQUE client (identical to `@serenity-kit/opaque` 1.1.0) and the device key |
 | `rhein-net` | Discovery, REST client, sign-in, assertion → guild session, gateway with reconnect |
 | `rhein-store` | GPUI state (`Client` entity) on a tokio runtime (`Io`) |
+| `rhein-mls` | Telium's MLS profile on openmls, recovery vault, cross-signing and identity continuity, DM payloads |
 | `rhein-rpc` | Local activity sources: Discord RPC server (`discord-ipc-N`, WebSocket 6463–6472), game detection from Discord's detectable list, MPRIS; no GPUI |
 | `rhein-ui` | Design system: black-and-white theme tokens, motion tokens, bundled fonts (Geist, Geist Mono), Lucide icons, components |
 | `rhein` | The app: views built from `rhein-ui` components |
@@ -69,6 +70,8 @@ cargo test --workspace
 RHEIN_LIVE=localhost:8448 RHEIN_LIVE_B=localhost:8449 \
   cargo test -p rhein-net --test live -- --test-threads=1 --nocapture
 ```
+
+`crates/rhein-store/tests/web_interop_live.rs` runs the Telium web client's own DM code (from `.dev/telium/web`, after `bun install` there) against Rhein; `crates/rhein-mls/tests/interop.rs` needs `cd scripts/mls-interop && npm install`.
 
 The live tests run one at a time: each registers a fresh account, and a Telium server on SQLite answers concurrent registrations with "database is locked".
 
