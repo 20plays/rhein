@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,3 +44,7 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70f
 [profile.dev.package."*"]
 debug = false
 opt-level = 2
+
+# openmls with Telium's GroupInfo external_pub encoding; see vendor/openmls/RHEIN.md.
+[patch.crates-io]
+openmls = { path = "vendor/openmls" }

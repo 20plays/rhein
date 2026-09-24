@@ -1,0 +1,10 @@
+{
+  "name": "rhein-mls-interop",
+  "private": true,
+  "type": "module",
+  "description": "Stands in for the Telium web client's MLS layer in rhein-mls's interop tests",
+  "dependencies": {
+    "@noble/hashes": "2.3.0",
+    "ts-mls": "1.6.4"
+  }
+}

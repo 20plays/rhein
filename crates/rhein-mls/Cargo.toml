@@ -1,0 +1,20 @@
+[package]
+name = "rhein-mls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Telium's MLS profile for Rhein's encrypted DMs, on openmls"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+openmls = "0.9"
+openmls_rust_crypto = "0.6"
+openmls_basic_credential = "0.6"
+openmls_traits = "0.6"
+tls_codec = "0.5"
+
+[dev-dependencies]
+openmls = "0.9"
