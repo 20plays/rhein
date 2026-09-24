@@ -12,6 +12,8 @@
 //! Frames are whole `MLSMessage`s; callers base64 them for the wire.
 
 pub mod policy;
+pub mod trust;
+pub mod vault;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
@@ -264,6 +266,19 @@ impl Device {
     pub fn export(&self, group: &MlsGroup, label: &str, context: &[u8], length: usize) -> Result<Vec<u8>> {
         group.export_secret(self.provider.crypto(), label, context, length).map_err(|e| anyhow!("exporter: {e:?}"))
     }
+}
+
+/// A fresh Ed25519 MLS signature key: (private, public).
+pub fn new_signature_key() -> Result<(Vec<u8>, Vec<u8>)> {
+    // Ed25519: the 32-byte seed is the private half, as openmls' Rust crypto provider keeps it.
+    let seed: [u8; 32] = vault::rand_bytes();
+    let public = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+    Ok((seed.to_vec(), public.to_vec()))
+}
+
+/// A signature key kept from before, as `new_signature_key` made it.
+pub fn signature_key(private: &[u8], public: &[u8]) -> SignatureKeyPair {
+    SignatureKeyPair::from_raw(CIPHERSUITE.signature_algorithm(), private.to_vec(), public.to_vec())
 }
 
 /// Everyone in a group, as `"{user_id}|{device_id}"`, sorted.

@@ -132,7 +132,7 @@ pub fn clear() {
 }
 
 #[cfg(unix)]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = path.with_extension("tmp");
@@ -150,7 +150,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).context("session file")
 }
 

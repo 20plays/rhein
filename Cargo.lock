@@ -6112,14 +6112,19 @@ dependencies = [
 name = "rhein-mls"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64",
+ "ed25519-dalek",
+ "getrandom 0.3.4",
+ "hmac 0.12.1",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
  "openmls_traits",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tls_codec",
 ]
 
@@ -6181,11 +6186,13 @@ dependencies = [
  "regex",
  "reqwest",
  "rhein-auth",
+ "rhein-mls",
  "rhein-net",
  "rhein-proto",
  "rhein-rpc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "unicode-segmentation",
  "url",

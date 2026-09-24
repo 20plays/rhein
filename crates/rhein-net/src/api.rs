@@ -112,6 +112,78 @@ impl Api {
         self.send(self.http.delete(self.url(path))).await
     }
 
+    pub async fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+        self.send(self.http.put(self.url(path)).json(body)).await
+    }
+
+    // ---- encrypted DMs: keys, trust and frames (home server) ----
+
+    /// The recovery-keyring vault, sealed (`{exists, mode, ciphertext, …}`).
+    pub async fn vault(&self) -> ApiResult<serde_json::Value> {
+        self.get("/vault").await
+    }
+
+    pub async fn put_vault(&self, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.put("/vault", body).await
+    }
+
+    /// This account's cross-signing row: identity key, sealed secret, vouched devices.
+    pub async fn cross_signing(&self) -> ApiResult<serde_json::Value> {
+        self.get("/crosssigning").await
+    }
+
+    pub async fn sign_device(&self, device_id: &str, mls_key: &str, signature: &str) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "mls_key": mls_key, "signature": signature });
+        self.put(&format!("/crosssigning/devices/{}", urlencoding::encode(device_id)), &body).await
+    }
+
+    /// This account's own identity-continuity document.
+    pub async fn own_identity(&self) -> ApiResult<serde_json::Value> {
+        self.get("/identity").await
+    }
+
+    pub async fn anchor_identity(&self, immutable_id: &str, identity_key: &str, signature: &str) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "immutable_id": immutable_id, "identity_key": identity_key, "signature": signature });
+        self.put("/identity/anchor", &body).await
+    }
+
+    /// Anyone's identity-continuity document, as their home server publishes it.
+    pub async fn identity_document(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/users/{}/identity", urlencoding::encode(user_id))).await
+    }
+
+    /// Anyone's device list with their cross-signatures.
+    pub async fn device_list(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/users/{}/devices", urlencoding::encode(user_id))).await
+    }
+
+    /// How many key packages each of this account's devices has left.
+    pub async fn key_packages(&self) -> ApiResult<serde_json::Value> {
+        self.get("/keypackages").await
+    }
+
+    pub async fn publish_key_packages(&self, packages: &[String]) -> ApiResult<serde_json::Value> {
+        self.post("/keypackages", &serde_json::json!({ "packages": packages })).await
+    }
+
+    /// One key package for each of a user's devices (consumed on the server).
+    pub async fn claim_key_packages(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/users/{}/keypackages/claim", urlencoding::encode(user_id)), &serde_json::json!({})).await
+    }
+
+    /// Frames of a conversation after `after` (seq), oldest first.
+    pub async fn dm_frames(&self, conversation_id: &str, after: Option<u64>, limit: u32) -> ApiResult<serde_json::Value> {
+        let mut path = format!("/conversations/{}/messages?limit={limit}", urlencoding::encode(conversation_id));
+        if let Some(after) = after {
+            path.push_str(&format!("&after={after}"));
+        }
+        self.get(&path).await
+    }
+
+    pub async fn send_frame(&self, conversation_id: &str, frame: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/messages", urlencoding::encode(conversation_id)), frame).await
+    }
+
     // ---- home server ----
 
     pub async fn capabilities(&self) -> ApiResult<Capabilities> {

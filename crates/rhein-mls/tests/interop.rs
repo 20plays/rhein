@@ -207,3 +207,22 @@ fn exporter_matches() {
     }
 }
 
+
+/// A device whose signature key was kept from an earlier session (as the store keeps it) still
+/// interoperates: the key round-trips through its raw form.
+#[test]
+fn kept_signature_key_interoperates() {
+    let Some(mut web) = Web::start() else { return };
+    let (private, public) = rhein_mls::new_signature_key().unwrap();
+    let signer = rhein_mls::signature_key(&private, &public);
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    let rhein = Device::with_signer(provider, signer, "@rhein:x|r7").unwrap();
+    assert_eq!(rhein.signature_public_key(), public.as_slice());
+    web.call(json!({ "op": "new", "id": "w", "identity": "@web:x|w1" }));
+    let kp = web.call(json!({ "op": "key_package", "id": "w" }));
+    let (mut group, welcome) = rhein.create_group("conv-k", None, &[Web::bytes(&kp, "key_package")]).unwrap();
+    web.call(json!({ "op": "join", "id": "w", "welcome": b64(&welcome.unwrap()) }));
+    let out = rhein.send(&mut group, &message("kept key")).unwrap();
+    let got = web.call(json!({ "op": "process", "id": "w", "group_id": "conv-k", "message": b64(&out) }));
+    assert_eq!(got["text"], "kept key");
+}

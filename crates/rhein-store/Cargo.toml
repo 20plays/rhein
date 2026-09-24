@@ -9,6 +9,8 @@ rhein-proto.workspace = true
 rhein-net.workspace = true
 rhein-auth.workspace = true
 rhein-rpc.workspace = true
+rhein-mls.workspace = true
+sha2.workspace = true
 anyhow.workspace = true
 dirs.workspace = true
 gpui.workspace = true
@@ -22,3 +24,12 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 urlencoding.workspace = true
+
+[dev-dependencies]
+rhein-auth.workspace = true
+rhein-mls.workspace = true
+rhein-net.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

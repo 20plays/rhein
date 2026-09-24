@@ -65,6 +65,9 @@ pub struct Home {
     pub avatar_ref: Option<String>,
     device_seed: String,
     expires_at: Option<i64>,
+    /// The OPAQUE-derived key that opens the DM recovery vault; only after a password sign-in in
+    /// this session, never stored.
+    dm_wrapper: Option<rhein_mls::vault::Key>,
 }
 
 pub struct Server {
@@ -233,6 +236,10 @@ pub struct Client {
     sharing: Option<Vec<rhein_proto::Activity>>,
     /// The local activity sources while sharing is on, and the task that follows them.
     rpc: Option<(rhein_rpc::Handle, Task<()>)>,
+    /// How far encrypted-DM keys and trust came up for this account.
+    pub dm: Option<crate::dm::DmStatus>,
+    pub dm_error: Option<String>,
+    dm_task: Option<Task<()>>,
     /// While adding an account: the one we came from (user id, name), to go back to.
     pub returning_to: Option<(String, String)>,
     /// Everything the sources found, before the sharing preferences filter it.
@@ -309,6 +316,9 @@ impl Client {
             sharing: None,
             rpc: None,
             returning_to: None,
+            dm: None,
+            dm_error: None,
+            dm_task: None,
             local_activities: Vec::new(),
             rpc_status: rhein_rpc::Status::default(),
             artwork: HashMap::new(),
@@ -361,6 +371,7 @@ impl Client {
                             display_name,
                             device_seed: saved.device_seed.clone(),
                             expires_at: saved.expires_at,
+                            dm_wrapper: None,
                         };
                         this.signed_in(home, saved.servers.clone(), cx);
                     }
@@ -427,6 +438,7 @@ impl Client {
                             display_name: me.and_then(|m| m.profile).and_then(|p| p.display_name),
                             device_seed: rhein_auth::b64u(&device.seed()),
                             expires_at: signed.session.expires_at,
+                            dm_wrapper: Some(rhein_mls::vault::recovery_wrapper(&signed.export_key)),
                         };
                         this.signed_in(home, Vec::new(), cx);
                     }
@@ -447,8 +459,9 @@ impl Client {
         self.home = Some(home);
         self.phase = Phase::SignedIn;
         self.error = None;
-        self.returning_to = None;
         self.persist();
+        self.sync_rpc(cx);
+        self.bring_up_dm(cx);
         self.sync_rpc(cx);
         // The home server may host guilds too; it gets a guild session like any other server.
         self.add_server_named(home_input, Some(home_name), cx);
@@ -461,7 +474,11 @@ impl Client {
     /// there is one, takes over.
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         log::info!("signing out");
-        let next = self.home.as_ref().map(|h| h.user_id.clone()).and_then(|id| persist::remove(&id));
+        let me = self.home.as_ref().map(|h| h.user_id.clone());
+        if let Some(me) = &me {
+            crate::dm::Secrets::remove(me);
+        }
+        let next = me.and_then(|id| persist::remove(&id));
         self.reset();
         self.returning_to = None;
         match next {
@@ -507,11 +524,39 @@ impl Client {
         cx.notify();
     }
 
+    /// Opens the DM recovery keyring and brings cross-signing up, in the background.
+    fn bring_up_dm(&mut self, cx: &mut Context<Self>) {
+        let Some(home) = &self.home else { return };
+        let (api, user, device, wrapper) = (home.api.clone(), home.user_id.clone(), home.device_id.clone(), home.dm_wrapper);
+        let io = self.io.clone();
+        self.dm_task = Some(cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { crate::dm::bring_up(&api, &user, &device, wrapper).await })).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(status) => {
+                        log::info!("DM keys: vault {}, cross-signed {}", status.vault_mode, status.cross_signed);
+                        this.dm = Some(status);
+                        this.dm_error = None;
+                    }
+                    Err(err) => {
+                        log::warn!("DM keys unavailable: {err:#}");
+                        this.dm_error = Some(format!("{err:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
     /// Drops everything the signed-in account brought with it: connections, guilds, history,
     /// what we share. Saved accounts on disk are not touched.
     fn reset(&mut self) {
         self.signin = None;
         self.rpc = None;
+        self.dm = None;
+        self.dm_error = None;
+        self.dm_task = None;
         self.sharing = None;
         self.local_activities.clear();
         self.servers.clear();

@@ -15,6 +15,12 @@ openmls_rust_crypto = "0.6"
 openmls_basic_credential = "0.6"
 openmls_traits = "0.6"
 tls_codec = "0.5"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2.workspace = true
+ed25519-dalek.workspace = true
+getrandom = "0.3"
 
 [dev-dependencies]
 openmls = "0.9"
+openmls_rust_crypto = "0.6"

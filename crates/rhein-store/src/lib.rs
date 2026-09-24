@@ -3,6 +3,7 @@
 
 pub mod autocomplete;
 pub mod client;
+pub mod dm;
 pub mod embed;
 pub mod emoji;
 pub mod io;
