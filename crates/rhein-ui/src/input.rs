@@ -37,6 +37,20 @@ actions!(
         Newline,
         Cancel,
         Tab,
+        SelectUp,
+        SelectDown,
+        SelectHome,
+        SelectEnd,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DocStart,
+        DocEnd,
+        SelectDocStart,
+        SelectDocEnd,
+        DeleteWordLeft,
+        DeleteWordRight,
     ]
 );
 
@@ -60,6 +74,32 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("down", Down, ctx),
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("tab", Tab, ctx),
+        KeyBinding::new("shift-up", SelectUp, ctx),
+        KeyBinding::new("shift-down", SelectDown, ctx),
+        KeyBinding::new("shift-home", SelectHome, ctx),
+        KeyBinding::new("shift-end", SelectEnd, ctx),
+        KeyBinding::new("ctrl-left", WordLeft, ctx),
+        KeyBinding::new("ctrl-right", WordRight, ctx),
+        KeyBinding::new("ctrl-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("ctrl-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("ctrl-home", DocStart, ctx),
+        KeyBinding::new("ctrl-end", DocEnd, ctx),
+        KeyBinding::new("ctrl-shift-home", SelectDocStart, ctx),
+        KeyBinding::new("ctrl-shift-end", SelectDocEnd, ctx),
+        KeyBinding::new("ctrl-backspace", DeleteWordLeft, ctx),
+        KeyBinding::new("ctrl-delete", DeleteWordRight, ctx),
+        // macOS equivalents.
+        KeyBinding::new("alt-left", WordLeft, ctx),
+        KeyBinding::new("alt-right", WordRight, ctx),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("alt-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("cmd-left", Home, ctx),
+        KeyBinding::new("cmd-right", End, ctx),
+        KeyBinding::new("cmd-shift-left", SelectHome, ctx),
+        KeyBinding::new("cmd-shift-right", SelectEnd, ctx),
+        KeyBinding::new("cmd-up", DocStart, ctx),
+        KeyBinding::new("cmd-down", DocEnd, ctx),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
     ];
     for m in ["ctrl", "cmd"] {
         out.push(KeyBinding::new(&format!("{m}-a"), SelectAll, ctx));
@@ -239,11 +279,118 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(self.line_start(), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.line_end(), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start(), cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(), cx);
+    }
+
+    fn doc_start(&mut self, _: &DocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn doc_end(&mut self, _: &DocEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
+    }
+
+    fn select_doc_start(&mut self, _: &SelectDocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_doc_end(&mut self, _: &SelectDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word(self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word(self.cursor_offset()), cx);
+    }
+
+    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let to = self.previous_word(self.cursor_offset());
+            self.select_to(to, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(&mut self, _: &DeleteWordRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            let to = self.next_word(self.cursor_offset());
+            self.select_to(to, cx);
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        let to = self.vertical_target(-1.0).unwrap_or(0);
+        self.select_to(to, cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        let to = self.vertical_target(1.0).unwrap_or(self.content.len());
+        self.select_to(to, cx);
+    }
+
+    /// Start of the line the cursor is on: the visual (wrapped) row when laid out, else the
+    /// paragraph.
+    fn line_start(&self) -> usize {
+        let cursor = self.cursor_offset();
+        if let (Some(at), Some(lh)) = (self.multi_position(cursor), self.multi.as_ref().map(|m| m.line_height)) {
+            return self.multi_index(point(px(0.), at.y + lh / 2.0)).min(cursor);
+        }
+        self.content[..cursor].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    fn line_end(&self) -> usize {
+        let cursor = self.cursor_offset();
+        if let (Some(at), Some(lh)) = (self.multi_position(cursor), self.multi.as_ref().map(|m| m.line_height)) {
+            let end = self.multi_index(point(px(100_000.), at.y + lh / 2.0)).max(cursor);
+            // Stop before a paragraph break rather than after it.
+            let paragraph_end = self.content[cursor..].find('\n').map_or(self.content.len(), |i| cursor + i);
+            return end.min(paragraph_end);
+        }
+        self.content[cursor..].find('\n').map_or(self.content.len(), |i| cursor + i)
+    }
+
+    /// Start of the word before `offset` (skipping whitespace and punctuation runs).
+    fn previous_word(&self, offset: usize) -> usize {
+        self.content
+            .split_word_bound_indices()
+            .filter(|(i, w)| *i < offset && w.chars().any(char::is_alphanumeric))
+            .map(|(i, _)| i)
+            .last()
+            .unwrap_or(0)
+    }
+
+    /// End of the word after `offset`.
+    fn next_word(&self, offset: usize) -> usize {
+        self.content
+            .split_word_bound_indices()
+            .map(|(i, w)| (i + w.len(), w))
+            .find(|(end, w)| *end > offset && w.chars().any(char::is_alphanumeric))
+            .map(|(end, _)| end)
+            .unwrap_or(self.content.len())
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
@@ -295,28 +442,25 @@ impl TextInput {
 
     /// Moves the cursor one visual line up or down, keeping its x position.
     fn vertical(&mut self, direction: f32, cx: &mut Context<Self>) {
-        let here = self.multi_position(self.cursor_offset());
-        let Some((here, lh)) = here.zip(self.multi.as_ref().map(|m| m.line_height)) else {
-            if direction < 0.0 {
+        match self.vertical_target(direction) {
+            Some(index) => self.move_to(index, cx),
+            None if direction < 0.0 => {
                 cx.emit(InputEvent::UpAtStart);
+                self.move_to(0, cx);
             }
-            return;
-        };
-        let target_y = here.y + lh * direction + lh / 2.0;
-        if target_y < px(0.) {
-            if direction < 0.0 {
-                cx.emit(InputEvent::UpAtStart);
-            }
-            self.move_to(0, cx);
-            return;
+            None => self.move_to(self.content.len(), cx),
         }
-        let total = self.multi.as_ref().map_or(px(0.), |m| m.total);
-        if target_y > total {
-            self.move_to(self.content.len(), cx);
-            return;
+    }
+
+    /// Where one visual line up/down lands; `None` past the first or last line.
+    fn vertical_target(&self, direction: f32) -> Option<usize> {
+        let here = self.multi_position(self.cursor_offset())?;
+        let layout = self.multi.as_ref()?;
+        let target_y = here.y + layout.line_height * direction + layout.line_height / 2.0;
+        if target_y < px(0.) || target_y > layout.total {
+            return None;
         }
-        let index = self.multi_index(point(here.x, target_y));
-        self.move_to(index, cx);
+        Some(self.multi_index(point(here.x, target_y)))
     }
 
     /// Cursor position relative to the top-left of the text (unscrolled), multi-line only.
@@ -426,6 +570,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.selection_reversed = false;
         cx.notify()
     }
 
@@ -835,6 +980,20 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::doc_start))
+            .on_action(cx.listener(Self::doc_end))
+            .on_action(cx.listener(Self::select_doc_start))
+            .on_action(cx.listener(Self::select_doc_end))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

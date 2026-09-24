@@ -54,7 +54,7 @@ pub enum SettingsEvent {
 }
 
 /// Every shortcut, for the read-only list.
-pub const SHORTCUTS: [(&str, &str); 12] = [
+pub const SHORTCUTS: [(&str, &str); 16] = [
     ("Ctrl+K", "Quick switcher"),
     ("Ctrl+,", "Settings"),
     ("Alt+↑ / Alt+↓", "Previous / next channel"),
@@ -65,6 +65,10 @@ pub const SHORTCUTS: [(&str, &str); 12] = [
     ("↑ (empty message)", "Edit your last message"),
     ("Tab / Enter", "Accept a suggestion"),
     ("Ctrl+V", "Paste text or an image"),
+    ("Home / End", "Start / end of the line (with Ctrl: of the whole text)"),
+    ("Shift + arrows, Home, End", "Select"),
+    ("Ctrl+← / Ctrl+→", "Previous / next word (with Shift: select)"),
+    ("Ctrl+Backspace / Ctrl+Delete", "Delete the word before / after the cursor"),
     ("Esc (while replying or editing)", "Cancel"),
     ("Ctrl+Q", "Quit"),
 ];
