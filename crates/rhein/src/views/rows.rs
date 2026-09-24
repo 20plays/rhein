@@ -48,6 +48,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let failed = client.is_failed(channel_id, &message.id);
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
     let avatar_url = client.avatar_url(guild_id.as_deref(), &message.author);
+    let prefs = client.prefs.clone();
+    let avatar_size = if prefs.compact { 28. } else { 40. };
+    let body_size = text::MD * (prefs.text_scale.clamp(80, 150) as f32 / 100.);
 
     let view_state = ctx.view.upgrade().map(|v| {
         let v = v.read(cx);
@@ -160,11 +163,28 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     .flex()
                     .items_baseline()
                     .gap_2()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(author_name.clone()))
-                    .child(div().text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at))),
+                    .child({
+                        let (v1, v2, u1, u2) = (ctx.view.clone(), ctx.view.clone(), message.author.clone(), message.author.clone());
+                        div()
+                            .id(SharedString::from(format!("author-{ix}")))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .on_click(move |e, _, cx| {
+                                let (u, at) = (u1.clone(), e.position());
+                                v1.update(cx, |v, cx| v.show_profile(u, at, cx)).ok();
+                            })
+                            .on_mouse_down(gpui::MouseButton::Right, move |e, _, cx| {
+                                cx.stop_propagation();
+                                let (u, at) = (u2.clone(), e.position);
+                                v2.update(cx, |v, cx| v.member_menu(u, at, cx)).ok();
+                            })
+                            .child(author_name.clone())
+                    })
+                    .child(div().text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
             )
         })
-        .children(body_text)
+        .children(body_text.map(|b| div().text_size(body_size).child(b)))
         .when(message.edited_at.is_some(), |d| d.child(div().text_size(text::XS).text_color(t.text_faint).child("(edited)")))
         .children(images.into_iter().enumerate().map(|(i, a)| image_attachment(ctx, ix, i, a, &t)))
         .children(files.into_iter().enumerate().map(|(i, a)| file_chip(ix, i, a, &t)))
@@ -197,19 +217,28 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let group = SharedString::from(format!("msg-{ix}"));
     let gutter = if grouped {
         div()
-            .w(px(40.))
+            .w(px(avatar_size))
             .flex_none()
             .pt_0p5()
             .text_size(text::XS)
             .text_color(t.text_faint)
             .opacity(0.)
             .group_hover(group.clone(), |s| s.opacity(1.))
-            .child(format_hm(message.created_at))
+            .child(format_hm(message.created_at, prefs.clock_24h))
+            .into_any_element()
     } else {
+        let (v1, u1) = (ctx.view.clone(), message.author.clone());
         div()
-            .w(px(40.))
+            .id(SharedString::from(format!("avatar-{ix}")))
+            .w(px(avatar_size))
             .flex_none()
-            .child(Avatar::new(message.author.clone(), author_name.clone()).size(px(40.)).image(avatar_url.map(Into::into)))
+            .cursor_pointer()
+            .on_click(move |e, _, cx| {
+                let (u, at) = (u1.clone(), e.position());
+                v1.update(cx, |v, cx| v.show_profile(u, at, cx)).ok();
+            })
+            .child(Avatar::new(message.author.clone(), author_name.clone()).size(px(avatar_size)).image(avatar_url.map(Into::into)))
+            .into_any_element()
     };
 
     let actions = (!pending).then(|| hover_actions(ctx, ix, &message, mine, &group, &t));
@@ -228,7 +257,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .flex_col()
         .px_4()
         .when(grouped, |d| d.py_0p5())
-        .when(!grouped, |d| d.pt_3().pb_0p5())
+        .when(!grouped, |d| if prefs.compact { d.pt_1p5().pb_0p5() } else { d.pt_3().pb_0p5() })
         .when_some(row_bg, |d, bg| d.bg(bg))
         .when(mentions_me, |d| d.border_l_2().border_color(t.warning))
         .when(row_bg.is_none(), |d| d.hover(|s| s.bg(t.bg_hover)))
@@ -642,19 +671,23 @@ fn day_label(ms: i64) -> String {
     }
 }
 
-fn format_hm(ms: i64) -> String {
-    zoned(ms).map(|z| z.strftime("%H:%M").to_string()).unwrap_or_default()
+fn clock(z: &jiff::Zoned, h24: bool) -> String {
+    if h24 { z.strftime("%H:%M").to_string() } else { z.strftime("%-I:%M %p").to_string() }
 }
 
-fn format_time(ms: i64) -> String {
+fn format_hm(ms: i64, h24: bool) -> String {
+    zoned(ms).map(|z| clock(&z, h24)).unwrap_or_default()
+}
+
+fn format_time(ms: i64, h24: bool) -> String {
     let Some(z) = zoned(ms) else { return String::new() };
     let today = jiff::Zoned::now().date();
     if z.date() == today {
-        format!("Today at {}", z.strftime("%H:%M"))
+        format!("Today at {}", clock(&z, h24))
     } else if today.yesterday().ok() == Some(z.date()) {
-        format!("Yesterday at {}", z.strftime("%H:%M"))
+        format!("Yesterday at {}", clock(&z, h24))
     } else {
-        z.strftime("%d/%m/%Y %H:%M").to_string()
+        format!("{} {}", z.strftime("%d/%m/%Y"), clock(&z, h24))
     }
 }
 

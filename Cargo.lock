@@ -5167,6 +5167,7 @@ dependencies = [
  "rhein-proto",
  "rhein-store",
  "rhein-ui",
+ "serde_json",
  "tokio",
 ]
 

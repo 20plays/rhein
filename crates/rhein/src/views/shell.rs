@@ -1,14 +1,14 @@
 //! The signed-in window: guild rail | channel sidebar | chat | member list, plus its modals.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use gpui::{
-    EventEmitter,
-    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FontWeight, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, point,
-    prelude::*, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable as _, FontWeight, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels, Point, Render,
+    SharedString, Styled as _, Subscription, Window, actions, anchored, deferred, div, point, prelude::*, px,
 };
-use rhein_store::{Client, ServerStatus};
+use rhein_store::{Client, ServerStatus, perms};
 use rhein_ui::theme::{radius, size, text};
 use rhein_ui::{
     ActiveTheme as _, Avatar, Button, CountBadge, Icon, IconButton, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
@@ -17,6 +17,40 @@ use rhein_ui::{
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
+use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
+use crate::views::switcher::QuickSwitcher;
+
+actions!(rhein_shell, [OpenSwitcher, OpenSettings, PrevChannel, NextChannel, PrevUnread, NextUnread]);
+
+const SHELL_CONTEXT: &str = "Shell";
+
+pub fn bindings() -> Vec<KeyBinding> {
+    let ctx = Some(SHELL_CONTEXT);
+    let mut out = vec![
+        KeyBinding::new("alt-up", PrevChannel, ctx),
+        KeyBinding::new("alt-down", NextChannel, ctx),
+        KeyBinding::new("alt-shift-up", PrevUnread, ctx),
+        KeyBinding::new("alt-shift-down", NextUnread, ctx),
+        KeyBinding::new("escape", rhein_ui::Dismiss, Some(SETTINGS_CONTEXT)),
+    ];
+    for m in ["ctrl", "cmd"] {
+        out.push(KeyBinding::new(&format!("{m}-k"), OpenSwitcher, ctx));
+        out.push(KeyBinding::new(&format!("{m}-,"), OpenSettings, ctx));
+    }
+    out
+}
+
+type Action = Rc<dyn Fn(&mut App)>;
+type PromptAction = Rc<dyn Fn(Vec<String>, &mut App)>;
+
+/// The shell's own dialogs (confirmations and small forms).
+enum ShellModal {
+    Confirm { title: String, body: String, label: String, danger: bool, action: Action },
+    Prompt { title: String, fields: Vec<(String, Entity<TextInput>)>, label: String, action: PromptAction },
+    CreateChannel { guild_id: String, name: Entity<TextInput>, kind: usize, category: Option<String> },
+}
+
+const CHANNEL_KINDS: [(&str, &str); 3] = [("text", "Text"), ("voice", "Voice"), ("announcement", "Announcement")];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DialogTab {
@@ -61,6 +95,10 @@ pub struct Shell {
     confirm_sign_out: bool,
     modal_focus: FocusHandle,
     menu: MenuHost,
+    modal: Option<ShellModal>,
+    settings: Option<(Entity<SettingsView>, Subscription)>,
+    switcher: Option<(Entity<QuickSwitcher>, Subscription)>,
+    profile_card: Option<(String, Option<String>, Point<Pixels>)>,
     _subs: Vec<Subscription>,
 }
 
@@ -77,6 +115,8 @@ impl Shell {
                 ChatEvent::TogglePanel(kind) => this.toggle_panel(*kind, window, cx),
                 ChatEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
                 ChatEvent::ClosePanel => this.close_panel(cx),
+                ChatEvent::Profile { user_id, at } => this.show_profile(user_id.clone(), *at, cx),
+                ChatEvent::MemberMenu { user_id, at } => this.member_menu(user_id.clone(), *at, window, cx),
             }),
             cx.subscribe_in(&dialog_input, window, |this, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Submit) {
@@ -99,6 +139,10 @@ impl Shell {
             confirm_sign_out: false,
             modal_focus: cx.focus_handle(),
             menu: MenuHost::default(),
+            modal: None,
+            settings: None,
+            switcher: None,
+            profile_card: None,
             _subs: subs,
         }
     }
@@ -182,6 +226,8 @@ impl Shell {
             ChatEvent::ClosePanel => this.close_panel(cx),
             ChatEvent::OpenThread(id) => this.open_thread(id.clone(), window, cx),
             ChatEvent::TogglePanel(kind) => this.toggle_panel(*kind, window, cx),
+            ChatEvent::Profile { user_id, at } => this.show_profile(user_id.clone(), *at, cx),
+            ChatEvent::MemberMenu { user_id, at } => this.member_menu(user_id.clone(), *at, window, cx),
         }));
         let focus = view.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
@@ -306,27 +352,514 @@ impl Shell {
 
     fn guild_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(gid) = self.client.read(cx).selected_guild.clone() else { return };
-        let client = self.client.clone();
-        let this = cx.weak_entity();
-        let this2 = this.clone();
-        let entries = vec![
-            MenuEntry::item("Invite people", move |_, cx| {
-                let gid = gid.clone();
-                client.update(cx, |c, cx| c.create_invite(gid, cx));
-            })
-            .with_icon(Icon::UserPlus),
-            MenuEntry::Separator,
-            MenuEntry::item("Join a guild", move |window, cx| {
-                this.update(cx, |v, cx| v.open_dialog(DialogTab::Join, window, cx)).ok();
-            })
-            .with_icon(Icon::LogIn),
-            MenuEntry::item("Create a guild", move |window, cx| {
-                this2.update(cx, |v, cx| v.open_dialog(DialogTab::Create, window, cx)).ok();
-            })
-            .with_icon(Icon::Plus),
-        ];
         let at = point(size::RAIL + px(12.), size::HEADER);
+        self.show_guild_menu(gid, at, window, cx);
+    }
+
+    /// Everything you can do with a guild; the header menu and a right-click on its icon.
+    fn show_guild_menu(&mut self, gid: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let Some(entry) = client.guild(&gid) else { return };
+        let name = entry.guild.name.clone();
+        let owner = client.is_owner(&gid);
+        let manage_channels = client.guild_can(&gid, perms::MANAGE_CHANNELS);
+        let manage_guild = client.guild_can(&gid, perms::MANAGE_GUILD);
+        let this = cx.weak_entity();
+        let mut entries = Vec::new();
+        {
+            let (c, g) = (self.client.clone(), gid.clone());
+            entries.push(MenuEntry::item("Invite people", move |_, cx| {
+                let g = g.clone();
+                c.update(cx, |c, cx| c.create_invite(g, cx));
+            }).with_icon(Icon::UserPlus));
+            let (c, g) = (self.client.clone(), gid.clone());
+            entries.push(MenuEntry::item("Mark as read", move |_, cx| c.update(cx, |c, cx| c.mark_guild_read(&g, cx))).with_icon(Icon::Check));
+        }
+        if manage_channels {
+            let (v, g) = (this.clone(), gid.clone());
+            entries.push(MenuEntry::item("Create channel", move |window, cx| {
+                let g = g.clone();
+                v.update(cx, |v, cx| v.open_create_channel(g, window, cx)).ok();
+            }).with_icon(Icon::Plus));
+        }
+        if manage_guild {
+            let (v, g, n) = (this.clone(), gid.clone(), name.clone());
+            entries.push(MenuEntry::item("Rename guild", move |window, cx| {
+                let (g, n) = (g.clone(), n.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.prompt("Rename guild", vec![("Name".into(), n)], "Save", move |values, cx| {
+                        let name = values[0].trim().to_owned();
+                        if !name.is_empty() {
+                            client.update(cx, |c, cx| c.rename_guild(g.clone(), name, cx));
+                        }
+                    }, window, cx)
+                }).ok();
+            }).with_icon(Icon::Pencil));
+        }
+        entries.push(MenuEntry::Separator);
+        {
+            let g = gid.clone();
+            entries.push(MenuEntry::item("Copy guild ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(g.clone()))).with_icon(Icon::Copy));
+        }
+        {
+            let v = this.clone();
+            entries.push(MenuEntry::item("Join a guild", move |window, cx| {
+                v.update(cx, |v, cx| v.open_dialog(DialogTab::Join, window, cx)).ok();
+            }).with_icon(Icon::LogIn));
+            let v = this.clone();
+            entries.push(MenuEntry::item("Create a guild", move |window, cx| {
+                v.update(cx, |v, cx| v.open_dialog(DialogTab::Create, window, cx)).ok();
+            }).with_icon(Icon::Plus));
+        }
+        if !owner {
+            entries.push(MenuEntry::Separator);
+            let (v, g) = (this.clone(), gid.clone());
+            entries.push(MenuEntry::item("Leave guild", move |window, cx| {
+                let (g, n) = (g.clone(), name.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.confirm(
+                        format!("Leave {n}?"),
+                        "You can come back with a new invite.".into(),
+                        "Leave".into(),
+                        true,
+                        move |cx| client.update(cx, |c, cx| c.leave_guild(g.clone(), cx)),
+                        window,
+                        cx,
+                    )
+                }).ok();
+            }).with_icon(Icon::LogOut).danger());
+        }
         self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+    }
+
+    fn channel_menu(&mut self, channel_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let Some(channel) = client.channel(&channel_id).cloned() else { return };
+        let manage = client.can(&channel_id, perms::MANAGE_CHANNELS);
+        let this = cx.weak_entity();
+        let mut entries = Vec::new();
+        if channel.is_textual() {
+            let (c, id) = (self.client.clone(), channel_id.clone());
+            entries.push(MenuEntry::item("Mark as read", move |_, cx| {
+                let id = id.clone();
+                c.update(cx, |c, cx| c.mark_read(id, cx));
+            }).with_icon(Icon::Check));
+        }
+        {
+            let id = channel_id.clone();
+            entries.push(MenuEntry::item("Copy channel ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+        }
+        if manage {
+            entries.push(MenuEntry::Separator);
+            let (v, id, name, topic) = (this.clone(), channel_id.clone(), channel.name.clone(), channel.topic.clone().unwrap_or_default());
+            entries.push(MenuEntry::item("Edit channel", move |window, cx| {
+                let (id, name, topic) = (id.clone(), name.clone(), topic.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.prompt("Edit channel", vec![("Name".into(), name), ("Topic".into(), topic)], "Save", move |values, cx| {
+                        let (name, topic) = (values[0].clone(), values[1].clone());
+                        if !name.trim().is_empty() {
+                            client.update(cx, |c, cx| c.edit_channel(id.clone(), name, topic, cx));
+                        }
+                    }, window, cx)
+                }).ok();
+            }).with_icon(Icon::Pencil));
+            let (v, id, name) = (this.clone(), channel_id.clone(), channel.name.clone());
+            entries.push(MenuEntry::item("Delete channel", move |window, cx| {
+                let (id, name) = (id.clone(), name.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.confirm(
+                        format!("Delete #{name}?"),
+                        "The channel and its messages are removed for everyone.".into(),
+                        "Delete".into(),
+                        true,
+                        move |cx| client.update(cx, |c, cx| c.delete_channel(id.clone(), cx)),
+                        window,
+                        cx,
+                    )
+                }).ok();
+            }).with_icon(Icon::Trash).danger());
+        }
+        self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+    }
+
+    fn member_menu(&mut self, user_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let Some(gid) = client.selected_guild.clone() else { return };
+        let me = client.user_id().map(str::to_owned);
+        let myself = me.as_deref() == Some(user_id.as_str());
+        let name = client.display_name(Some(&gid), &user_id);
+        let target_owner = client.guild(&gid).is_some_and(|g| g.guild.owner.as_deref() == Some(user_id.as_str()));
+        let moderate = !myself && !target_owner && client.guild_can(&gid, perms::MODERATE_MEMBERS);
+        let kick = !myself && !target_owner && client.guild_can(&gid, perms::KICK_MEMBERS);
+        let ban = !myself && !target_owner && client.guild_can(&gid, perms::BAN_MEMBERS);
+        let this = cx.weak_entity();
+        let mut entries = Vec::new();
+        {
+            let (v, u) = (this.clone(), user_id.clone());
+            entries.push(MenuEntry::item("View profile", move |window, cx| {
+                let at = window.mouse_position();
+                let u = u.clone();
+                v.update(cx, |v, cx| v.show_profile(u, at, cx)).ok();
+            }).with_icon(Icon::User));
+            let (v, u) = (this.clone(), user_id.clone());
+            entries.push(MenuEntry::item("Mention", move |window, cx| {
+                let u = u.clone();
+                v.update(cx, |v, cx| v.chat.update(cx, |c, cx| c.insert_text(&format!("<{u}> "), window, cx))).ok();
+            }).with_icon(Icon::AtSign));
+            let u = user_id.clone();
+            entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(u.clone()))).with_icon(Icon::Copy));
+        }
+        if myself {
+            let (v, g, u) = (this.clone(), gid.clone(), user_id.clone());
+            let current = client.members.get(&gid).and_then(|l| l.iter().find(|m| m.user_id == user_id)).and_then(|m| m.nickname.clone()).unwrap_or_default();
+            entries.push(MenuEntry::item("Change nickname", move |window, cx| {
+                let (g, u, current) = (g.clone(), u.clone(), current.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.prompt("Nickname in this guild", vec![("Nickname".into(), current)], "Save", move |values, cx| {
+                        let nick = values[0].clone();
+                        client.update(cx, |c, cx| {
+                            c.set_nickname(g.clone(), u.clone(), nick, cx);
+                            c.load_members(g.clone(), cx);
+                        });
+                    }, window, cx)
+                }).ok();
+            }).with_icon(Icon::Pencil));
+        }
+        if moderate || kick || ban {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::Label("Moderation".into()));
+        }
+        if moderate {
+            for (label, minutes) in [("Time out for 10 minutes", 10), ("Time out for 1 hour", 60), ("Time out for 1 day", 1440)] {
+                let (v, g, u, n) = (this.clone(), gid.clone(), user_id.clone(), name.clone());
+                entries.push(MenuEntry::item(label, move |window, cx| {
+                    let (g, u, n) = (g.clone(), u.clone(), n.clone());
+                    v.update(cx, |v, cx| {
+                        let client = v.client.clone();
+                        v.confirm(
+                            format!("Time out {n}?"),
+                            "They can read but not write, react or talk until it ends.".into(),
+                            "Time out".into(),
+                            true,
+                            move |cx| client.update(cx, |c, cx| c.timeout_member(g.clone(), u.clone(), minutes, cx)),
+                            window,
+                            cx,
+                        )
+                    }).ok();
+                }));
+            }
+        }
+        for (enabled, label, verb, ban_it) in [(kick, "Kick", "kick", false), (ban, "Ban", "ban", true)] {
+            if !enabled {
+                continue;
+            }
+            let (v, g, u, n) = (this.clone(), gid.clone(), user_id.clone(), name.clone());
+            entries.push(MenuEntry::item(format!("{label} {name}"), move |window, cx| {
+                let (g, u, n) = (g.clone(), u.clone(), n.clone());
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    let body = if ban_it { "They are removed and cannot rejoin until unbanned." } else { "They are removed and can rejoin with an invite." };
+                    v.confirm(
+                        format!("{} {n}?", if ban_it { "Ban" } else { "Kick" }),
+                        body.into(),
+                        verb[..1].to_uppercase() + &verb[1..],
+                        true,
+                        move |cx| client.update(cx, |c, cx| {
+                            if ban_it { c.ban_member(g.clone(), u.clone(), cx) } else { c.kick_member(g.clone(), u.clone(), cx) }
+                            c.load_members(g.clone(), cx);
+                        }),
+                        window,
+                        cx,
+                    )
+                }).ok();
+            }).danger());
+        }
+        self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+    }
+
+    fn status_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let custom = self.client.read(cx).prefs.custom_status.clone();
+        let mut entries = Vec::new();
+        for (status, label) in [("online", "Online"), ("idle", "Idle"), ("dnd", "Do not disturb"), ("invisible", "Invisible")] {
+            let (c, keep) = (self.client.clone(), custom.clone());
+            entries.push(MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_presence(status.into(), keep.clone(), cx))).with_icon(Icon::Circle));
+        }
+        entries.push(MenuEntry::Separator);
+        let this = cx.weak_entity();
+        entries.push(MenuEntry::item("Set a custom status…", move |window, cx| {
+            this.update(cx, |v, cx| {
+                let client = v.client.clone();
+                let current = client.read(cx).prefs.custom_status.clone().unwrap_or_default();
+                v.prompt("Custom status", vec![("What are you up to?".into(), current)], "Save", move |values, cx| {
+                    let text = values[0].clone();
+                    client.update(cx, |c, cx| {
+                        let status = c.prefs.status.clone();
+                        c.set_presence(status, Some(text), cx)
+                    });
+                }, window, cx)
+            }).ok();
+        }).with_icon(Icon::Pencil));
+        if custom.is_some() {
+            let c = self.client.clone();
+            entries.push(MenuEntry::item("Clear custom status", move |_, cx| c.update(cx, |c, cx| {
+                let status = c.prefs.status.clone();
+                c.set_presence(status, None, cx)
+            })).with_icon(Icon::X));
+        }
+        self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+    }
+
+    // ---------------------------------------------------------------- modals
+
+    // A confirmation is its title, text, button and consequence; bundling them would only move
+    // the same arguments into a struct literal at every call site.
+    #[allow(clippy::too_many_arguments)]
+    fn confirm(&mut self, title: String, body: String, label: String, danger: bool, action: impl Fn(&mut App) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = Some(ShellModal::Confirm { title, body, label, danger, action: Rc::new(action) });
+        window.focus(&self.modal_focus, cx);
+        cx.notify();
+    }
+
+    fn prompt(&mut self, title: &str, fields: Vec<(String, String)>, label: &str, action: impl Fn(Vec<String>, &mut App) + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        let fields: Vec<(String, Entity<TextInput>)> = fields
+            .into_iter()
+            .map(|(label, value)| {
+                let input = cx.new(|cx| TextInput::new(label.clone(), cx).with_text(value));
+                (label, input)
+            })
+            .collect();
+        for (_, input) in &fields {
+            let sub = cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Submit => this.submit_modal(window, cx),
+                InputEvent::Cancel => this.close_modal(window, cx),
+                _ => {}
+            });
+            self._subs.push(sub);
+        }
+        if let Some((_, first)) = fields.first() {
+            window.focus(&first.focus_handle(cx), cx);
+        }
+        self.modal = Some(ShellModal::Prompt { title: title.into(), fields, label: label.into(), action: Rc::new(action) });
+        cx.notify();
+    }
+
+    fn open_create_channel(&mut self, guild_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| TextInput::new("new-channel", cx));
+        let sub = cx.subscribe_in(&name, window, |this, _, event: &InputEvent, window, cx| match event {
+            InputEvent::Submit => this.submit_modal(window, cx),
+            InputEvent::Cancel => this.close_modal(window, cx),
+            _ => {}
+        });
+        self._subs.push(sub);
+        window.focus(&name.focus_handle(cx), cx);
+        self.modal = Some(ShellModal::CreateChannel { guild_id, name, kind: 0, category: None });
+        cx.notify();
+    }
+
+    fn submit_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.modal.take() {
+            Some(ShellModal::Confirm { action, .. }) => action(cx),
+            Some(ShellModal::Prompt { fields, action, .. }) => {
+                let values = fields.iter().map(|(_, i)| i.read(cx).text().to_owned()).collect();
+                action(values, cx);
+            }
+            Some(ShellModal::CreateChannel { guild_id, name, kind, category }) => {
+                let name = name.read(cx).text().trim().to_owned();
+                if name.is_empty() {
+                    return;
+                }
+                let kind = CHANNEL_KINDS[kind].0.to_owned();
+                self.client.update(cx, |c, cx| c.create_channel(guild_id, name, kind, category, cx));
+            }
+            None => {}
+        }
+        self.close_modal(window, cx);
+    }
+
+    fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        let focus = self.chat.read(cx).composer_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn render_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let modal = self.modal.as_ref()?;
+        let t = cx.theme().clone();
+        let this = cx.weak_entity();
+        let dismiss = move |window: &mut Window, cx: &mut App| {
+            this.update(cx, |v, cx| v.close_modal(window, cx)).ok();
+        };
+        let cancel = Button::new("modal-cancel", "Cancel").ghost().on_click(cx.listener(|v, _, window, cx| v.close_modal(window, cx)));
+        let element = match modal {
+            ShellModal::Confirm { title, body, label, danger, .. } => Modal::new("shell-confirm")
+                .title(title.clone())
+                .width(px(420.))
+                .focus(&self.modal_focus)
+                .on_dismiss(dismiss)
+                .child(div().text_color(t.text_muted).child(body.clone()))
+                .footer(cancel)
+                .footer(Button::new("modal-ok", label.clone()).kind(if *danger { rhein_ui::ButtonKind::Danger } else { rhein_ui::ButtonKind::Primary })
+                    .on_click(cx.listener(|v, _, window, cx| v.submit_modal(window, cx)))),
+            ShellModal::Prompt { title, fields, label, .. } => Modal::new("shell-prompt")
+                .title(title.clone())
+                .width(px(420.))
+                .on_dismiss(dismiss)
+                .children(fields.iter().map(|(label, input)| {
+                    div().flex().flex_col().gap_1p5()
+                        .child(div().text_size(text::SM).text_color(t.text_muted).child(label.clone()))
+                        .child(input.clone())
+                }))
+                .footer(cancel)
+                .footer(Button::new("modal-ok", label.clone()).primary().on_click(cx.listener(|v, _, window, cx| v.submit_modal(window, cx)))),
+            ShellModal::CreateChannel { guild_id, name, kind, category } => {
+                let client = self.client.read(cx);
+                let categories: Vec<(String, String)> = client
+                    .guild(guild_id)
+                    .map(|g| g.guild.channels.iter().filter(|c| c.is_category()).map(|c| (c.id.clone(), c.name.clone())).collect())
+                    .unwrap_or_default();
+                let chip = |id: SharedString, label: String, active: bool| {
+                    div().id(id).px_2().py_1().rounded(radius::MD).border_1()
+                        .border_color(if active { t.accent } else { t.border_strong })
+                        .text_size(text::SM).cursor_pointer().child(label)
+                };
+                let kinds = div().flex().gap_1().children(CHANNEL_KINDS.iter().enumerate().map(|(i, (_, label))| {
+                    chip(SharedString::from(format!("kind-{i}")), (*label).into(), *kind == i).on_click(cx.listener(move |v, _, _, cx| {
+                        if let Some(ShellModal::CreateChannel { kind, .. }) = v.modal.as_mut() { *kind = i; }
+                        cx.notify();
+                    }))
+                }));
+                let mut cats = div().flex().flex_wrap().gap_1().child(
+                    chip("cat-none".into(), "No category".into(), category.is_none()).on_click(cx.listener(|v, _, _, cx| {
+                        if let Some(ShellModal::CreateChannel { category, .. }) = v.modal.as_mut() { *category = None; }
+                        cx.notify();
+                    })),
+                );
+                for (id, label) in categories {
+                    let active = category.as_deref() == Some(id.as_str());
+                    cats = cats.child(chip(SharedString::from(format!("cat-{id}")), label, active).on_click(cx.listener(move |v, _, _, cx| {
+                        if let Some(ShellModal::CreateChannel { category, .. }) = v.modal.as_mut() { *category = Some(id.clone()); }
+                        cx.notify();
+                    })));
+                }
+                Modal::new("create-channel")
+                    .title("Create channel")
+                    .width(px(440.))
+                    .on_dismiss(dismiss)
+                    .child(div().flex().flex_col().gap_1p5().child(div().text_size(text::SM).text_color(t.text_muted).child("Type")).child(kinds))
+                    .child(div().flex().flex_col().gap_1p5().child(div().text_size(text::SM).text_color(t.text_muted).child("Name")).child(name.clone()))
+                    .child(div().flex().flex_col().gap_1p5().child(div().text_size(text::SM).text_color(t.text_muted).child("Category")).child(cats))
+                    .footer(cancel)
+                    .footer(Button::new("modal-ok", "Create").primary().on_click(cx.listener(|v, _, window, cx| v.submit_modal(window, cx))))
+            }
+        };
+        Some(element.into_any_element())
+    }
+
+    // ---------------------------------------------------------------- profile card
+
+    fn show_profile(&mut self, user_id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let guild = self.client.read(cx).selected_guild.clone();
+        let uid = user_id.clone();
+        self.client.update(cx, |c, cx| {
+            c.profile(&uid, cx);
+        });
+        self.profile_card = Some((user_id, guild, at));
+        cx.notify();
+    }
+
+    fn render_profile_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (user_id, guild_id, at) = self.profile_card.clone()?;
+        let t = cx.theme().clone();
+        let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
+        let client = self.client.read(cx);
+        let name = client.display_name(guild_id.as_deref(), &user_id);
+        let avatar = client.avatar_url(guild_id.as_deref(), &user_id);
+        let member = guild_id.as_deref().and_then(|g| client.members.get(g)).and_then(|l| l.iter().find(|m| m.user_id == user_id)).cloned();
+        let roles: Vec<String> = match (&member, guild_id.as_deref().and_then(|g| client.guild(g))) {
+            (Some(m), Some(g)) => g.guild.roles.iter().filter(|r| m.roles.contains(&r.id)).map(|r| r.name.clone()).collect(),
+            _ => Vec::new(),
+        };
+        let presence = member.as_ref().map(|m| rhein_ui::Presence::parse(m.status()));
+        let card = div()
+            .w(px(300.))
+            .p_4()
+            .rounded(radius::LG)
+            .bg(t.bg_panel)
+            .border_1()
+            .border_color(t.border_strong)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                v.profile_card = None;
+                cx.notify();
+            }))
+            .child(Avatar::new(user_id.clone(), name.clone()).size(px(64.)).image(avatar.map(Into::into)).presence(presence))
+            .child(
+                div().flex().flex_col()
+                    .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(div().text_size(text::SM).text_color(t.text_faint).child(user_id.clone()))
+                    .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
+            )
+            .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| {
+                div().flex().flex_col().gap_1()
+                    .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ABOUT ME"))
+                    .child(div().text_size(text::SM).child(bio))
+            }))
+            .when(!roles.is_empty(), |d| {
+                d.child(div().flex().flex_col().gap_1()
+                    .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ROLES"))
+                    .child(div().flex().flex_wrap().gap_1().children(roles.into_iter().map(|r| {
+                        div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
+                    }))))
+            });
+        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(card)).with_priority(2).into_any_element())
+    }
+
+    // ---------------------------------------------------------------- settings & switcher
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            return;
+        }
+        let client = self.client.clone();
+        let view = cx.new(|cx| SettingsView::new(client, window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, event: &SettingsEvent, window, cx| match event {
+            SettingsEvent::Close => this.close_settings(window, cx),
+            SettingsEvent::SignOut => {
+                this.close_settings(window, cx);
+                this.ask_sign_out(window, cx);
+            }
+        });
+        self.settings = Some((view, sub));
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
+        let focus = self.chat.read(cx).composer_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let view = cx.new(|cx| QuickSwitcher::new(client, window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, _: &DismissEvent, window, cx| {
+            this.switcher = None;
+            let focus = this.chat.read(cx).composer_focus(cx);
+            window.focus(&focus, cx);
+            cx.notify();
+        });
+        self.switcher = Some((view, sub));
+        cx.notify();
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -428,7 +961,11 @@ impl Shell {
                 .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
                     let id = id.clone();
                     client.update(cx, |c, cx| c.select_guild(id, cx));
-                }),
+                })
+                .on_mouse_down(MouseButton::Right, cx.listener({
+                    let id = entry.guild.id.clone();
+                    move |this, e: &gpui::MouseDownEvent, window, cx| this.show_guild_menu(id.clone(), e.position, window, cx)
+                })),
             );
         }
         rail.child(
@@ -566,6 +1103,10 @@ impl Shell {
                 } else if ch.is_voice() {
                     row = row.tooltip("Voice is coming soon");
                 }
+                let menu_id = ch.id.clone();
+                row = row.on_secondary(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.channel_menu(menu_id.clone(), e.position, window, cx)
+                }));
                 channels = channels.child(row);
                 if ch.is_voice() {
                     for user in client.voice_members(&gid, &ch.id) {
@@ -601,6 +1142,20 @@ impl Shell {
 
         let me = client.user_id().unwrap_or_default().to_owned();
         let my_name = client.display_name(None, &me);
+        let prefs = client.prefs.clone();
+        let my_avatar = client.avatar_url(None, &me);
+        let my_presence = match prefs.status.as_str() {
+            "idle" => Presence::Idle,
+            "dnd" => Presence::Dnd,
+            "invisible" => Presence::Offline,
+            _ => Presence::Online,
+        };
+        let my_status = prefs.custom_status.clone().unwrap_or_else(|| match prefs.status.as_str() {
+            "idle" => "Idle".into(),
+            "dnd" => "Do not disturb".into(),
+            "invisible" => "Invisible".into(),
+            _ => me.clone(),
+        });
         let user_panel = div()
             .h(px(56.))
             .flex_none()
@@ -609,7 +1164,14 @@ impl Shell {
             .items_center()
             .gap_2()
             .bg(t.bg_base)
-            .child(Avatar::new(me.clone(), my_name.clone()).size(px(32.)).presence(Some(Presence::Online)))
+            .child(
+                div()
+                    .id("status-avatar")
+                    .cursor_pointer()
+                    .tooltip(tooltip("Set status"))
+                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
+                    .child(Avatar::new(me.clone(), my_name.clone()).size(px(32.)).image(my_avatar.map(Into::into)).presence(Some(my_presence))),
+            )
             .child(
                 div()
                     .flex_1()
@@ -617,7 +1179,12 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .child(div().text_size(text::MD).font_weight(FontWeight::SEMIBOLD).truncate().child(my_name))
-                    .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(me)),
+                    .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(my_status)),
+            )
+            .child(
+                IconButton::new("open-settings", Icon::Settings)
+                    .tooltip("Settings (Ctrl+,)")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
             )
             .child(
                 IconButton::new("sign-out", Icon::LogOut)
@@ -650,13 +1217,24 @@ impl Shell {
         let gid = client.selected_guild.clone()?;
         let members = client.members.get(&gid)?;
         let (online, offline): (Vec<_>, Vec<_>) = members.iter().partition(|m| m.status() != "offline");
+        let this = cx.weak_entity();
         let row = |m: &rhein_proto::Member| {
             let name = m.shown_name().to_owned();
             let presence = Presence::parse(m.status());
+            let (uid, uid2) = (m.user_id.clone(), m.user_id.clone());
+            let (weak, weak2) = (this.clone(), this.clone());
             ListRow::new(SharedString::from(format!("member-{}", m.user_id)), name.clone())
-                .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).presence(Some(presence)))
+                .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).image(client.avatar_url(Some(&gid), &m.user_id).map(Into::into)).presence(Some(presence)))
                 .muted(presence == Presence::Offline)
                 .when(m.is_bot, |r| r.trailing(Tag("BOT")))
+                .on_click(move |e, _, cx| {
+                    let (u, at) = (uid.clone(), e.position());
+                    weak.update(cx, |v, cx| v.show_profile(u, at, cx)).ok();
+                })
+                .on_secondary(move |e, window, cx| {
+                    let (u, at) = (uid2.clone(), e.position);
+                    weak2.update(cx, |v, cx| v.member_menu(u, at, window, cx)).ok();
+                })
         };
         let online_label = section_label(format!("Online — {}", online.len()), cx);
         let offline_label = (!offline.is_empty()).then(|| section_label(format!("Offline — {}", offline.len()), cx));
@@ -822,7 +1400,20 @@ impl Render for Shell {
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
         let toast = self.toast(cx);
+        let modal = self.render_modal(cx);
+        let card = self.render_profile_card(cx);
+        let switcher = self.switcher.as_ref().map(|(view, _)| {
+            div().absolute().inset_0().bg(cx.theme().overlay).flex().justify_center().pt(px(120.)).child(view.clone())
+        });
+        let settings = self.settings.as_ref().map(|(view, _)| view.clone());
         div()
+            .key_context(SHELL_CONTEXT)
+            .on_action(cx.listener(|this, _: &OpenSwitcher, window, cx| this.open_switcher(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+            .on_action(cx.listener(|this, _: &PrevChannel, _, cx| this.client.update(cx, |c, cx| c.step_channel(-1, false, cx))))
+            .on_action(cx.listener(|this, _: &NextChannel, _, cx| this.client.update(cx, |c, cx| c.step_channel(1, false, cx))))
+            .on_action(cx.listener(|this, _: &PrevUnread, _, cx| this.client.update(cx, |c, cx| c.step_channel(-1, true, cx))))
+            .on_action(cx.listener(|this, _: &NextUnread, _, cx| this.client.update(cx, |c, cx| c.step_channel(1, true, cx))))
             .relative()
             .size_full()
             .flex()
@@ -833,6 +1424,10 @@ impl Render for Shell {
             .children(toast)
             .children(dialog)
             .children(sign_out)
+            .children(settings)
+            .children(switcher)
+            .children(modal)
+            .children(card)
             .children(self.menu.element())
     }
 }

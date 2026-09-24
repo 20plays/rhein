@@ -142,6 +142,30 @@ impl Api {
         self.send(req).await
     }
 
+    /// Uploads a profile picture; the result's `hash?cap=capability` becomes the `avatar_ref`.
+    pub async fn upload_profile_media(&self, filename: &str, mime: &str, bytes: Vec<u8>) -> ApiResult<Attachment> {
+        let req = self
+            .http
+            .post(self.url("/media"))
+            .header("Content-Type", mime)
+            .header("X-Telium-Filename", urlencoding::encode(filename).into_owned())
+            .header("X-Telium-Purpose", "profile")
+            .body(bytes);
+        self.send(req).await
+    }
+
+    pub async fn patch_profile(&self, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch("/profile", patch).await
+    }
+
+    pub async fn devices(&self) -> ApiResult<Vec<Device>> {
+        Ok(self.get::<DeviceList>("/devices").await?.devices)
+    }
+
+    pub async fn revoke_device(&self, device_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/devices/{}", urlencoding::encode(device_id))).await
+    }
+
     // ---- guild server ----
 
     pub async fn create_session(&self, assertion: &str) -> ApiResult<GuildSession> {
@@ -247,6 +271,46 @@ impl Api {
     /// Server-side member lookup by name, for autocomplete beyond the loaded roster.
     pub async fn search_members(&self, guild_id: &str, q: &str, limit: u32) -> ApiResult<MemberList> {
         self.get(&format!("/guilds/{guild_id}/members?q={}&limit={limit}", urlencoding::encode(q))).await
+    }
+
+    pub async fn patch_guild(&self, guild_id: &str, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/guilds/{guild_id}"), patch).await
+    }
+
+    pub async fn leave_guild(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/leave"), &serde_json::json!({})).await
+    }
+
+    pub async fn create_channel(&self, guild_id: &str, name: &str, kind: &str, parent_id: Option<&str>) -> ApiResult<Channel> {
+        self.post(
+            &format!("/guilds/{guild_id}/channels"),
+            &serde_json::json!({ "name": name, "type": kind, "parent_id": parent_id }),
+        )
+        .await
+    }
+
+    pub async fn patch_channel(&self, channel_id: &str, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/channels/{channel_id}"), patch).await
+    }
+
+    pub async fn delete_channel(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/channels/{channel_id}")).await
+    }
+
+    pub async fn patch_member(&self, guild_id: &str, user_id: &str, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/guilds/{guild_id}/members/{}", urlencoding::encode(user_id)), patch).await
+    }
+
+    pub async fn kick_member(&self, guild_id: &str, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/members/{}", urlencoding::encode(user_id))).await
+    }
+
+    pub async fn ban_member(&self, guild_id: &str, user_id: &str, reason: Option<&str>) -> ApiResult<serde_json::Value> {
+        let req = self
+            .http
+            .put(self.url(&format!("/guilds/{guild_id}/bans/{}", urlencoding::encode(user_id))))
+            .json(&serde_json::json!({ "reason": reason }));
+        self.send(req).await
     }
 
     pub async fn read_state(&self, guild_id: &str) -> ApiResult<ReadStateList> {

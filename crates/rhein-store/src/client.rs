@@ -227,6 +227,10 @@ pub struct Client {
     pub search: Option<SearchState>,
     member_lookup: HashMap<String, Vec<Member>>,
     pub recent_emoji: Vec<String>,
+    pub prefs: crate::prefs::Prefs,
+    profiles: HashMap<String, Option<rhein_proto::Profile>>,
+    /// Channels in the order they were opened, newest first (for the quick switcher).
+    pub visited: Vec<String>,
     typing: HashMap<String, Vec<(String, Instant)>>,
     signin: Option<Task<()>>,
 }
@@ -259,6 +263,9 @@ impl Client {
             search: None,
             member_lookup: HashMap::new(),
             recent_emoji: crate::prefs::load().recent_emoji,
+            prefs: crate::prefs::load(),
+            profiles: HashMap::new(),
+            visited: Vec::new(),
             typing: HashMap::new(),
             showing_home: false,
             read: HashMap::new(),
@@ -478,6 +485,301 @@ impl Client {
         self.persist();
     }
 
+    // ---------------------------------------------------------------- presence & prefs
+
+    /// Sets the status on every server now and for later reconnects.
+    pub fn set_presence(&mut self, status: String, custom_status: Option<String>, cx: &mut Context<Self>) {
+        let custom_status = custom_status.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        for server in &self.servers {
+            if let Some(gw) = &server.gateway {
+                gw.set_presence(status.clone(), custom_status.clone());
+            }
+        }
+        self.prefs.status = status;
+        self.prefs.custom_status = custom_status;
+        self.save_prefs();
+        cx.notify();
+    }
+
+    pub fn update_prefs(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut crate::prefs::Prefs)) {
+        change(&mut self.prefs);
+        self.save_prefs();
+        cx.notify();
+    }
+
+    fn save_prefs(&self) {
+        let mut on_disk = crate::prefs::load();
+        let recent = on_disk.recent_emoji.clone();
+        on_disk = self.prefs.clone();
+        on_disk.recent_emoji = if self.recent_emoji.is_empty() { recent } else { self.recent_emoji.clone() };
+        crate::prefs::store(&on_disk);
+    }
+
+    // ---------------------------------------------------------------- profile & devices
+
+    /// A user's public profile, fetched once through the home server and cached.
+    pub fn profile(&mut self, user_id: &str, cx: &mut Context<Self>) -> Option<rhein_proto::Profile> {
+        if let Some(cached) = self.profiles.get(user_id) {
+            return cached.clone();
+        }
+        self.profiles.insert(user_id.to_owned(), None);
+        let api = self.home.as_ref().map(|h| h.api.clone())?;
+        let io = self.io.clone();
+        let uid = user_id.to_owned();
+        cx.spawn(async move |this, cx| {
+            let asked = uid.clone();
+            let result = join(io.spawn(async move { Ok(api.profile(&asked).await?) })).await;
+            this.update(cx, |this, cx| {
+                if let Ok(profile) = result {
+                    this.profiles.insert(uid, Some(profile));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        None
+    }
+
+    /// Saves profile fields (only those given) and refreshes what this client shows.
+    pub fn save_profile(&mut self, patch: serde_json::Value, done: impl FnOnce(Result<(), String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                api.patch_profile(&patch).await?;
+                Ok(api.whoami().await?)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(me) => {
+                        if let (Some(home), Some(profile)) = (this.home.as_mut(), me.profile) {
+                            home.display_name = profile.display_name.clone();
+                            home.avatar_ref = profile.avatar_ref.clone();
+                            this.profiles.insert(home.user_id.clone(), Some(profile));
+                        }
+                        // Guild servers learn the new essentials with a fresh session.
+                        let names: Vec<String> = this.servers.iter().map(|s| s.name.clone()).collect();
+                        for name in names {
+                            this.renew_server(&name, cx);
+                        }
+                        done(Ok(()), cx);
+                    }
+                    Err(err) => done(Err(friendly(&err)), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Uploads a picture as the profile avatar; `done` receives the new `avatar_ref`.
+    pub fn upload_avatar(&mut self, path: std::path::PathBuf, done: impl FnOnce(Result<String, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("avatar").to_owned();
+                let bytes = tokio::task::spawn_blocking(move || std::fs::read(path)).await??;
+                let media = api.upload_profile_media(&name, guess_mime(&name), bytes).await?;
+                let cap = media.capability.clone().unwrap_or_default();
+                Ok(format!("{}?cap={cap}", media.hash))
+            }))
+            .await;
+            this.update(cx, |_, cx| done(result.map_err(|e| friendly(&e)), cx)).ok();
+        })
+        .detach();
+    }
+
+    /// The media URL for an `avatar_ref` on the home server (for previews in settings).
+    pub fn home_media_url(&self, reference: &str) -> Option<String> {
+        let home = self.home.as_ref()?;
+        Some(crate::media::media_url(&home.doc.api, reference, None))
+    }
+
+    pub fn load_devices(&mut self, done: impl FnOnce(Result<Vec<rhein_proto::Device>, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.devices().await?) })).await;
+            this.update(cx, |_, cx| done(result.map_err(|e| friendly(&e)), cx)).ok();
+        })
+        .detach();
+    }
+
+    pub fn revoke_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        self.fire(cx, async move { api.revoke_device(&device_id).await.map(drop) });
+    }
+
+    // ---------------------------------------------------------------- guild, channel & member actions
+
+    pub fn guild_can(&self, guild_id: &str, bit: u64) -> bool {
+        let Some(entry) = self.guild(guild_id) else { return false };
+        if entry.guild.owner.as_deref() == self.user_id() {
+            return true;
+        }
+        let bits = entry
+            .guild
+            .me
+            .as_ref()
+            .and_then(|m| m.get("permissions"))
+            .and_then(|p| p.as_str())
+            .map(crate::perms::parse_bits)
+            .unwrap_or(0);
+        bits & bit != 0 || bits & crate::perms::ADMINISTRATOR != 0
+    }
+
+    pub fn is_owner(&self, guild_id: &str) -> bool {
+        self.guild(guild_id).is_some_and(|g| g.guild.owner.as_deref() == self.user_id())
+    }
+
+    pub fn rename_guild(&mut self, guild_id: String, name: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        if let Some(entry) = self.guild_mut(&guild_id) {
+            entry.guild.name = name.clone();
+        }
+        cx.notify();
+        self.fire(cx, async move { api.patch_guild(&guild_id, &serde_json::json!({ "name": name })).await.map(drop) });
+    }
+
+    pub fn leave_guild(&mut self, guild_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        self.guilds.retain(|g| g.guild.id != guild_id);
+        if self.selected_guild.as_deref() == Some(guild_id.as_str()) {
+            self.selected_guild = self.guilds.first().map(|g| g.guild.id.clone());
+        }
+        cx.notify();
+        self.fire(cx, async move { api.leave_guild(&guild_id).await.map(drop) });
+    }
+
+    pub fn create_channel(&mut self, guild_id: String, name: String, kind: String, parent_id: Option<String>, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                Ok(api.create_channel(&guild_id, name.trim(), &kind, parent_id.as_deref()).await?)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    // CHANNEL_CREATE adds it to the list; open it once it is there.
+                    Ok(channel) => {
+                        if channel.is_textual() {
+                            let id = channel.id.clone();
+                            if this.channel(&id).is_none()
+                                && let Some(entry) = channel.guild_id.clone().and_then(|g| this.guilds.iter_mut().find(|e| e.guild.id == g))
+                            {
+                                entry.guild.channels.push(channel);
+                            }
+                            this.select_channel(id, cx);
+                        }
+                    }
+                    Err(err) => this.error = Some(format!("Couldn't create channel: {}", friendly(&err)).into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn edit_channel(&mut self, channel_id: String, name: String, topic: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let patch = serde_json::json!({ "name": name.trim(), "topic": topic.trim() });
+        self.fire(cx, async move { api.patch_channel(&channel_id, &patch).await.map(drop) });
+    }
+
+    pub fn delete_channel(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        self.fire(cx, async move { api.delete_channel(&channel_id).await.map(drop) });
+    }
+
+    pub fn set_nickname(&mut self, guild_id: String, user_id: String, nickname: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let patch = serde_json::json!({ "nickname": nickname.trim() });
+        self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
+    }
+
+    pub fn timeout_member(&mut self, guild_id: String, user_id: String, minutes: i64, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let patch = serde_json::json!({ "timeout_until": now_ms() + minutes * 60_000 });
+        self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
+    }
+
+    pub fn kick_member(&mut self, guild_id: String, user_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        self.fire(cx, async move { api.kick_member(&guild_id, &user_id).await.map(drop) });
+    }
+
+    pub fn ban_member(&mut self, guild_id: String, user_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        self.fire(cx, async move { api.ban_member(&guild_id, &user_id, None).await.map(drop) });
+    }
+
+    // ---------------------------------------------------------------- mark read
+
+    /// Acknowledges the newest message of a channel, fetching it when the history isn't loaded.
+    pub fn mark_read(&mut self, channel_id: String, cx: &mut Context<Self>) {
+        if let Some(mark) = self.read.get_mut(&channel_id) {
+            mark.unread = 0;
+            mark.mentions = 0;
+            mark.first_unread = None;
+        }
+        self.dividers.remove(&channel_id);
+        cx.notify();
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let newest = self
+            .logs
+            .get(&channel_id)
+            .and_then(|l| l.messages.iter().rev().find(|m| !m.id.starts_with("pending:")))
+            .map(|m| m.id.clone());
+        self.io.spawn(async move {
+            let id = match newest {
+                Some(id) => Some(id),
+                None => api.messages(&channel_id, None, 1).await.ok().and_then(|m| m.last().map(|m| m.id.clone())),
+            };
+            if let Some(id) = id {
+                let _ = api.ack(&channel_id, &id).await;
+            }
+        });
+    }
+
+    pub fn mark_guild_read(&mut self, guild_id: &str, cx: &mut Context<Self>) {
+        let Some(entry) = self.guild(guild_id) else { return };
+        let unread: Vec<String> = entry
+            .guild
+            .channels
+            .iter()
+            .filter(|c| self.read.get(&c.id).is_some_and(|m| m.unread > 0 || m.mentions > 0))
+            .map(|c| c.id.clone())
+            .collect();
+        for channel in unread {
+            self.mark_read(channel, cx);
+        }
+    }
+
+    // ---------------------------------------------------------------- navigation
+
+    /// Text channels of the selected guild in sidebar order.
+    fn sidebar_channels(&self) -> Vec<String> {
+        let Some(entry) = self.selected_guild.as_deref().and_then(|g| self.guild(g)) else { return Vec::new() };
+        entry.ordered_channels().into_iter().filter(|c| c.is_textual()).map(|c| c.id.clone()).collect()
+    }
+
+    /// Moves to the previous (`-1`) or next (`+1`) channel, optionally only unread ones; wraps.
+    pub fn step_channel(&mut self, direction: i32, unread_only: bool, cx: &mut Context<Self>) {
+        let order = self.sidebar_channels();
+        let current = self.selected_channel().map(str::to_owned);
+        if let Some(target) = crate::nav::step(&order, current.as_deref(), direction, |c| {
+            !unread_only || self.read.get(c).is_some_and(|m| m.is_unread() || m.mentions > 0)
+        }) {
+            self.select_channel(target, cx);
+        }
+    }
+
     pub fn remove_server(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.home.as_ref().is_some_and(|h| h.doc.server_name == name) {
             return;
@@ -535,6 +837,7 @@ impl Client {
                 let doc = discover(&http, &input).await?;
                 let api = Api::new(http, &doc.api, None);
                 let session = auth::guild_session(&home_api, &api, &doc.server_name).await?;
+                let prefs = crate::prefs::load();
                 let url = session
                     .gateway
                     .clone()
@@ -544,7 +847,8 @@ impl Client {
                     url,
                     token: session.session_token,
                     intents: USER_INTENTS,
-                    status: "online".into(),
+                    status: prefs.status.clone(),
+                    custom_status: prefs.custom_status.clone(),
                 });
                 Ok((doc, api, handle, events))
             }))
@@ -946,6 +1250,9 @@ impl Client {
         self.showing_home = false;
         self.selected_guild = Some(guild.clone());
         self.selected_channel.insert(guild, channel_id.clone());
+        self.visited.retain(|c| *c != channel_id);
+        self.visited.insert(0, channel_id.clone());
+        self.visited.truncate(50);
         let had_unread = self.read.get(&channel_id).is_some_and(|m| m.unread > 0 || m.mentions > 0);
         let divider = self.read.get(&channel_id).filter(|m| m.unread > 0).and_then(|m| {
             m.first_unread.clone().map(Divider::At).or_else(|| m.last_read.clone().map(Divider::After))

@@ -27,6 +27,7 @@ fn main() {
         .run(move |cx: &mut App| {
         rhein_ui::init(cx);
         cx.bind_keys(views::chat::bindings());
+        cx.bind_keys(views::shell::bindings());
         cx.set_global(io.clone());
         cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None), KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());

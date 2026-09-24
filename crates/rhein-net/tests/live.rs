@@ -69,6 +69,7 @@ async fn register_login_session_gateway_message() {
         token: session.session_token.clone(),
         intents: USER_INTENTS,
         status: "online".into(),
+        custom_status: None,
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -152,6 +153,7 @@ async fn guild_on_foreign_server() {
         token: session.session_token,
         intents: USER_INTENTS,
         status: "online".into(),
+        custom_status: None,
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -246,4 +248,53 @@ async fn pins_threads_search() {
     assert!(found, "search did not find the message");
     assert!(api.expressions(&guild.id).await.expect("expressions").is_empty());
     println!("ok: pins, thread {} and search work", thread.id);
+}
+
+/// Profile edits, the device list, channel management and leaving a guild.
+#[tokio::test]
+async fn settings_and_management() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    let owner_home = Api::new(http.clone(), &doc.api, None);
+    register_retrying(&owner_home, &format!("own{}", std::process::id()), &ksf).await;
+
+    owner_home
+        .patch_profile(&serde_json::json!({ "display_name": "Owner", "bio": "hello", "pronouns": "they/them" }))
+        .await
+        .expect("patch profile");
+    let me = owner_home.whoami().await.expect("whoami");
+    let profile = me.profile.expect("profile");
+    assert_eq!(profile.display_name.as_deref(), Some("Owner"));
+    assert_eq!(profile.bio.as_deref(), Some("hello"));
+    let devices = owner_home.devices().await.expect("devices");
+    assert!(devices.iter().any(|d| d.current), "current device listed");
+
+    let owner = Api::new(http.clone(), &doc.api, None);
+    auth::guild_session(&owner_home, &owner, &doc.server_name).await.expect("session");
+    let guild = owner.create_guild("Managed").await.expect("guild");
+    let chan = owner.create_channel(&guild.id, "news", "text", None).await.expect("create channel");
+    owner.patch_channel(&chan.id, &serde_json::json!({ "name": "updates", "topic": "what changed" })).await.expect("patch channel");
+    let renamed = owner.channels(&guild.id).await.unwrap().into_iter().find(|c| c.id == chan.id).expect("channel");
+    assert_eq!(renamed.name, "updates");
+    owner.delete_channel(&chan.id).await.expect("delete channel");
+    assert!(!owner.channels(&guild.id).await.unwrap().iter().any(|c| c.id == chan.id));
+    owner.patch_guild(&guild.id, &serde_json::json!({ "name": "Renamed" })).await.expect("rename guild");
+
+    // A second account joins through an invite and leaves again.
+    let invite = owner.create_invite(&guild.id, None).await.expect("invite");
+    let code = invite["code"].as_str().expect("code").to_owned();
+    let guest_home = Api::new(http.clone(), &doc.api, None);
+    register_retrying(&guest_home, &format!("gst{}", std::process::id()), &ksf).await;
+    let guest = Api::new(http, &doc.api, None);
+    auth::guild_session(&guest_home, &guest, &doc.server_name).await.expect("guest session");
+    guest.join_invite(&code).await.expect("join");
+    assert!(guest.guilds().await.unwrap().iter().any(|g| g.id == guild.id));
+    guest.leave_guild(&guild.id).await.expect("leave");
+    assert!(!guest.guilds().await.unwrap().iter().any(|g| g.id == guild.id));
+    println!("ok: profile, devices, channels, guild rename and leave work");
 }

@@ -67,16 +67,21 @@ pub struct Ready {
     pub guilds: Vec<Guild>,
 }
 
-pub fn identify(token: &str, intents: u64, status: &str) -> Value {
+pub fn identify(token: &str, intents: u64, status: &str, custom_status: Option<&str>) -> Value {
     json!({
         "op": "IDENTIFY",
         "d": {
             "token": token,
             "intents": intents,
-            "presence": { "status": status },
+            "presence": { "status": status, "custom_status": custom_status },
             "protocol": { "version": PROTOCOL_VERSION },
         }
     })
+}
+
+/// `status` is one of online, idle, dnd, invisible.
+pub fn presence(status: &str, custom_status: Option<&str>) -> Value {
+    json!({ "op": "PRESENCE_UPDATE", "d": { "status": status, "custom_status": custom_status } })
 }
 
 pub fn heartbeat() -> Value {
@@ -217,7 +222,7 @@ mod tests {
 
     #[test]
     fn identify_shape() {
-        let v = identify("tok", USER_INTENTS, "online");
+        let v = identify("tok", USER_INTENTS, "online", None);
         assert_eq!(v["op"], "IDENTIFY");
         assert_eq!(v["d"]["intents"], 255);
     }

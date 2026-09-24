@@ -33,6 +33,8 @@ pub enum GatewayEvent {
 enum Command {
     Send(Value),
     Reconnect(String),
+    /// Remember a presence for the next IDENTIFY and send it now.
+    Presence(String, Option<String>),
     Close,
 }
 
@@ -44,6 +46,11 @@ pub struct GatewayHandle {
 impl GatewayHandle {
     pub fn send(&self, frame: Value) {
         let _ = self.commands.send(Command::Send(frame));
+    }
+
+    /// Sets this connection's presence now and for every later IDENTIFY.
+    pub fn set_presence(&self, status: String, custom_status: Option<String>) {
+        let _ = self.commands.send(Command::Presence(status, custom_status));
     }
 
     /// Reconnects now with a fresh token (after a renewed session).
@@ -63,6 +70,7 @@ pub struct GatewayConfig {
     pub token: String,
     pub intents: u64,
     pub status: String,
+    pub custom_status: Option<String>,
 }
 
 /// Starts the connection task on the current tokio runtime. Events arrive on the returned
@@ -90,7 +98,7 @@ async fn run(
     let mut failures: u32 = 0;
     loop {
         let _ = events.send(GatewayEvent::Status(GatewayStatus::Connecting));
-        let outcome = session(&config, &mut commands, &events, &mut failures).await;
+        let outcome = session(&mut config, &mut commands, &events, &mut failures).await;
         let wait = match outcome {
             Outcome::Closed => return,
             Outcome::Retry { quick: true } => Duration::from_millis(500 + jitter(2500)),
@@ -115,6 +123,10 @@ async fn run(
                             break;
                         }
                         Some(Command::Send(_)) => {}
+                        Some(Command::Presence(status, custom)) => {
+                            config.status = status;
+                            config.custom_status = custom;
+                        }
                         Some(Command::Close) | None => return,
                     }
                 }
@@ -129,6 +141,10 @@ async fn run(
                 cmd = commands.recv() => match cmd {
                     Some(Command::Reconnect(token)) => { config.token = token; break; }
                     Some(Command::Send(_)) => {}
+                    Some(Command::Presence(status, custom)) => {
+                        config.status = status;
+                        config.custom_status = custom;
+                    }
                     Some(Command::Close) | None => return,
                 },
             }
@@ -143,7 +159,7 @@ fn jitter(max_ms: u64) -> u64 {
 }
 
 async fn session(
-    config: &GatewayConfig,
+    config: &mut GatewayConfig,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &mpsc::UnboundedSender<GatewayEvent>,
     failures: &mut u32,
@@ -177,6 +193,14 @@ async fn session(
                 next_beat = Some(Instant::now() + heartbeat_every);
             }
             cmd = commands.recv() => match cmd {
+                Some(Command::Presence(status, custom)) => {
+                    let frame = rhein_proto::presence(&status, custom.as_deref());
+                    config.status = status;
+                    config.custom_status = custom;
+                    if ready && sink.send(WsMessage::text(frame.to_string())).await.is_err() {
+                        return Outcome::Retry { quick: false };
+                    }
+                }
                 Some(Command::Send(frame)) => {
                     if ready {
                         if sink.send(WsMessage::text(frame.to_string())).await.is_err() {
@@ -214,7 +238,7 @@ async fn session(
                                 if hello.heartbeat_interval_ms > 0 {
                                     heartbeat_every = Duration::from_millis(hello.heartbeat_interval_ms);
                                 }
-                                let identify = rhein_proto::identify(&config.token, config.intents, &config.status);
+                                let identify = rhein_proto::identify(&config.token, config.intents, &config.status, config.custom_status.as_deref());
                                 if sink.send(WsMessage::text(identify.to_string())).await.is_err() {
                                     return Outcome::Retry { quick: false };
                                 }

@@ -74,6 +74,10 @@ pub enum ChatEvent {
     TogglePanel(PanelKind),
     OpenThread(String),
     ClosePanel,
+    /// Show a user's profile card at a position.
+    Profile { user_id: String, at: Point<Pixels> },
+    /// Open the member context menu for a user.
+    MemberMenu { user_id: String, at: Point<Pixels> },
 }
 
 impl EventEmitter<ChatEvent> for ChatView {}
@@ -361,9 +365,30 @@ impl ChatView {
     fn cancel(&mut self, cx: &mut Context<Self>) {
         if self.editing.take().is_some() {
             self.composer.update(cx, |c, cx| c.clear(cx));
+        } else if self.replying.take().is_none() {
+            // Nothing to cancel: Esc marks the channel read and returns to the present.
+            if let Some(channel) = self.current() {
+                self.client.update(cx, |c, cx| c.mark_read(channel, cx));
+            }
+            self.list.scroll_to_end();
+            self.list.set_follow_mode(FollowMode::Tail);
         }
-        self.replying = None;
         cx.notify();
+    }
+
+    /// Inserts text at the caret and focuses the composer (e.g. "Mention" from a menu).
+    pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |c, cx| c.insert(text, cx));
+        let focus = self.composer_focus(cx);
+        window.focus(&focus, cx);
+    }
+
+    pub(crate) fn show_profile(&mut self, user_id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        cx.emit(ChatEvent::Profile { user_id, at });
+    }
+
+    pub(crate) fn member_menu(&mut self, user_id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        cx.emit(ChatEvent::MemberMenu { user_id, at });
     }
 
     pub(crate) fn reveal_spoiler(&mut self, key: (String, usize), cx: &mut Context<Self>) {

@@ -8,6 +8,7 @@ pub mod emoji;
 pub mod io;
 pub mod markdown;
 pub mod media;
+pub mod nav;
 pub mod perms;
 pub mod persist;
 pub mod prefs;

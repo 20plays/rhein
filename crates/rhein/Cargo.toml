@@ -15,5 +15,6 @@ gpui.workspace = true
 gpui_platform.workspace = true
 log.workspace = true
 reqwest.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 jiff = "0.2"

@@ -286,3 +286,20 @@ pub struct CustomEmoji {
 pub struct Expressions {
     pub emojis: Vec<CustomEmoji>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Device {
+    pub device_id: String,
+    pub name: Option<String>,
+    pub created_at: Option<Millis>,
+    pub last_seen: Option<Millis>,
+    pub active: bool,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DeviceList {
+    pub devices: Vec<Device>,
+}

@@ -4,7 +4,9 @@ pub mod login;
 pub mod message_text;
 pub mod panels;
 pub mod rows;
+pub mod settings;
 pub mod shell;
+pub mod switcher;
 
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window,
