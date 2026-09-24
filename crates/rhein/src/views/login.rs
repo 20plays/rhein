@@ -138,6 +138,14 @@ impl Render for LoginView {
                         .disabled(busy)
                         .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
                     )
+                    // Adding an account: the one we came from is a click away.
+                    .children(self.client.read(cx).returning_to.clone().map(|(id, name)| {
+                        let client = self.client.clone();
+                        Button::new("login-back", format!("Back to {name}"))
+                            .ghost()
+                            .full_width()
+                            .on_click(move |_, _, cx| client.update(cx, |c, cx| c.switch_account(&id, cx)))
+                    }))
                     .child(
                         div()
                             .flex()

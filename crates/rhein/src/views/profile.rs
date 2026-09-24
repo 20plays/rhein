@@ -85,6 +85,11 @@ pub fn frame(look: &Look, t: &Theme, body: impl IntoElement) -> Div {
 /// The banner band with the face overlapping its lower edge. The face gets a ring in the card's
 /// own colour, so it looks cut out of the banner.
 pub fn header(look: &Look, face: AnyElement, t: &Theme) -> AnyElement {
+    header_sized(look, face, FACE, BANNER_H, t)
+}
+
+/// [`header`] at another scale, e.g. the smaller card heading the account menu.
+pub fn header_sized(look: &Look, face: AnyElement, face_size: f32, banner_h: f32, t: &Theme) -> AnyElement {
     let fill = look.accent.map(rgb).unwrap_or(t.bg_selected);
     let ring = match look.theme {
         Some([top, _]) => mix(t.bg_panel, rgb(top), THEME_TINT),
@@ -93,11 +98,11 @@ pub fn header(look: &Look, face: AnyElement, t: &Theme) -> AnyElement {
     div()
         .relative()
         .w_full()
-        .h(px(BANNER_H + FACE / 2. + RING))
+        .h(px(banner_h + face_size / 2. + RING))
         .child(
             div()
                 .w_full()
-                .h(px(BANNER_H))
+                .h(px(banner_h))
                 .bg(fill)
                 .overflow_hidden()
                 .children(look.banner.clone().map(|url| img(url).size_full().object_fit(ObjectFit::Cover))),
@@ -106,7 +111,7 @@ pub fn header(look: &Look, face: AnyElement, t: &Theme) -> AnyElement {
             div()
                 .absolute()
                 .left(px(16. - RING))
-                .top(px(BANNER_H - FACE / 2. - RING))
+                .top(px(banner_h - face_size / 2. - RING))
                 .p(px(RING))
                 .rounded_full()
                 .bg(ring)

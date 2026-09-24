@@ -41,6 +41,11 @@ impl Root {
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let signed_in = self.client.read(cx).phase == Phase::SignedIn;
+        // A switch of accounts passes through another phase, so the next account always gets a
+        // fresh shell with nothing of the last one left in its views.
+        if !signed_in {
+            self.shell = None;
+        }
         if signed_in && self.shell.is_none() {
             let client = self.client.clone();
             self.shell = Some(cx.new(|cx| Shell::new(client, window, cx)));

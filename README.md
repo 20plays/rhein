@@ -38,7 +38,7 @@ scripts/dev-server.sh b      # Telium "b.localhost" on :8449, federates with a
 cargo run -p rhein
 ```
 
-The login form defaults to `localhost:8448` (`RHEIN_SERVER` overrides it). The session is stored in `~/.config/rhein/session.json` (mode 0600), or in `RHEIN_CONFIG_DIR` if that is set.
+The login form defaults to `localhost:8448` (`RHEIN_SERVER` overrides it). Saved accounts are stored in `~/.config/rhein/accounts.json` (mode 0600), or in `RHEIN_CONFIG_DIR` if that is set; a `session.json` from earlier versions is taken over as the first account.
 
 Invites are entered as `server/CODE`, for example `localhost:8449/~abcd1234`.
 
@@ -58,7 +58,7 @@ node presence.mjs @ben…:localhost music             # keep Ben online with an 
 cargo run -p rhein-rpc --example watch              # print what Rhein would share from this machine
 ```
 
-Debug builds can start on a given screen, for screenshots: `RHEIN_DEV_OPEN=home|settings|settings=Activity|join|switcher|signout|profile=@user:server`.
+Debug builds can start on a given screen, for screenshots: `RHEIN_DEV_OPEN=home|settings|settings=Activity|join|switcher|signout|account|switch=@user:server|profile=@user:server`.
 
 ## Tests
 

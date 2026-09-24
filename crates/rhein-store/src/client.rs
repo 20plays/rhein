@@ -233,6 +233,8 @@ pub struct Client {
     sharing: Option<Vec<rhein_proto::Activity>>,
     /// The local activity sources while sharing is on, and the task that follows them.
     rpc: Option<(rhein_rpc::Handle, Task<()>)>,
+    /// While adding an account: the one we came from (user id, name), to go back to.
+    pub returning_to: Option<(String, String)>,
     /// Everything the sources found, before the sharing preferences filter it.
     pub local_activities: Vec<rhein_proto::Activity>,
     pub rpc_status: rhein_rpc::Status,
@@ -306,6 +308,7 @@ impl Client {
             embeds: HashMap::new(),
             sharing: None,
             rpc: None,
+            returning_to: None,
             local_activities: Vec::new(),
             rpc_status: rhein_rpc::Status::default(),
             artwork: HashMap::new(),
@@ -444,6 +447,7 @@ impl Client {
         self.home = Some(home);
         self.phase = Phase::SignedIn;
         self.error = None;
+        self.returning_to = None;
         self.persist();
         self.sync_rpc(cx);
         // The home server may host guilds too; it gets a guild session like any other server.
@@ -453,9 +457,60 @@ impl Client {
         }
     }
 
+    /// Signs out of the active account and forgets it on this device. Another saved account, if
+    /// there is one, takes over.
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         log::info!("signing out");
-        persist::clear();
+        let next = self.home.as_ref().map(|h| h.user_id.clone()).and_then(|id| persist::remove(&id));
+        self.reset();
+        self.returning_to = None;
+        match next {
+            Some(_) => {
+                self.phase = Phase::Restoring;
+                self.restore(cx);
+            }
+            None => self.phase = Phase::SignedOut,
+        }
+        cx.notify();
+    }
+
+    /// Accounts saved on this device, the active one included.
+    pub fn saved_accounts(&self) -> Vec<Saved> {
+        persist::accounts()
+    }
+
+    /// Switches to another saved account without a password.
+    pub fn switch_account(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        if self.user_id() == Some(user_id) {
+            return;
+        }
+        if let Err(err) = persist::set_active(user_id) {
+            self.error = Some(format!("{err:#}").into());
+            cx.notify();
+            return;
+        }
+        log::info!("switching to {user_id}");
+        self.reset();
+        self.returning_to = None;
+        self.phase = Phase::Restoring;
+        self.restore(cx);
+        cx.notify();
+    }
+
+    /// Opens the sign-in form for another account; the current one stays saved, and the form
+    /// offers the way back to it.
+    pub fn add_account(&mut self, cx: &mut Context<Self>) {
+        let back = self.home.as_ref().map(|h| (h.user_id.clone(), h.display_name.clone().unwrap_or_else(|| localpart(&h.user_id).to_owned())));
+        self.reset();
+        self.returning_to = back;
+        self.phase = Phase::SignedOut;
+        cx.notify();
+    }
+
+    /// Drops everything the signed-in account brought with it: connections, guilds, history,
+    /// what we share. Saved accounts on disk are not touched.
+    fn reset(&mut self) {
+        self.signin = None;
         self.rpc = None;
         self.sharing = None;
         self.local_activities.clear();
@@ -481,9 +536,9 @@ impl Client {
         self.showing_home = false;
         self.selected_guild = None;
         self.selected_channel.clear();
+        self.visited.clear();
         self.home = None;
-        self.phase = Phase::SignedOut;
-        cx.notify();
+        self.error = None;
     }
 
     fn persist(&self) {
@@ -501,6 +556,7 @@ impl Client {
                 .filter(|s| s.name != home.doc.server_name)
                 .map(|s| s.input.clone())
                 .collect(),
+            display_name: home.display_name.clone(),
         };
         let io = self.io.clone();
         let api = home.api.clone();
@@ -639,7 +695,16 @@ impl Client {
             .filter(|a| !prefs.hidden_activities.contains(&a.name))
             .cloned()
             .collect();
-        if self.sharing.as_ref() != Some(&shared) {
+        // With nothing of our own we stay out of it, so another session's activity (the Telium
+        // desktop app's, say) isn't erased; when ours ends, it is cleared once.
+        if shared.is_empty() {
+            if self.sharing.as_ref().is_some_and(|s| !s.is_empty()) {
+                self.sharing = Some(Vec::new());
+                self.push_presence();
+                self.sharing = None;
+                cx.notify();
+            }
+        } else if self.sharing.as_ref() != Some(&shared) {
             self.sharing = Some(shared);
             self.push_presence();
             cx.notify();

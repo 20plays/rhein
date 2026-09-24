@@ -140,7 +140,7 @@ impl Shell {
         let focus = chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
         // Debug builds can start on a given screen, for screenshots without input:
-        // RHEIN_DEV_OPEN=home|settings|join|switcher|signout|profile=@user:server.
+        // RHEIN_DEV_OPEN=home|settings|settings=Section|join|switcher|signout|account|switch=@user|profile=@user.
         #[cfg(debug_assertions)]
         if let Ok(what) = std::env::var("RHEIN_DEV_OPEN") {
             cx.defer_in(window, move |this: &mut Self, window, cx| match what.as_str() {
@@ -157,8 +157,20 @@ impl Shell {
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
                 "signout" => this.ask_sign_out(window, cx),
+                // The account menu, once the profile is in.
+                "account" => {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                        this.update_in(cx, |v, window, cx| v.account_menu(window, cx)).ok();
+                    })
+                    .detach();
+                }
                 // profile=@user:server opens that card once members are in; settings=Activity
                 // opens a settings section.
+                other if other.starts_with("switch=") => {
+                    let user = other.trim_start_matches("switch=").to_owned();
+                    this.client.update(cx, |c, cx| c.switch_account(&user, cx));
+                }
                 other if other.starts_with("settings=") => {
                     this.open_settings(window, cx);
                     let section = other.trim_start_matches("settings=").to_owned();
@@ -638,36 +650,122 @@ impl Shell {
         self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
     }
 
-    fn status_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let custom = self.client.read(cx).prefs.custom_status.clone();
-        let mut entries = Vec::new();
-        for (status, label) in [("online", "Online"), ("idle", "Idle"), ("dnd", "Do not disturb"), ("invisible", "Invisible")] {
-            let (c, keep) = (self.client.clone(), custom.clone());
-            entries.push(MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_presence(status.into(), keep.clone(), cx))).with_icon(Icon::Circle));
-        }
-        entries.push(MenuEntry::Separator);
+    /// Your account, opened from the profile strip: your card, presence and custom status, the
+    /// saved accounts to switch between, and signing out.
+    fn account_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.read(cx);
+        let Some(me) = client.user_id().map(str::to_owned) else { return };
+        let prefs = client.prefs.clone();
+        let accounts = client.saved_accounts();
         let this = cx.weak_entity();
-        entries.push(MenuEntry::item("Set a custom status…", move |window, cx| {
-            this.update(cx, |v, cx| {
-                let client = v.client.clone();
-                let current = client.read(cx).prefs.custom_status.clone().unwrap_or_default();
-                v.prompt("Custom status", vec![("What are you up to?".into(), current)], "Save", move |values, cx| {
-                    let text = values[0].clone();
-                    client.update(cx, |c, cx| {
-                        let status = c.prefs.status.clone();
-                        c.set_presence(status, Some(text), cx)
-                    });
-                }, window, cx)
-            }).ok();
-        }).with_icon(Icon::Pencil));
-        if custom.is_some() {
+        let mut entries = Vec::new();
+
+        // The card: your banner or accent, face, name, address and status line.
+        {
+            let client = self.client.clone();
+            let me = me.clone();
+            entries.push(MenuEntry::custom(move |_, cx| {
+                let t = cx.theme().clone();
+                let profile = client.update(cx, |c, cx| c.profile(&me, cx));
+                let c = client.read(cx);
+                let name = c.display_name(None, &me);
+                let look = profile::Look {
+                    banner: profile.as_ref().and_then(|p| p.banner_ref.as_deref()).and_then(|r| c.banner_url(&me, r)),
+                    accent: profile.as_ref().and_then(|p| p.accent_color),
+                    theme: None,
+                };
+                let presence = presence_of(&c.prefs.status);
+                let face = Avatar::new(me.clone(), name.clone()).size(px(56.)).image(c.avatar_url(None, &me).map(Into::into)).presence(Some(presence));
+                div()
+                    .mb_1()
+                    .rounded(radius::MD)
+                    .overflow_hidden()
+                    .bg(t.bg_panel)
+                    .child(profile::header_sized(&look, face.into_any_element(), 56., 64., &t))
+                    .child(
+                        div()
+                            .px_3()
+                            .pb_3()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                            .child(div().text_size(text::SM).text_color(t.text_faint).truncate().child(me.clone()))
+                            .children(c.prefs.custom_status.clone().map(|s| div().pt_1().text_size(text::SM).text_color(t.text_muted).child(s))),
+                    )
+                    .into_any_element()
+            }));
+        }
+
+        // Presence, with the current one checked.
+        for (status, label) in [("online", "Online"), ("idle", "Idle"), ("dnd", "Do not disturb"), ("invisible", "Invisible")] {
+            let (c, keep) = (self.client.clone(), prefs.custom_status.clone());
+            entries.push(
+                MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_presence(status.into(), keep.clone(), cx)))
+                    .with_leading(move |_, cx| presence_dot(presence_of(status), cx))
+                    .checked(prefs.status == status),
+            );
+        }
+        {
+            let v = this.clone();
+            let label = if prefs.custom_status.is_some() { "Edit custom status…" } else { "Set a custom status…" };
+            entries.push(MenuEntry::item(label, move |window, cx| {
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    let current = client.read(cx).prefs.custom_status.clone().unwrap_or_default();
+                    v.prompt("Custom status", vec![("What are you up to?".into(), current)], "Save", move |values, cx| {
+                        let text = values[0].clone();
+                        client.update(cx, |c, cx| {
+                            let status = c.prefs.status.clone();
+                            c.set_presence(status, Some(text), cx)
+                        });
+                    }, window, cx)
+                }).ok();
+            }).with_icon(Icon::Smile));
+        }
+        if prefs.custom_status.is_some() {
             let c = self.client.clone();
             entries.push(MenuEntry::item("Clear custom status", move |_, cx| c.update(cx, |c, cx| {
                 let status = c.prefs.status.clone();
                 c.set_presence(status, None, cx)
             })).with_icon(Icon::X));
         }
-        self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+        {
+            let v = this.clone();
+            entries.push(MenuEntry::item("Edit profile", move |window, cx| {
+                v.update(cx, |v, cx| v.open_settings(window, cx)).ok();
+            }).with_icon(Icon::Pencil));
+        }
+
+        // Saved accounts: switch without a password, or add another.
+        entries.push(MenuEntry::Separator);
+        entries.push(MenuEntry::Label("switch account".into()));
+        for account in accounts {
+            let id = account.user_id.clone();
+            let name = account.display_name.clone().unwrap_or_else(|| rhein_proto::localpart(&id).to_owned());
+            let label = format!("{name} · {}", rhein_proto::domain_of(&id).unwrap_or_default());
+            let (c, target) = (self.client.clone(), id.clone());
+            let (face_id, face_name) = (id.clone(), name.clone());
+            entries.push(
+                MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.switch_account(&target, cx)))
+                    .with_leading(move |_, _| Avatar::new(face_id.clone(), face_name.clone()).size(px(20.)).into_any_element())
+                    .checked(id == me),
+            );
+        }
+        {
+            let c = self.client.clone();
+            entries.push(MenuEntry::item("Add an account", move |_, cx| c.update(cx, |c, cx| c.add_account(cx))).with_icon(Icon::UserPlus));
+        }
+        entries.push(MenuEntry::Separator);
+        {
+            let v = this.clone();
+            entries.push(MenuEntry::item("Sign out", move |window, cx| {
+                v.update(cx, |v, cx| v.ask_sign_out(window, cx)).ok();
+            }).with_icon(Icon::LogOut).danger());
+        }
+
+        // Opens upward from the strip's top edge, flush with the sidebar's left.
+        let at = gpui::point(px(8.), window.viewport_size().height - PROFILE_STRIP_H - px(4.));
+        self.menu.show_anchored(at, gpui::Anchor::BottomLeft, px(280.), entries, |v: &mut Shell| &mut v.menu, window, cx);
     }
 
     // ---------------------------------------------------------------- modals
@@ -1197,8 +1295,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// You, at the foot of the sidebar: avatar, name and status (a click sets it), settings and
-    /// sign-out.
+    /// You, at the foot of the sidebar: who you are on top (a click opens the account menu), what
+    /// you are sharing below, and the way to settings.
     fn profile_strip(&self, cx: &Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
@@ -1206,75 +1304,121 @@ impl Shell {
         let name = client.display_name(None, &me);
         let avatar = client.avatar_url(None, &me);
         let prefs = &client.prefs;
-        let presence = match prefs.status.as_str() {
-            "idle" => Presence::Idle,
-            "dnd" => Presence::Dnd,
-            "invisible" => Presence::Offline,
-            _ => Presence::Online,
-        };
+        let presence = presence_of(&prefs.status);
         let status = prefs.custom_status.clone().unwrap_or_else(|| match prefs.status.as_str() {
             "idle" => "idle".into(),
             "dnd" => "do not disturb".into(),
             "invisible" => "invisible".into(),
             _ => "online".into(),
         });
-        // As tall as the composer box plus the status line below it, so its top edge runs level
-        // with the composer's.
-        div()
-            .h(PROFILE_STRIP_H)
-            .flex_none()
-            .px_2()
+        let activity = client.shared_activities().first().cloned();
+
+        let who = div()
+            .id("profile-strip")
+            .flex_1()
+            .min_w_0()
+            .h(px(40.))
+            .px_1()
+            .rounded(radius::MD)
             .flex()
             .items_center()
-            .gap_1()
-            .border_t_1()
-            .border_color(t.border)
+            .gap_2()
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_hover))
+            .on_click(cx.listener(|this, _, window, cx| this.account_menu(window, cx)))
+            .child(Avatar::new(me.clone(), name.clone()).size(px(32.)).image(avatar.map(Into::into)).presence(Some(presence)))
             .child(
                 div()
-                    .id("profile-strip")
                     .flex_1()
                     .min_w_0()
-                    .h(px(52.))
-                    .px_1()
-                    .rounded(radius::MD)
+                    .flex()
+                    .flex_col()
+                    .child(div().text_size(text::MD).line_height(px(18.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                    .child(div().font_family(FONT_MONO).text_size(text::XS).line_height(px(15.)).text_color(t.text_faint).truncate().child(status)),
+            );
+
+        // Your own activity: its picture may load directly, since it came from this machine.
+        let shared = match activity {
+            Some(a) => {
+                let glyph = match a.kind {
+                    2 => Icon::Music,
+                    1 | 3 => Icon::Monitor,
+                    _ => Icon::Gamepad,
+                };
+                let art = a.assets.as_ref().and_then(|x| x.large_image.clone());
+                let what = match a.kind {
+                    2 | 3 => a.details.clone().unwrap_or_else(|| a.name.clone()),
+                    _ => a.name.clone(),
+                };
+                let detail = match a.kind {
+                    2 | 3 => a.state.clone(),
+                    _ => a.details.clone(),
+                };
+                div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.bg_hover))
-                    .tooltip(tooltip("Set status"))
-                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
-                    .child(Avatar::new(me.clone(), name.clone()).size(px(36.)).image(avatar.map(Into::into)).presence(Some(presence)))
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_none()
+                            .rounded(radius::SM)
+                            .bg(t.bg_selected)
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(match art {
+                                Some(url) => gpui::img(url).size(px(28.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                                None => icon_sized(glyph, px(14.)).text_color(t.text_faint).into_any_element(),
+                            }),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap_0p5()
-                            .child(div().text_size(text::MD).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status))
-                            // What we share right now, if anything.
-                            .children(client.shared_activities().first().map(|a| {
+                            .child(
                                 div()
                                     .font_family(FONT_MONO)
                                     .text_size(text::XS)
-                                    .text_color(t.text_muted)
+                                    .line_height(px(14.))
+                                    .text_color(t.text_faint)
                                     .truncate()
-                                    .child(format!("▶ {}", a.summary().to_lowercase()))
+                                    .child(format!("{} {}", a.verb().to_lowercase(), if matches!(a.kind, 2 | 3) { a.name.clone() } else { String::new() })),
+                            )
+                            .child(div().text_size(text::SM).line_height(px(16.)).text_color(t.text_muted).truncate().child(match detail {
+                                Some(d) => format!("{what} · {d}"),
+                                None => what,
                             })),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            }
+            None => div().px_1().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("no activity").into_any_element(),
+        };
+
+        // As tall as the composer box plus the status line below it, so its top edge runs level
+        // with the composer's.
+        div()
+            .h(PROFILE_STRIP_H)
+            .flex_none()
+            .px_2()
+            .pt_1p5()
+            .pb_2()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .border_t_1()
+            .border_color(t.border)
             .child(
-                IconButton::new("open-settings", Icon::Settings)
-                    .tooltip("Settings (Ctrl+,)")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                div().flex().items_center().gap_1().child(who).child(
+                    IconButton::new("open-settings", Icon::Settings)
+                        .tooltip("Settings (Ctrl+,)")
+                        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                ),
             )
-            .child(
-                IconButton::new("sign-out", Icon::LogOut)
-                    .tooltip("Sign out")
-                    .on_click(cx.listener(|this, _, window, cx| this.ask_sign_out(window, cx))),
-            )
+            .child(div().px_1().child(shared))
             .into_any_element()
     }
 
@@ -1581,6 +1725,12 @@ impl Shell {
         }
         let t = cx.theme().clone();
         let me = self.client.read(cx).user_id().unwrap_or_default().to_owned();
+        let others = self.client.read(cx).saved_accounts().iter().filter(|a| a.user_id != me).count();
+        let rest = match others {
+            0 => String::new(),
+            1 => " Your other saved account stays signed in.".into(),
+            n => format!(" Your {n} other saved accounts stay signed in."),
+        };
         let this = cx.weak_entity();
         Some(
             Modal::new("sign-out")
@@ -1592,7 +1742,7 @@ impl Shell {
                 })
                 .child(div().text_color(t.text_muted).child(format!(
                     "You'll be signed out of {me} on this device. Your account, guilds and \
-                     messages stay on your servers; you can sign in again at any time."
+                     messages stay on your servers; you can sign in again at any time.{rest}"
                 )))
                 .footer(
                     Button::new("sign-out-cancel", "Cancel")
@@ -1629,6 +1779,27 @@ impl Shell {
                 .into_any_element(),
         )
     }
+}
+
+fn presence_of(status: &str) -> Presence {
+    match status {
+        "idle" => Presence::Idle,
+        "dnd" => Presence::Dnd,
+        "invisible" => Presence::Offline,
+        _ => Presence::Online,
+    }
+}
+
+/// A presence colour as a small dot, for menus.
+fn presence_dot(presence: Presence, cx: &App) -> AnyElement {
+    let t = cx.theme();
+    let color = match presence {
+        Presence::Online => t.success,
+        Presence::Idle => t.warning,
+        Presence::Dnd => t.danger,
+        Presence::Offline => t.text_faint,
+    };
+    div().size(px(16.)).flex().items_center().justify_center().child(div().size(px(9.)).rounded_full().bg(color)).into_any_element()
 }
 
 impl Render for Shell {
