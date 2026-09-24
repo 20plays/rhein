@@ -1,4 +1,4 @@
-//! The signed-in window: sidebar tree with your profile | chat and side panel over a status line,
+//! The signed-in window: sidebar tree with your profile | chat over a status line | side panel,
 //! plus its modals.
 
 use std::collections::HashSet;
@@ -26,6 +26,9 @@ use crate::views::switcher::QuickSwitcher;
 actions!(rhein_shell, [OpenSwitcher, OpenSettings, PrevChannel, NextChannel, PrevUnread, NextUnread]);
 
 const SHELL_CONTEXT: &str = "Shell";
+
+/// The status line (40) + the composer's bottom padding (12) + the composer box (42).
+const PROFILE_STRIP_H: Pixels = px(94.);
 
 pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(SHELL_CONTEXT);
@@ -1146,8 +1149,10 @@ impl Shell {
             "invisible" => "invisible".into(),
             _ => "online".into(),
         });
+        // As tall as the composer box plus the status line below it, so its top edge runs level
+        // with the composer's.
         div()
-            .h(size::STATUS)
+            .h(PROFILE_STRIP_H)
             .flex_none()
             .px_2()
             .flex()
@@ -1160,7 +1165,7 @@ impl Shell {
                     .id("profile-strip")
                     .flex_1()
                     .min_w_0()
-                    .h(px(32.))
+                    .h(px(52.))
                     .px_1()
                     .rounded(radius::MD)
                     .flex()
@@ -1170,15 +1175,16 @@ impl Shell {
                     .hover(|s| s.bg(t.bg_hover))
                     .tooltip(tooltip("Set status"))
                     .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
-                    .child(Avatar::new(me.clone(), name.clone()).size(px(24.)).image(avatar.map(Into::into)).presence(Some(presence)))
+                    .child(Avatar::new(me.clone(), name.clone()).size(px(36.)).image(avatar.map(Into::into)).presence(Some(presence)))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().text_size(text::SM).line_height(px(15.)).font_weight(FontWeight::MEDIUM).truncate().child(name))
-                            .child(div().font_family(FONT_MONO).text_size(text::XS).line_height(px(14.)).text_color(t.text_faint).truncate().child(status)),
+                            .gap_0p5()
+                            .child(div().text_size(text::MD).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status)),
                     ),
             )
             .child(
@@ -1592,11 +1598,12 @@ impl Render for Shell {
                             .flex_1()
                             .min_h_0()
                             .flex()
-                            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
-                            .children(members),
+                            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) }),
                     )
                     .child(status),
             )
+            // Side panels run the full height; the status line belongs to the middle column.
+            .children(members)
             .children(toast)
             .children(dialog)
             .children(sign_out)
