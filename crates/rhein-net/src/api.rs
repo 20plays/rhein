@@ -166,6 +166,32 @@ impl Api {
         self.delete(&format!("/devices/{}", urlencoding::encode(device_id))).await
     }
 
+    pub async fn friends(&self) -> ApiResult<Vec<Friend>> {
+        Ok(self.get::<FriendList>("/friends").await?.friends)
+    }
+
+    pub async fn request_friend(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.post("/friends", &serde_json::json!({ "user_id": user_id })).await
+    }
+
+    pub async fn accept_friend(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/friends/{}/accept", urlencoding::encode(user_id)), &serde_json::json!({})).await
+    }
+
+    /// Removes a friend, declines an incoming request or cancels an outgoing one.
+    pub async fn remove_friend(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/friends/{}", urlencoding::encode(user_id))).await
+    }
+
+    pub async fn set_blocked(&self, user_id: &str, blocked: bool) -> ApiResult<serde_json::Value> {
+        let path = format!("/friends/{}/block", urlencoding::encode(user_id));
+        if blocked { self.put_empty(&path).await } else { self.delete(&path).await }
+    }
+
+    pub async fn conversations(&self) -> ApiResult<Vec<Conversation>> {
+        Ok(self.get::<ConversationList>("/conversations").await?.conversations)
+    }
+
     // ---- guild server ----
 
     pub async fn create_session(&self, assertion: &str) -> ApiResult<GuildSession> {

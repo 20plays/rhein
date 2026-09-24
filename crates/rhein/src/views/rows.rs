@@ -106,7 +106,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 let (chan, target) = (chan.clone(), target.clone());
                 client.update(cx, |c, cx| c.jump_to(chan, target, cx));
             })
-            .child(icon_sized(Icon::Reply, px(14.)))
+            .child(icon_sized(Icon::Reply, px(14.)).text_color(t.text_faint))
             .child(div().truncate().child(label))
     });
 
@@ -135,7 +135,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 let id = thread_id.clone();
                 view.update(cx, |v, cx| v.open_thread(id, cx)).ok();
             })
-            .child(icon_sized(Icon::MessagesSquare, px(14.)))
+            .child(icon_sized(Icon::MessagesSquare, px(14.)).text_color(t.accent))
             .child(label)
     });
 
@@ -417,6 +417,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, a: &Attachment, t: &Theme
     div()
         .id(SharedString::from(format!("img-{ix}-{i}")))
         .w(w)
+        .max_w_full()
         .h(h)
         .rounded(radius::LG)
         .overflow_hidden()
@@ -481,6 +482,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
         return div()
             .id(SharedString::from(format!("embed-{ix}-{n}")))
             .max_w(px(IMAGE_MAX_W))
+            .w_full()
             .max_h(px(IMAGE_MAX_H))
             .rounded(radius::LG)
             .overflow_hidden()
@@ -489,7 +491,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
                 let (open, name) = (open.clone(), name.clone());
                 view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
             })
-            .child(img(image).max_w(px(IMAGE_MAX_W)).max_h(px(IMAGE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(image).max_w_full().max_h(px(IMAGE_MAX_H)).object_fit(ObjectFit::Contain))
             .into_any_element();
     }
     let link = e.url.clone();
@@ -534,6 +536,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
     });
     div()
         .max_w(px(IMAGE_MAX_W + 32.))
+        .min_w_0()
         .flex()
         .rounded(radius::MD)
         .bg(t.bg_panel)
@@ -553,7 +556,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
                         .gap_1()
                         .text_size(text::XS)
                         .text_color(t.text_faint)
-                        .child(icon_sized(Icon::Globe, px(12.)))
+                        .child(icon_sized(Icon::Globe, px(12.)).text_color(t.text_faint))
                         .child(e.site.clone()),
                 )
                 .child(
@@ -584,6 +587,7 @@ fn invite_card(ctx: &RowCtx, ix: usize, url: &str, t: &Theme) -> AnyElement {
     let (server, code) = rhein_store::client::parse_invite(url, None).unwrap_or_default();
     div()
         .max_w(px(IMAGE_MAX_W))
+        .min_w_0()
         .p_3()
         .rounded(radius::MD)
         .bg(t.bg_panel)

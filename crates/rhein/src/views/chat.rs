@@ -845,6 +845,96 @@ impl ChatView {
         cx.emit(ChatEvent::OpenThread(thread_id));
     }
 
+    /// A voice channel: who is in it and in what state. Joining arrives with milestone M4.
+    fn render_voice_stage(&self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let name = client.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
+        let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
+        let members = guild_id.as_deref().map(|g| client.voice_members(g, channel_id)).unwrap_or_default();
+        let tiles = members.iter().map(|state| {
+            let who = client.display_name(guild_id.as_deref(), &state.user_id);
+            let avatar = client.avatar_url(guild_id.as_deref(), &state.user_id);
+            let badge = |glyph: Icon, danger: bool| {
+                div()
+                    .size(px(24.))
+                    .rounded_full()
+                    .bg(t.bg_base)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(rhein_ui::icon_sized(glyph, px(14.)).text_color(if danger { t.danger } else { t.text_muted }))
+            };
+            div()
+                .w(px(200.))
+                .h(px(150.))
+                .rounded(radius::LG)
+                .bg(t.bg_panel)
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(Avatar::new(state.user_id.clone(), who.clone()).size(px(64.)).image(avatar.map(Into::into)))
+                .child(div().font_weight(FontWeight::MEDIUM).child(who))
+                .child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .when(state.self_mute || state.server_mute, |d| d.child(badge(Icon::MicOff, state.server_mute)))
+                        .when(state.self_deaf || state.server_deaf, |d| d.child(badge(Icon::HeadphoneOff, state.server_deaf)))
+                        .when(state.self_video, |d| d.child(badge(Icon::Video, false)))
+                        .when(state.streaming, |d| d.child(badge(Icon::ScreenShare, true))),
+                )
+        });
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg_base)
+            .text_color(t.text)
+            .child(
+                div()
+                    .h(size::HEADER)
+                    .flex_none()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(icon(Icon::Volume).text_color(t.text_faint))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(name)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_6()
+                    .p_8()
+                    .child(if members.is_empty() {
+                        div().text_color(t.text_faint).child("Nobody is here right now.").into_any_element()
+                    } else {
+                        div().flex().flex_wrap().justify_center().gap_3().children(tiles).into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(Button::new("voice-join", "Join voice").primary().icon(Icon::Phone).disabled(true))
+                            .child(div().text_size(text::SM).text_color(t.text_faint).child("Voice and video arrive with milestone M4.")),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_picker(&self) -> Option<AnyElement> {
         let (picker, at, target, _) = self.picker.as_ref()?;
         let anchor = match target {
@@ -1077,6 +1167,10 @@ impl Render for ChatView {
                 .into_any_element();
         };
         let channel = client.channel(&channel_id).cloned();
+        if channel.as_ref().is_some_and(|c| c.is_voice()) {
+            return self.render_voice_stage(&channel_id, cx);
+        }
+        let client = self.client.read(cx);
         let log = client.logs.get(&channel_id);
         let loading = log.is_some_and(|l| l.loading);
         let reached_start = log.is_some_and(|l| l.reached_start);

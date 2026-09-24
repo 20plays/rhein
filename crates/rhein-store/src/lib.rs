@@ -12,6 +12,7 @@ pub mod nav;
 pub mod perms;
 pub mod persist;
 pub mod prefs;
+pub mod social;
 
-pub use client::{Client, ClientEvent, Divider, EmbedState, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
+pub use client::{Client, ClientEvent, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
 pub use io::Io;

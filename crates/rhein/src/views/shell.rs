@@ -16,6 +16,7 @@ use rhein_ui::{
 };
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
+use crate::views::home::HomeView;
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
 use crate::views::switcher::QuickSwitcher;
@@ -84,6 +85,7 @@ enum Panel {
 pub struct Shell {
     client: Entity<Client>,
     chat: Entity<ChatView>,
+    home: Entity<HomeView>,
     dialog: Option<DialogTab>,
     dialog_input: Entity<TextInput>,
     create_on: Option<String>,
@@ -106,6 +108,7 @@ impl Shell {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let chat = cx.new(|cx| ChatView::new(client.clone(), window, cx));
         let dialog_input = cx.new(|cx| TextInput::new("", cx));
+        let home = cx.new(|cx| HomeView::new(client.clone(), window, cx));
         let subs = vec![
             cx.observe_in(&client, window, |this, _, window, cx| {
                 this.follow_channel(window, cx);
@@ -129,6 +132,7 @@ impl Shell {
         Self {
             client,
             chat,
+            home,
             dialog: None,
             dialog_input,
             create_on: None,
@@ -513,6 +517,13 @@ impl Shell {
             let u = user_id.clone();
             entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(u.clone()))).with_icon(Icon::Copy));
         }
+        if !myself && client.friend_state(&user_id).is_none() {
+            let (c, u) = (self.client.clone(), user_id.clone());
+            entries.push(MenuEntry::item("Add friend", move |_, cx| {
+                let u = u.clone();
+                c.update(cx, |c, cx| c.friend_action(rhein_store::FriendAction::Request, u, cx));
+            }).with_icon(Icon::UserPlus));
+        }
         if myself {
             let (v, g, u) = (this.clone(), gid.clone(), user_id.clone());
             let current = client.members.get(&gid).and_then(|l| l.iter().find(|m| m.user_id == user_id)).and_then(|m| m.nickname.clone()).unwrap_or_default();
@@ -813,6 +824,34 @@ impl Shell {
                     .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ABOUT ME"))
                     .child(div().text_size(text::SM).child(bio))
             }))
+            .children({
+                let me = client.user_id().map(str::to_owned);
+                let state = client.friend_state(&user_id).map(str::to_owned);
+                (me.as_deref() != Some(user_id.as_str())).then(|| {
+                    let (c, u) = (self.client.clone(), user_id.clone());
+                    let label = match state.as_deref() {
+                        Some("accepted") => "Friends",
+                        Some("pending_out") => "Request sent",
+                        Some("pending_in") => "Accept friend request",
+                        Some("blocked") => "Blocked",
+                        _ => "Add friend",
+                    };
+                    let action = match state.as_deref() {
+                        None => Some(rhein_store::FriendAction::Request),
+                        Some("pending_in") => Some(rhein_store::FriendAction::Accept),
+                        _ => None,
+                    };
+                    Button::new("profile-friend", label)
+                        .icon(Icon::UserPlus)
+                        .disabled(action.is_none())
+                        .on_click(move |_, _, cx| {
+                            if let Some(a) = action {
+                                let u = u.clone();
+                                c.update(cx, |c, cx| c.friend_action(a, u, cx));
+                            }
+                        })
+                })
+            })
             .when(!roles.is_empty(), |d| {
                 d.child(div().flex().flex_col().gap_1()
                     .child(div().text_size(text::XS).font_weight(FontWeight::SEMIBOLD).text_color(t.text_faint).child("ROLES"))
@@ -911,13 +950,14 @@ impl Shell {
                 )
         };
 
+        let requests = client.incoming_friend_requests() as u32;
         let home_item = {
             let client = self.client.clone();
             item(
                 "rail-home".into(),
                 home,
                 false,
-                0,
+                requests,
                 "Direct messages".into(),
                 icon(Icon::House).text_color(if home { t.text_on_accent } else { t.text_muted }).into_any_element(),
             )
@@ -1019,20 +1059,45 @@ impl Shell {
 
         let mut channels = div().id("channels").flex_1().overflow_y_scroll().px_2().pb_2().pt_2();
         if home {
+            let pending = client.incoming_friend_requests();
+            let on_friends = client.home_conversation.is_none();
+            let c = self.client.clone();
             channels = channels.child(
-                div()
-                    .px_2()
-                    .pt_6()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .text_center()
-                    .text_size(text::SM)
-                    .text_color(t.text_faint)
-                    .child(icon(Icon::Lock).text_color(t.text_faint))
-                    .child("End-to-end encrypted direct messages are coming in a later version."),
+                ListRow::new("home-friends", "Friends")
+                    .icon(Icon::Users)
+                    .selected(on_friends)
+                    .when(pending > 0, |r| r.trailing(CountBadge(pending as u32)))
+                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.open_conversation(None, cx))),
             );
+            channels = channels.child(section_label("Direct messages", cx));
+            if client.conversations.is_empty() {
+                channels = channels.child(div().px_2().text_size(text::SM).text_color(t.text_faint).child("No conversations yet."));
+            }
+            for conversation in &client.conversations {
+                let title = client.conversation_title(conversation);
+                let me = client.user_id().unwrap_or_default();
+                let other = conversation.members.iter().find(|m| m.user_id != me).map(|m| m.user_id.clone()).unwrap_or_default();
+                let selected = client.home_conversation.as_deref() == Some(conversation.id.as_str());
+                let unread = client.conversation_unread(&conversation.id);
+                let request = conversation.request_state.as_deref() == Some("pending");
+                let (c, id) = (self.client.clone(), conversation.id.clone());
+                let leading = if conversation.kind == "gc" {
+                    div().size(px(24.)).rounded_full().bg(t.bg_raised).flex().items_center().justify_center().child(icon_sized(Icon::Users, px(14.))).into_any_element()
+                } else {
+                    Avatar::new(other.clone(), title.clone()).size(px(24.)).into_any_element()
+                };
+                channels = channels.child(
+                    ListRow::new(SharedString::from(format!("conv-{}", conversation.id)), title)
+                        .leading(leading)
+                        .selected(selected)
+                        .strong(unread)
+                        .when(request, |r| r.trailing(Tag("REQUEST")))
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            c.update(cx, |c, cx| c.open_conversation(Some(id), cx));
+                        }),
+                );
+            }
         } else if let Some(entry) = entry {
             if let Some(server) = client.server(&entry.server).filter(|s| s.status != ServerStatus::Ready) {
                 channels = channels.child(
@@ -1069,7 +1134,7 @@ impl Shell {
                                 }
                                 cx.notify();
                             }))
-                            .child(icon_sized(if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, px(12.)))
+                            .child(icon_sized(if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, px(12.)).text_color(t.text_faint))
                             .child(ch.name.to_uppercase()),
                     );
                     continue;
@@ -1101,7 +1166,12 @@ impl Shell {
                         client.update(cx, |c, cx| c.select_channel(id, cx));
                     });
                 } else if ch.is_voice() {
-                    row = row.tooltip("Voice is coming soon");
+                    let id = ch.id.clone();
+                    let client = self.client.clone();
+                    row = row.on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        client.update(cx, |c, cx| c.select_channel(id, cx));
+                    });
                 }
                 let menu_id = ch.id.clone();
                 row = row.on_secondary(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
@@ -1109,19 +1179,27 @@ impl Shell {
                 }));
                 channels = channels.child(row);
                 if ch.is_voice() {
-                    for user in client.voice_members(&gid, &ch.id) {
-                        let name = client.display_name(Some(&gid), &user);
+                    for state in client.voice_members(&gid, &ch.id) {
+                        let name = client.display_name(Some(&gid), &state.user_id);
+                        let avatar = client.avatar_url(Some(&gid), &state.user_id);
+                        let muted = state.self_mute || state.server_mute;
+                        let deaf = state.self_deaf || state.server_deaf;
                         channels = channels.child(
                             div()
                                 .pl(px(30.))
+                                .pr_2()
                                 .py_0p5()
                                 .flex()
                                 .items_center()
                                 .gap_2()
                                 .text_size(text::SM)
                                 .text_color(t.text_muted)
-                                .child(Avatar::new(user.clone(), name.clone()).size(px(20.)))
-                                .child(div().truncate().child(name)),
+                                .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into)))
+                                .child(div().flex_1().min_w_0().truncate().child(name))
+                                .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(12.)).text_color(t.danger)))
+                                .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(12.)).text_color(t.text_faint)))
+                                .when(muted, |d| d.child(icon_sized(Icon::MicOff, px(12.)).text_color(if state.server_mute { t.danger } else { t.text_faint })))
+                                .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(12.)).text_color(if state.server_deaf { t.danger } else { t.text_faint }))),
                         );
                     }
                 }
@@ -1419,7 +1497,7 @@ impl Render for Shell {
             .flex()
             .child(rail)
             .child(sidebar)
-            .child(self.chat.clone())
+            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
             .children(members)
             .children(toast)
             .children(dialog)

@@ -142,6 +142,17 @@ for (const [token, content] of [
   await call('POST', `/channels/${thread.id}/messages`, { content }, token);
 }
 
+// Friends: Anna and Ben are friends; Cara has sent Anna a request.
+await call('POST', '/friends', { user_id: ben.user_id }, anna.access_token);
+await call('POST', `/friends/${encodeURIComponent(anna.user_id)}/accept`, {}, ben.access_token);
+const cara = await register(`cara${tag}`);
+await call('PATCH', '/profile', { display_name: 'Cara' }, cara.access_token).catch(() => {});
+await call('POST', '/friends', { user_id: anna.user_id }, cara.access_token);
+
+// Ben sits in the Lounge (voice state only; the demo has no audio).
+const lounge = (await call('GET', `/guilds/${guild.id}/channels`, null, benGuild)).channels.find((c) => c.type === 'voice');
+await call('POST', `/channels/${lounge.id}/voice/join`, { self_mute: true }, benGuild);
+
 const dir = process.argv[2] ?? '.dev/config-demo';
 mkdirSync(dir, { recursive: true });
 writeFileSync(

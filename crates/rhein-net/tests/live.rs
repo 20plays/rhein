@@ -298,3 +298,34 @@ async fn settings_and_management() {
     assert!(!guest.guilds().await.unwrap().iter().any(|g| g.id == guild.id));
     println!("ok: profile, devices, channels, guild rename and leave work");
 }
+
+/// Friend requests between two accounts, blocking, and the conversation list.
+#[tokio::test]
+async fn friends_and_conversations() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    let a = Api::new(http.clone(), &doc.api, None);
+    let b = Api::new(http, &doc.api, None);
+    let a_id = register_retrying(&a, &format!("fra{}", std::process::id()), &ksf).await.session.user_id;
+    let b_id = register_retrying(&b, &format!("frb{}", std::process::id()), &ksf).await.session.user_id;
+
+    a.request_friend(&b_id).await.expect("request");
+    let state = |list: Vec<rhein_proto::Friend>, who: &str| list.into_iter().find(|f| f.user_id == who).map(|f| f.state);
+    assert_eq!(state(a.friends().await.unwrap(), &b_id).as_deref(), Some("pending_out"));
+    assert_eq!(state(b.friends().await.unwrap(), &a_id).as_deref(), Some("pending_in"));
+    b.accept_friend(&a_id).await.expect("accept");
+    assert_eq!(state(a.friends().await.unwrap(), &b_id).as_deref(), Some("accepted"));
+    assert_eq!(state(b.friends().await.unwrap(), &a_id).as_deref(), Some("accepted"));
+
+    a.set_blocked(&b_id, true).await.expect("block");
+    assert_eq!(state(a.friends().await.unwrap(), &b_id).as_deref(), Some("blocked"));
+    a.set_blocked(&b_id, false).await.expect("unblock");
+    a.remove_friend(&b_id).await.ok();
+    assert!(a.conversations().await.expect("conversations").is_empty());
+    println!("ok: friend request, accept, block, unblock and conversation list work");
+}

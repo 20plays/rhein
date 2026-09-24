@@ -161,6 +161,16 @@ pub enum StagedState {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriendAction {
+    Request,
+    Accept,
+    /// Remove a friend, decline an incoming request or cancel an outgoing one.
+    Remove,
+    Block,
+    Unblock,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
     pub guild_id: String,
@@ -216,8 +226,8 @@ pub struct Client {
     dividers: HashMap<String, Divider>,
     staged: HashMap<String, Vec<Staged>>,
     embeds: HashMap<String, EmbedState>,
-    /// guild id → user id → the voice channel they are in.
-    voice: HashMap<String, HashMap<String, String>>,
+    /// guild id → user id → their voice state (only users in a channel).
+    voice: HashMap<String, HashMap<String, rhein_proto::VoiceState>>,
     selected_channel: HashMap<String, String>,
     pub logs: HashMap<String, ChannelLog>,
     pub members: HashMap<String, Vec<Member>>,
@@ -228,6 +238,12 @@ pub struct Client {
     member_lookup: HashMap<String, Vec<Member>>,
     pub recent_emoji: Vec<String>,
     pub prefs: crate::prefs::Prefs,
+    pub friends: Vec<rhein_proto::Friend>,
+    pub conversations: Vec<rhein_proto::Conversation>,
+    /// Conversations with a frame newer than the last time they were opened.
+    unread_conversations: std::collections::HashSet<String>,
+    /// What the home view shows: `None` = friends, `Some(id)` = a conversation.
+    pub home_conversation: Option<String>,
     profiles: HashMap<String, Option<rhein_proto::Profile>>,
     /// Channels in the order they were opened, newest first (for the quick switcher).
     pub visited: Vec<String>,
@@ -264,6 +280,10 @@ impl Client {
             member_lookup: HashMap::new(),
             recent_emoji: crate::prefs::load().recent_emoji,
             prefs: crate::prefs::load(),
+            friends: Vec::new(),
+            conversations: Vec::new(),
+            unread_conversations: Default::default(),
+            home_conversation: None,
             profiles: HashMap::new(),
             visited: Vec::new(),
             typing: HashMap::new(),
@@ -427,6 +447,10 @@ impl Client {
         self.emoji.clear();
         self.search = None;
         self.member_lookup.clear();
+        self.friends.clear();
+        self.conversations.clear();
+        self.unread_conversations.clear();
+        self.home_conversation = None;
         self.typing.clear();
         self.read.clear();
         self.dividers.clear();
@@ -972,6 +996,10 @@ impl Client {
 
     fn on_ready(&mut self, server: &str, ready: Ready, cx: &mut Context<Self>) {
         log::info!("READY from {server}: {} guild(s)", ready.guilds.len());
+        if self.home.as_ref().is_some_and(|h| h.doc.server_name == server) {
+            self.load_friends(cx);
+            self.load_conversations(cx);
+        }
         // READY replaces everything this server said before: there is no resume.
         let insert_at = self
             .guilds
@@ -991,7 +1019,8 @@ impl Client {
                 .guild
                 .voice_states
                 .iter()
-                .filter_map(|v| v.channel_id.clone().map(|c| (v.user_id.clone(), c)))
+                .filter(|v| v.channel_id.is_some())
+                .map(|v| (v.user_id.clone(), v.clone()))
                 .collect();
             self.voice.insert(entry.guild.id.clone(), roster);
         }
@@ -1132,13 +1161,10 @@ impl Client {
             Event::VoiceStateUpdate(state) => {
                 let Some(guild) = state.guild_id.clone() else { return };
                 let roster = self.voice.entry(guild).or_default();
-                match state.channel_id {
-                    Some(channel) => {
-                        roster.insert(state.user_id, channel);
-                    }
-                    None => {
-                        roster.remove(&state.user_id);
-                    }
+                if state.channel_id.is_some() {
+                    roster.insert(state.user_id.clone(), state);
+                } else {
+                    roster.remove(&state.user_id);
                 }
             }
             Event::PinsUpdate { channel_id, .. } => {
@@ -1161,6 +1187,14 @@ impl Client {
                 if !guild_id.is_empty() {
                     self.load_emoji(guild_id, cx);
                 }
+            }
+            Event::FriendUpdate(friend) => crate::social::upsert_friend(&mut self.friends, friend),
+            Event::FriendRemove { user_id } => crate::social::remove_friend(&mut self.friends, &user_id),
+            Event::ConversationActivity { conversation_id, message } => {
+                if message && self.home_conversation.as_deref() != Some(conversation_id.as_str()) {
+                    self.unread_conversations.insert(conversation_id);
+                }
+                self.load_conversations(cx);
             }
             Event::MemberListUpdate(_) | Event::Other { .. } => {}
         }
@@ -1217,7 +1251,119 @@ impl Client {
 
     pub fn show_home(&mut self, cx: &mut Context<Self>) {
         self.showing_home = true;
+        self.load_friends(cx);
+        self.load_conversations(cx);
         cx.notify();
+    }
+
+    /// Friends page (`None`) or a conversation in the home view.
+    pub fn open_conversation(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.showing_home = true;
+        if let Some(id) = &id {
+            self.unread_conversations.remove(id);
+        }
+        self.home_conversation = id;
+        cx.notify();
+    }
+
+    pub fn conversation_unread(&self, id: &str) -> bool {
+        self.unread_conversations.contains(id)
+    }
+
+    pub fn incoming_friend_requests(&self) -> usize {
+        crate::social::incoming_requests(&self.friends)
+    }
+
+    pub fn friend_state(&self, user_id: &str) -> Option<&str> {
+        self.friends.iter().find(|f| f.user_id == user_id).map(|f| f.state.as_str())
+    }
+
+    pub fn conversation_title(&self, c: &rhein_proto::Conversation) -> String {
+        let me = self.user_id().unwrap_or_default();
+        crate::social::conversation_title(c, me, |u| self.friend_or_local_name(u))
+    }
+
+    /// A name for someone outside any guild context: their friend entry, else the id's localpart.
+    pub fn friend_or_local_name(&self, user_id: &str) -> String {
+        self.friends
+            .iter()
+            .find(|f| f.user_id == user_id)
+            .and_then(|f| f.display_name.clone())
+            .unwrap_or_else(|| self.display_name(None, user_id))
+    }
+
+    /// A friend's picture through the home server (their media is proxied when remote).
+    pub fn friend_avatar(&self, friend: &rhein_proto::Friend) -> Option<String> {
+        let home = self.home.as_ref()?;
+        let reference = friend.avatar_ref.as_deref().filter(|r| !r.is_empty())?;
+        let origin = crate::media::remote_origin(&friend.user_id, &home.doc.server_name);
+        Some(crate::media::media_url(&home.doc.api, reference, origin))
+    }
+
+    pub fn load_friends(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.friends().await?) })).await;
+            this.update(cx, |this, cx| {
+                if let Ok(list) = result {
+                    this.friends = list;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn load_conversations(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move { Ok(api.conversations().await?) })).await;
+            this.update(cx, |this, cx| {
+                if let Ok(list) = result {
+                    this.conversations = list;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Friend actions; the gateway's FRIEND_UPDATE / FRIEND_REMOVE brings the result.
+    pub fn friend_action(&mut self, action: FriendAction, user_id: String, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let uid = user_id.clone();
+            let result = join(io.spawn(async move {
+                match action {
+                    FriendAction::Request => api.request_friend(&uid).await?,
+                    FriendAction::Accept => api.accept_friend(&uid).await?,
+                    FriendAction::Remove => api.remove_friend(&uid).await?,
+                    FriendAction::Block => api.set_blocked(&uid, true).await?,
+                    FriendAction::Unblock => api.set_blocked(&uid, false).await?,
+                };
+                Ok(api.friends().await?)
+            }))
+            .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(list) => {
+                        this.friends = list;
+                        if action == FriendAction::Request {
+                            this.notice = Some(format!("Friend request sent to {user_id}.").into());
+                        }
+                    }
+                    Err(err) => this.error = Some(format!("Couldn't update friends: {}", friendly(&err)).into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn select_guild(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1271,10 +1417,17 @@ impl Client {
             mark.mentions = 0;
             mark.first_unread = None;
         }
-        let needs_load = self.logs.get(&channel_id).is_none_or(|l| !l.loaded && !l.loading);
+        let voice = self.channel(&channel_id).is_some_and(|c| c.is_voice());
+        // Thread chips on messages need the channel's threads (title and message count).
+        let has_threads = self.channel(&channel_id).is_some_and(|c| matches!(c.kind.as_str(), "text" | "announcement"));
+        if has_threads && !self.threads.contains_key(&channel_id) {
+            self.threads.insert(channel_id.clone(), Vec::new());
+            self.load_threads(channel_id.clone(), cx);
+        }
+        let needs_load = !voice && self.logs.get(&channel_id).is_none_or(|l| !l.loaded && !l.loading);
         if needs_load {
             self.load_history(channel_id, false, cx);
-        } else if had_unread {
+        } else if had_unread && !voice {
             self.ack_latest(&channel_id, cx);
         }
         cx.notify();
@@ -1417,14 +1570,14 @@ impl Client {
         self.read.values().map(|m| m.mentions).sum()
     }
 
-    /// Who is in a voice channel right now, in join order as far as the server told us.
-    pub fn voice_members(&self, guild_id: &str, channel_id: &str) -> Vec<String> {
-        let mut users: Vec<String> = self
+    /// Who is in a voice channel right now, and in what state.
+    pub fn voice_members(&self, guild_id: &str, channel_id: &str) -> Vec<rhein_proto::VoiceState> {
+        let mut users: Vec<rhein_proto::VoiceState> = self
             .voice
             .get(guild_id)
-            .map(|roster| roster.iter().filter(|(_, c)| *c == channel_id).map(|(u, _)| u.clone()).collect())
+            .map(|roster| roster.values().filter(|v| v.channel_id.as_deref() == Some(channel_id)).cloned().collect())
             .unwrap_or_default();
-        users.sort();
+        users.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         users
     }
 

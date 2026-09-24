@@ -303,3 +303,64 @@ pub struct Device {
 pub struct DeviceList {
     pub devices: Vec<Device>,
 }
+
+/// One relationship as the home server keeps it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Friend {
+    pub user_id: String,
+    pub domain: Option<String>,
+    /// `accepted`, `pending_in`, `pending_out` or `blocked`.
+    pub state: String,
+    pub presence: Option<serde_json::Value>,
+    pub display_name: Option<String>,
+    pub avatar_ref: Option<String>,
+    pub created_at: Option<Millis>,
+    pub updated_at: Option<Millis>,
+}
+
+impl Friend {
+    pub fn status(&self) -> &str {
+        self.presence
+            .as_ref()
+            .and_then(|p| p.get("status").and_then(|s| s.as_str()).or_else(|| p.as_str()))
+            .unwrap_or("offline")
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FriendList {
+    pub friends: Vec<Friend>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversationMember {
+    pub user_id: String,
+    pub home: Option<String>,
+    pub state: Option<String>,
+}
+
+/// A private conversation's metadata; its messages are MLS ciphertext.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Conversation {
+    pub id: String,
+    /// `dm` or `gc`.
+    pub kind: String,
+    pub creator: Option<String>,
+    pub members: Vec<ConversationMember>,
+    pub last_seq: Option<i64>,
+    pub created_at: Option<Millis>,
+    pub last_activity_at: Option<Millis>,
+    pub request_state: Option<String>,
+    pub muted: bool,
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ConversationList {
+    pub conversations: Vec<Conversation>,
+}

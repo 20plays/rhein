@@ -120,6 +120,10 @@ pub enum Event {
     ThreadUpsert(crate::rest::Thread),
     ThreadDelete { id: String, parent_id: Option<String> },
     EmojiUpdate { guild_id: String },
+    FriendUpdate(crate::rest::Friend),
+    FriendRemove { user_id: String },
+    /// Something happened in a private conversation (a new frame, a request decision, a member leaving).
+    ConversationActivity { conversation_id: String, message: bool },
     Other { t: String, d: Value },
 }
 
@@ -196,6 +200,20 @@ impl Event {
             "THREAD_DELETE" => Event::ThreadDelete {
                 id: str_of(&d, "id"),
                 parent_id: d.get("parent_id").and_then(Value::as_str).map(str::to_owned),
+            },
+            "FRIEND_UPDATE" => match decode(&d) {
+                Ok(f) => Event::FriendUpdate(f),
+                Err(_) => Event::Other { t: t.into(), d },
+            },
+            "FRIEND_REMOVE" => Event::FriendRemove { user_id: str_of(&d, "user_id") },
+            "DM_MESSAGE" | "DM_REQUEST_UPDATE" | "DM_MEMBER_LEAVE" => Event::ConversationActivity {
+                conversation_id: d
+                    .get("conversation_id")
+                    .or_else(|| d.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                message: t == "DM_MESSAGE",
             },
             "GUILD_EMOJI_UPDATE" => Event::EmojiUpdate { guild_id: str_of(&d, "guild_id") },
             "VOICE_STATE_UPDATE" => match decode(&d) {
