@@ -112,6 +112,15 @@ pub struct Engine {
     state_path: PathBuf,
 }
 
+/// Who could not be added when building or growing a group.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Claimed {
+    /// Devices with no key package published (they have to sign in once).
+    pub missing: Vec<String>,
+    /// Devices whose package failed the checks (not vouched for by their identity, or mislabelled).
+    pub refused: Vec<String>,
+}
+
 /// The result of a sync, for the UI.
 #[derive(Debug, Default)]
 pub struct Synced {
@@ -199,9 +208,9 @@ impl Engine {
     /// One key package per device of each user, checked the way the web client checks them:
     /// the credential inside the signed package must name the device the server labelled it
     /// with, and an account with a cross-signing identity must vouch for the device's key.
-    async fn claim(&mut self, api: &Api, users: &[String]) -> Result<(Vec<Vec<u8>>, Vec<String>)> {
+    async fn claim(&mut self, api: &Api, users: &[String]) -> Result<(Vec<Vec<u8>>, Claimed)> {
         let mut packages = Vec::new();
-        let mut refused = Vec::new();
+        let mut claimed = Claimed::default();
         let mut taken: HashSet<Vec<u8>> = HashSet::from([self.device.signature_public_key().to_vec()]);
         for user in users.iter().collect::<std::collections::BTreeSet<_>>() {
             let answer = api.claim_key_packages(user).await?;
@@ -211,24 +220,24 @@ impl Engine {
                     continue;
                 }
                 let Some(Ok(bytes)) = entry["package"].as_str().map(vault::unb64) else {
-                    refused.push(format!("{user} ({device}): no key published"));
+                    claimed.missing.push(format!("{user} ({device})"));
                     continue;
                 };
                 let Some((identity, key)) = rhein_mls::key_package_identity(&bytes) else {
-                    refused.push(format!("{user} ({device})"));
+                    claimed.refused.push(format!("{user} ({device})"));
                     continue;
                 };
                 if identity != format!("{user}|{device}") || !taken.insert(key.clone()) {
                     continue;
                 }
                 if self.verify_claimed(api, user, device, &vault::b64(&key)).await == Some(false) {
-                    refused.push(format!("{user} ({device}): not vouched for by their identity"));
+                    claimed.refused.push(format!("{user} ({device})"));
                     continue;
                 }
                 packages.push(bytes);
             }
         }
-        Ok((packages, refused))
+        Ok((packages, claimed))
     }
 
     /// `verifyClaimedPackage`: `Some(true/false)` for accounts with a cross-signing identity,
@@ -256,8 +265,8 @@ impl Engine {
     // ------------------------------------------------------------------ groups
 
     /// Builds the group for a new conversation and posts the Welcome for the other devices.
-    pub async fn establish(&mut self, api: &Api, conversation: &str, members: &[String], policy: Option<&Policy>) -> Result<Vec<String>> {
-        let (packages, refused) = self.claim(api, members).await?;
+    pub async fn establish(&mut self, api: &Api, conversation: &str, members: &[String], policy: Option<&Policy>) -> Result<Claimed> {
+        let (packages, claimed) = self.claim(api, members).await?;
         let (group, welcome) = self.device.create_group(conversation, policy, &packages)?;
         let epoch = group.epoch().as_u64();
         self.groups.insert(conversation.to_owned(), group);
@@ -269,7 +278,7 @@ impl Engine {
         }
         self.publish_group_info(api, conversation).await;
         self.save()?;
-        Ok(refused)
+        Ok(claimed)
     }
 
     /// Publishes a GroupInfo for the group's current epoch, sealed to this account, so the next

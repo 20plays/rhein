@@ -72,10 +72,27 @@ pub struct IdentityKey {
     secret: SigningKey,
 }
 
+/// The PKCS#8 wrapping of an Ed25519 seed, as WebCrypto exports it: ts-mls stores keys this way
+/// wherever the browser can do Ed25519 itself, and as the bare 32-byte seed elsewhere.
+const PKCS8_ED25519: [u8; 16] = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+
+/// The 32-byte seed out of either form.
+pub fn ed25519_seed(bytes: &[u8]) -> Result<[u8; 32]> {
+    let seed = match bytes.len() {
+        32 => bytes,
+        48 if bytes[..16] == PKCS8_ED25519 => &bytes[16..],
+        n => anyhow::bail!("not an Ed25519 private key ({n} bytes)"),
+    };
+    Ok(seed.try_into().expect("checked above"))
+}
+
+pub fn pkcs8(seed: &[u8; 32]) -> Vec<u8> {
+    [PKCS8_ED25519.as_slice(), seed].concat()
+}
+
 impl IdentityKey {
     pub fn from_secret(bytes: &[u8]) -> Result<IdentityKey> {
-        let seed: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("cross-signing secret must be 32 bytes"))?;
-        Ok(IdentityKey { secret: SigningKey::from_bytes(&seed) })
+        Ok(IdentityKey { secret: SigningKey::from_bytes(&ed25519_seed(bytes)?) })
     }
 
     pub fn public_b64(&self) -> String {
@@ -114,8 +131,9 @@ pub fn open_cross_signing_secret(sealed: &str, keyring: &Keyring) -> Option<Iden
     keyring.open(blob).ok().and_then(|secret| IdentityKey::from_secret(&secret).ok())
 }
 
+/// Sealed as the web client seals it, in the PKCS#8 form WebCrypto imports.
 pub fn seal_cross_signing_secret(key: &IdentityKey, keyring: &Keyring) -> String {
-    format!("{RECOVERY_SEAL}{}", seal(&keyring.key, key.secret()))
+    format!("{RECOVERY_SEAL}{}", seal(&keyring.key, &pkcs8(key.secret())))
 }
 
 /// Whether a published device entry (`{device_id, mls_key, cross_sig, active}`) is vouched for
@@ -455,6 +473,15 @@ mod tests {
         doc["transitions"][0]["authorization"]["signature"] = json!(b64(&next.sign(&forged)));
         doc["current_key"] = json!(key(3).public_b64());
         assert_eq!(verify_identity_document(&doc, None), Err("bad-root-signature"));
+    }
+
+    #[test]
+    fn both_private_key_forms() {
+        let seed = [5u8; 32];
+        assert_eq!(ed25519_seed(&seed).unwrap(), seed);
+        assert_eq!(ed25519_seed(&pkcs8(&seed)).unwrap(), seed);
+        assert!(ed25519_seed(&[0u8; 48]).is_err());
+        assert_eq!(IdentityKey::from_secret(&pkcs8(&seed)).unwrap().public_b64(), IdentityKey::from_secret(&seed).unwrap().public_b64());
     }
 
     #[test]

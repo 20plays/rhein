@@ -64,7 +64,7 @@ async fn two_accounts_and_a_new_device() {
     let convo = a_home.create_conversation("dm", std::slice::from_ref(&b_user), None).await.expect("conversation");
     let id = convo["id"].as_str().unwrap().to_owned();
     let refused = ea.establish(&a_home, &id, &[b_user.clone(), a_user.clone()], None).await.expect("establish");
-    assert!(refused.is_empty(), "{refused:?}");
+    assert!(refused.refused.is_empty(), "{refused:?}");
     let hello = ea.send(&a_home, &id, Payload::Message("hello B".into())).await.expect("send");
 
     // B joins by the Welcome, reads it and answers; A reads the answer.
