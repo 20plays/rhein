@@ -8,6 +8,7 @@ mod avatar;
 mod badge;
 mod button;
 mod controls;
+pub mod emoji;
 mod icon;
 pub mod input;
 mod menu;

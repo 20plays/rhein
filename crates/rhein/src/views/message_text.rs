@@ -151,7 +151,7 @@ fn push(flat: &mut Flat, text: &str, style: HighlightStyle, click: Option<Action
     // GPUI only swaps the font of a run that lies wholly inside an override, so every emoji gets
     // a highlight run of its own (same style) and an emoji-font override on exactly that run.
     let mut at = start;
-    for r in rhein_store::emoji::emoji_ranges(text) {
+    for r in rhein_ui::emoji::emoji_ranges(text) {
         let emoji = start + r.start..start + r.end;
         if at < emoji.start {
             flat.highlights.push((at..emoji.start, style));

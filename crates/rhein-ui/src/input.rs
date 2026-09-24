@@ -744,7 +744,9 @@ impl Element for TextElement {
             .into_iter()
             .filter(|run| run.len > 0)
             .collect(),
-            None => vec![run],
+            // Masked text is all bullets; placeholders and content get colour emoji.
+            None if input.masked && !input.content.is_empty() => vec![run],
+            None => crate::emoji::runs_with_emoji(&display_text, &run),
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
@@ -918,7 +920,7 @@ fn shape_paragraphs(
     let mut y = px(0.);
     let mut start = 0;
     for paragraph in text.split('\n') {
-        let runs = [TextRun { len: paragraph.len(), ..run.clone() }];
+        let runs = crate::emoji::runs_with_emoji(paragraph, &TextRun { len: paragraph.len(), ..run.clone() });
         let shaped = window
             .text_system()
             .shape_text(paragraph.to_owned().into(), font_size, &runs, Some(width), None)

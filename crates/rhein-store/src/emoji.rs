@@ -21,31 +21,6 @@ pub fn get(s: &str) -> Option<&'static Emoji> {
     emojis::get(s)
 }
 
-/// Whether a grapheme should be drawn with the colour emoji font. Anything in the Unicode emoji
-/// set qualifies, except plain ASCII/Latin-1 characters such as `#`, `1` or `©` that are only
-/// emoji with an explicit emoji presentation selector (U+FE0F) or a keycap.
-pub fn is_emoji(grapheme: &str) -> bool {
-    let Some(first) = grapheme.chars().next() else { return false };
-    if (first as u32) < 0x2000 && !grapheme.contains('\u{FE0F}') && !grapheme.contains('\u{20E3}') {
-        return false;
-    }
-    emojis::get(grapheme).is_some() || (first as u32) >= 0x1F000
-}
-
-/// Byte ranges of the emoji in `text`, adjacent emoji merged into one range.
-pub fn emoji_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
-    for (at, g) in unicode_segmentation::UnicodeSegmentation::grapheme_indices(text, true) {
-        if is_emoji(g) {
-            match out.last_mut() {
-                Some(last) if last.end == at => last.end = at + g.len(),
-                _ => out.push(at..at + g.len()),
-            }
-        }
-    }
-    out
-}
-
 /// Skin tones offered in the picker: 0 = default, 1–5 = light … dark.
 pub const TONES: [&str; 6] = ["✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿"];
 
@@ -97,17 +72,6 @@ mod tests {
         assert!(found.iter().any(|e| e.as_str() == "👍"));
         assert_eq!(search("tada", 1)[0].as_str(), "🎉");
         assert!(search("", 5).is_empty());
-    }
-
-    #[test]
-    fn detects_emoji_but_not_plain_symbols() {
-        for e in ["❤️", "❤", "👍🏽", "👩‍💻", "🇩🇪", "✈️", "⚽", "1️⃣"] {
-            assert!(is_emoji(e), "{e}");
-        }
-        for t in ["a", "1", "#", "©", "é", "-"] {
-            assert!(!is_emoji(t), "{t}");
-        }
-        assert_eq!(emoji_ranges("hi 👍👍 ok ❤️"), vec![3..11, 15..21]);
     }
 
     #[test]

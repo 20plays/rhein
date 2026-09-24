@@ -5238,6 +5238,7 @@ name = "rhein-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "emojis",
  "gpui",
  "log",
  "unicode-segmentation",
