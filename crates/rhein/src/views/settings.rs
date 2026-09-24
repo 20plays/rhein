@@ -482,7 +482,7 @@ impl SettingsView {
                     .child(format!("{scale}%"))
             }))
             .into_any_element();
-        let (c1, c2) = (self.client.clone(), self.client.clone());
+        let (c1, c2, c3) = (self.client.clone(), self.client.clone(), self.client.clone());
         div()
             .flex()
             .flex_col()
@@ -500,6 +500,13 @@ impl SettingsView {
                 "Show times as 14:05 instead of 2:05 PM.",
                 Switch::new("clock24", prefs.clock_24h)
                     .on_toggle(move |on, _, cx| c2.update(cx, |c, cx| c.update_prefs(cx, |p| p.clock_24h = on)))
+                    .into_any_element(),
+            ))
+            .child(row(
+                "Reduce motion",
+                "Show changes instantly: no fades, glides or blinking cursor.",
+                Switch::new("reduce-motion", prefs.reduce_motion)
+                    .on_toggle(move |on, _, cx| c3.update(cx, |c, cx| c.update_prefs(cx, |p| p.reduce_motion = on)))
                     .into_any_element(),
             ))
             .into_any_element()

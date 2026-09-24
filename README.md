@@ -25,7 +25,7 @@ The plan and its risks are in `~/.claude/plans/lies-die-das-hier-vectorized-snai
 | `rhein-auth` | OPAQUE client (identical to `@serenity-kit/opaque` 1.1.0) and the device key |
 | `rhein-net` | Discovery, REST client, sign-in, assertion → guild session, gateway with reconnect |
 | `rhein-store` | GPUI state (`Client` entity) on a tokio runtime (`Io`) |
-| `rhein-ui` | Design system: theme tokens, bundled fonts (Geist, Geist Mono), Lucide icons, components |
+| `rhein-ui` | Design system: black-and-white theme tokens, motion tokens, bundled fonts (Geist, Geist Mono), Lucide icons, components |
 | `rhein` | The app: views built from `rhein-ui` components |
 
 ## Running it

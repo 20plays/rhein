@@ -15,6 +15,8 @@ pub struct Prefs {
     pub text_scale: u16,
     pub compact: bool,
     pub clock_24h: bool,
+    /// Show every change instantly: no fades, glides or blinking cursor.
+    pub reduce_motion: bool,
 }
 
 impl Default for Prefs {
@@ -27,6 +29,7 @@ impl Default for Prefs {
             text_scale: 100,
             compact: false,
             clock_24h: true,
+            reduce_motion: false,
         }
     }
 }

@@ -33,6 +33,14 @@ fn main() {
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         let client = cx.new(|cx| Client::new(io.clone(), cx));
+        // GPUI's own switch covers every animation; keep it in step with the preference.
+        let reduce = client.read(cx).prefs.reduce_motion;
+        cx.set_reduce_motion(reduce);
+        cx.observe(&client, |client, cx| {
+            let reduce = client.read(cx).prefs.reduce_motion;
+            cx.set_reduce_motion(reduce);
+        })
+        .detach();
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
         cx.open_window(
             WindowOptions {
