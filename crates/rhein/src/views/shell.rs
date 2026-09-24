@@ -1,4 +1,4 @@
-//! The signed-in window: guild rail | channel sidebar | chat | member list, plus its modals.
+//! The signed-in window: sidebar tree | chat | side panel over a status line, plus its modals.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -6,19 +6,20 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable as _, FontWeight, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels, Point, Render,
-    SharedString, Styled as _, Subscription, Window, actions, anchored, deferred, div, point, prelude::*, px,
+    SharedString, Styled as _, Subscription, Window, actions, anchored, deferred, div, prelude::*, px,
 };
 use rhein_store::{Client, ServerStatus, perms};
-use rhein_ui::theme::{radius, size, text};
+use rhein_ui::theme::{FONT_MONO, radius, size, text};
 use rhein_ui::{
-    ActiveTheme as _, Avatar, Button, CountBadge, Icon, IconButton, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
-    Presence, Tabs, Tag, TextInput, Toast, ToastKind, icon, icon_sized, section_label, tooltip,
+    ActiveTheme as _, Avatar, Button, CountBadge, Icon, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
+    Presence, Tabs, Tag, TextInput, Toast, ToastKind, UnreadDot, icon, icon_sized, section_label, tooltip,
 };
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::home::HomeView;
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
+use crate::views::status::StatusLine;
 use crate::views::switcher::QuickSwitcher;
 
 actions!(rhein_shell, [OpenSwitcher, OpenSettings, PrevChannel, NextChannel, PrevUnread, NextUnread]);
@@ -94,6 +95,9 @@ pub struct Shell {
     panel_subs: Vec<Subscription>,
     /// Categories the user folded away.
     collapsed: HashSet<String>,
+    /// Guilds folded or unfolded by hand in the sidebar tree.
+    folded_guilds: HashSet<String>,
+    unfolded_guilds: HashSet<String>,
     confirm_sign_out: bool,
     modal_focus: FocusHandle,
     menu: MenuHost,
@@ -140,6 +144,8 @@ impl Shell {
             panel: Panel::None,
             panel_subs: Vec::new(),
             collapsed: HashSet::new(),
+            folded_guilds: HashSet::new(),
+            unfolded_guilds: HashSet::new(),
             confirm_sign_out: false,
             modal_focus: cx.focus_handle(),
             menu: MenuHost::default(),
@@ -354,13 +360,7 @@ impl Shell {
         self.close_dialog(window, cx);
     }
 
-    fn guild_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(gid) = self.client.read(cx).selected_guild.clone() else { return };
-        let at = point(size::RAIL + px(12.), size::HEADER);
-        self.show_guild_menu(gid, at, window, cx);
-    }
-
-    /// Everything you can do with a guild; the header menu and a right-click on its icon.
+    /// Everything you can do with a guild; its `…` button and a right-click on its row.
     fn show_guild_menu(&mut self, gid: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.read(cx);
         let Some(entry) = client.guild(&gid) else { return };
@@ -902,374 +902,181 @@ impl Shell {
         cx.notify();
     }
 
-    fn rail(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Whether a guild's channels are showing in the sidebar tree: the open guild unless folded
+    /// away, any other guild once unfolded.
+    fn guild_expanded(&self, gid: &str, cx: &App) -> bool {
+        let client = self.client.read(cx);
+        let open = !client.showing_home && client.selected_guild.as_deref() == Some(gid);
+        !self.folded_guilds.contains(gid) && (open || self.unfolded_guilds.contains(gid))
+    }
+
+    fn toggle_guild(&mut self, gid: &str, cx: &mut Context<Self>) {
+        if self.guild_expanded(gid, cx) {
+            self.unfolded_guilds.remove(gid);
+            self.folded_guilds.insert(gid.to_owned());
+        } else {
+            self.folded_guilds.remove(gid);
+            self.unfolded_guilds.insert(gid.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// The one sidebar: direct messages on top, then every server with its guilds, each guild
+    /// unfolding into its channels.
+    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let home = client.showing_home;
         let selected = client.selected_guild.clone();
 
-        // One rail item: a pill marker on the left edge (tall when open, a dot when unread),
-        // the round button, and a mention badge in its corner.
-        let item = |id: SharedString, active: bool, unread: bool, mentions: u32, tip: String, body: AnyElement| {
-            div()
-                .relative()
-                .w_full()
-                .flex()
-                .justify_center()
-                .when(active || unread, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .top(if active { px(8.) } else { px(16.) })
-                            .w(px(3.))
-                            .h(if active { px(24.) } else { px(8.) })
-                            .rounded_r(px(2.))
-                            .bg(t.text),
-                    )
-                })
-                .child(
-                    div()
-                        .id(id)
-                        .relative()
-                        .size(px(40.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(if active { radius::LG } else { px(20.) })
-                        .bg(if active { t.accent } else { t.bg_raised })
-                        .text_color(if active { t.text_on_accent } else { t.text_muted })
-                        .text_size(text::MD)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .hover(|s| s.rounded(radius::LG).text_color(t.text))
-                        .tooltip(tooltip(tip))
-                        .child(body)
-                        .when(mentions > 0, |d| {
-                            d.child(div().absolute().bottom(px(-3.)).right(px(-3.)).child(CountBadge(mentions)))
-                        }),
-                )
-        };
+        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().px_2().py_2().flex().flex_col();
 
-        let requests = client.incoming_friend_requests() as u32;
-        let home_item = {
-            let client = self.client.clone();
-            item(
-                "rail-home".into(),
-                home,
-                false,
-                requests,
-                "Direct messages".into(),
-                icon(Icon::House).text_color(if home { t.text_on_accent } else { t.text_muted }).into_any_element(),
-            )
-            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| client.update(cx, |c, cx| c.show_home(cx)))
-        };
-
-        let mut rail = div()
-            .id("rail")
-            .w(size::RAIL)
-            .h_full()
-            .flex_none()
-            .bg(t.bg_base)
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap_2()
-            .py_3()
-            .overflow_y_scroll()
-            .child(home_item)
-            .child(div().w(px(24.)).h(px(1.)).my_1().bg(t.border_strong));
-
-        let mut last_server: Option<&str> = None;
-        for entry in &client.guilds {
-            if last_server.is_some_and(|s| s != entry.server) {
-                rail = rail.child(div().w(px(24.)).h(px(1.)).my_1().bg(t.border_strong));
-            }
-            last_server = Some(&entry.server);
-            let id = entry.guild.id.clone();
-            let active = !home && selected.as_deref() == Some(id.as_str());
-            let (unread, mentions) = client.guild_unread(&id);
-            let client = self.client.clone();
-            rail = rail.child(
-                item(
-                    SharedString::from(format!("guild-{id}")),
-                    active,
-                    unread,
-                    mentions,
-                    format!("{} · {}", entry.guild.name, entry.server),
-                    initials(&entry.guild.name).into_any_element(),
-                )
-                .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
-                    let id = id.clone();
-                    client.update(cx, |c, cx| c.select_guild(id, cx));
-                })
-                .on_mouse_down(MouseButton::Right, cx.listener({
-                    let id = entry.guild.id.clone();
-                    move |this, e: &gpui::MouseDownEvent, window, cx| this.show_guild_menu(id.clone(), e.position, window, cx)
-                })),
-            );
-        }
-        rail.child(
-            div()
-                .id("add-guild")
-                .size(px(40.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(20.))
-                .bg(t.bg_raised)
-                .cursor_pointer()
-                .hover(|s| s.rounded(radius::LG))
-                .tooltip(tooltip("Join or create a guild"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_dialog(DialogTab::Join, window, cx)))
-                .child(icon(Icon::Plus).text_color(t.success)),
-        )
-        .into_any_element()
-    }
-
-    fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let t = cx.theme().clone();
-        let client = self.client.read(cx);
-        let home = client.showing_home;
-        let entry = if home { None } else { client.selected_guild.as_ref().and_then(|g| client.guild(g)) };
-        let selected_channel = client.selected_channel().map(str::to_owned);
-
-        let header = div()
-            .id("guild-header")
-            .h(size::HEADER)
-            .flex_none()
-            .px_4()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(t.border)
-            .when(entry.is_some(), |d| {
-                d.cursor_pointer()
-                    .hover(|s| s.bg(t.bg_hover))
-                    .on_click(cx.listener(|this, _, window, cx| this.guild_menu(window, cx)))
-            })
-            .child(
-                div().flex_1().min_w_0().font_weight(FontWeight::SEMIBOLD).truncate().child(match (home, entry) {
-                    (true, _) => "Direct messages".to_owned(),
-                    (false, Some(e)) => e.guild.name.clone(),
-                    (false, None) => "Rhein".to_owned(),
-                }),
-            )
-            .when(entry.is_some(), |d| d.child(icon(Icon::ChevronDown).text_color(t.text_muted)));
-
-        let mut channels = div().id("channels").flex_1().overflow_y_scroll().px_2().pb_2().pt_2();
-        if home {
-            let pending = client.incoming_friend_requests();
-            let on_friends = client.home_conversation.is_none();
+        // Direct messages.
+        {
+            let requests = client.incoming_friend_requests() as u32;
+            let dm_unread = client.conversations.iter().any(|c| client.conversation_unread(&c.id));
             let c = self.client.clone();
-            channels = channels.child(
-                ListRow::new("home-friends", "Friends")
-                    .icon(Icon::Users)
-                    .selected(on_friends)
-                    .when(pending > 0, |r| r.trailing(CountBadge(pending as u32)))
-                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.open_conversation(None, cx))),
+            tree = tree.child(
+                ListRow::new("tree-home", "Direct messages")
+                    .icon(Icon::MessagesSquare)
+                    .selected(home && client.home_conversation.is_none())
+                    .strong(dm_unread)
+                    .when(requests > 0, |r| r.trailing(CountBadge(requests)))
+                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.show_home(cx))),
             );
-            channels = channels.child(section_label("Direct messages", cx));
-            if client.conversations.is_empty() {
-                channels = channels.child(div().px_2().text_size(text::SM).text_color(t.text_faint).child("No conversations yet."));
+            if home {
+                for row in self.conversation_rows(cx) {
+                    tree = tree.child(row);
+                }
             }
-            for conversation in &client.conversations {
-                let title = client.conversation_title(conversation);
-                let me = client.user_id().unwrap_or_default();
-                let other = conversation.members.iter().find(|m| m.user_id != me).map(|m| m.user_id.clone()).unwrap_or_default();
-                let selected = client.home_conversation.as_deref() == Some(conversation.id.as_str());
-                let unread = client.conversation_unread(&conversation.id);
-                let request = conversation.request_state.as_deref() == Some("pending");
-                let (c, id) = (self.client.clone(), conversation.id.clone());
-                let leading = if conversation.kind == "gc" {
-                    div().size(px(24.)).rounded_full().bg(t.bg_raised).flex().items_center().justify_center().child(icon_sized(Icon::Users, px(14.))).into_any_element()
-                } else {
-                    Avatar::new(other.clone(), title.clone()).size(px(24.)).into_any_element()
-                };
-                channels = channels.child(
-                    ListRow::new(SharedString::from(format!("conv-{}", conversation.id)), title)
-                        .leading(leading)
-                        .selected(selected)
-                        .strong(unread)
-                        .when(request, |r| r.trailing(Tag("REQUEST")))
-                        .on_click(move |_, _, cx| {
-                            let id = id.clone();
-                            c.update(cx, |c, cx| c.open_conversation(Some(id), cx));
-                        }),
-                );
-            }
-        } else if let Some(entry) = entry {
-            if let Some(server) = client.server(&entry.server).filter(|s| s.status != ServerStatus::Ready) {
-                channels = channels.child(
+        }
+
+        // Servers and their guilds.
+        for server in &client.servers {
+            let dot = match server.status {
+                ServerStatus::Ready => t.success,
+                ServerStatus::Connecting | ServerStatus::Reconnecting | ServerStatus::Renewing => t.warning,
+                ServerStatus::Incompatible | ServerStatus::Failed => t.danger,
+            };
+            tree = tree.child(
+                div()
+                    .px_2()
+                    .pt_4()
+                    .pb_1()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .font_family(FONT_MONO)
+                    .text_size(text::XS)
+                    .text_color(t.text_faint)
+                    .child(div().size(px(6.)).flex_none().rounded_full().bg(dot))
+                    .child(div().min_w_0().truncate().child(server.name.clone())),
+            );
+            if server.status != ServerStatus::Ready {
+                tree = tree.child(
                     div()
                         .px_2()
-                        .pb_2()
-                        .text_size(text::SM)
-                        .text_color(t.warning)
-                        .child(format!("{}: {}", server.name, server.status.label())),
-                );
-            }
-            let gid = entry.guild.id.clone();
-            for ch in entry.ordered_channels() {
-                if ch.is_category() {
-                    let collapsed = self.collapsed.contains(&ch.id);
-                    let cat = ch.id.clone();
-                    channels = channels.child(
-                        div()
-                            .id(SharedString::from(format!("cat-{}", ch.id)))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .pl_1()
-                            .pt_4()
-                            .pb_1()
-                            .text_size(text::XS)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(t.text_faint)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(t.text_muted))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed.remove(&cat) {
-                                    this.collapsed.insert(cat.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(icon_sized(if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, px(12.)).text_color(t.text_faint))
-                            .child(ch.name.to_uppercase()),
-                    );
-                    continue;
-                }
-                let active = selected_channel.as_deref() == Some(ch.id.as_str());
-                let mark = client.read_mark(&ch.id);
-                // A collapsed category still shows its open channel and anything with news.
-                let hidden = ch.parent_id.as_ref().is_some_and(|p| self.collapsed.contains(p));
-                if hidden && !active && !mark.is_unread() && mark.mentions == 0 {
-                    continue;
-                }
-                let glyph = match ch.kind.as_str() {
-                    "voice" => Icon::Volume,
-                    "announcement" => Icon::Megaphone,
-                    "forum" => Icon::MessagesSquare,
-                    _ => Icon::Hash,
-                };
-                let mut row = ListRow::new(SharedString::from(format!("chan-{}", ch.id)), ch.name.clone())
-                    .icon(glyph)
-                    .selected(active)
-                    .strong(mark.is_unread())
-                    .muted(mark.muted && !active)
-                    .when(mark.mentions > 0, |r| r.trailing(CountBadge(mark.mentions)));
-                if ch.is_textual() {
-                    let id = ch.id.clone();
-                    let client = self.client.clone();
-                    row = row.on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        client.update(cx, |c, cx| c.select_channel(id, cx));
-                    });
-                } else if ch.is_voice() {
-                    let id = ch.id.clone();
-                    let client = self.client.clone();
-                    row = row.on_click(move |_, _, cx| {
-                        let id = id.clone();
-                        client.update(cx, |c, cx| c.select_channel(id, cx));
-                    });
-                }
-                let menu_id = ch.id.clone();
-                row = row.on_secondary(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.channel_menu(menu_id.clone(), e.position, window, cx)
-                }));
-                channels = channels.child(row);
-                if ch.is_voice() {
-                    for state in client.voice_members(&gid, &ch.id) {
-                        let name = client.display_name(Some(&gid), &state.user_id);
-                        let avatar = client.avatar_url(Some(&gid), &state.user_id);
-                        let muted = state.self_mute || state.server_mute;
-                        let deaf = state.self_deaf || state.server_deaf;
-                        channels = channels.child(
-                            div()
-                                .pl(px(30.))
-                                .pr_2()
-                                .py_0p5()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_size(text::SM)
-                                .text_color(t.text_muted)
-                                .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into)))
-                                .child(div().flex_1().min_w_0().truncate().child(name))
-                                .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(12.)).text_color(t.danger)))
-                                .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(12.)).text_color(t.text_faint)))
-                                .when(muted, |d| d.child(icon_sized(Icon::MicOff, px(12.)).text_color(if state.server_mute { t.danger } else { t.text_faint })))
-                                .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(12.)).text_color(if state.server_deaf { t.danger } else { t.text_faint }))),
-                        );
-                    }
-                }
-            }
-        } else {
-            for server in &client.servers {
-                channels = channels.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(text::SM)
-                        .text_color(if server.status == ServerStatus::Ready { t.text_faint } else { t.warning })
-                        .child(format!("{}: {}", server.name, server.status.label()))
+                        .pb_1()
+                        .font_family(FONT_MONO)
+                        .text_size(text::XS)
+                        .text_color(if matches!(server.status, ServerStatus::Failed | ServerStatus::Incompatible) { t.danger } else { t.warning })
+                        .child(server.status.label().to_lowercase())
                         .children(server.error.clone().map(|e| div().text_color(t.danger).child(e))),
                 );
             }
+            for entry in client.guilds.iter().filter(|g| g.server == server.name) {
+                let gid = entry.guild.id.clone();
+                let active = !home && selected.as_deref() == Some(gid.as_str());
+                let expanded = self.guild_expanded(&gid, cx);
+                let (unread, mentions) = client.guild_unread(&gid);
+                let (select_id, chevron_id, menu_id, more_id) = (gid.clone(), gid.clone(), gid.clone(), gid.clone());
+                tree = tree.child(
+                    div()
+                        .id(SharedString::from(format!("tree-guild-{gid}")))
+                        .group("guild-row")
+                        .h(px(30.))
+                        .pl_1()
+                        .pr_1()
+                        .rounded(radius::MD)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .text_color(if active || unread { t.text } else { t.text_muted })
+                        .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                        .when(active && !expanded, |d| d.bg(t.bg_selected))
+                        .hover(|s| s.bg(t.bg_hover).text_color(t.text))
+                        .tooltip(tooltip(format!("{} · {}", entry.guild.name, entry.server)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let open = {
+                                let c = this.client.read(cx);
+                                !c.showing_home && c.selected_guild.as_deref() == Some(select_id.as_str())
+                            };
+                            if open {
+                                this.toggle_guild(&select_id, cx);
+                            } else {
+                                this.folded_guilds.remove(&select_id);
+                                let id = select_id.clone();
+                                this.client.update(cx, |c, cx| c.select_guild(id, cx));
+                            }
+                        }))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                            this.show_guild_menu(menu_id.clone(), e.position, window, cx)
+                        }))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("tree-chevron-{gid}")))
+                                .size(px(20.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(radius::SM)
+                                .text_color(t.text_faint)
+                                .hover(|s| s.text_color(t.text))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_guild(&chevron_id, cx);
+                                }))
+                                .child(icon_sized(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.))),
+                        )
+                        .child(div().flex_1().min_w_0().truncate().child(entry.guild.name.clone()))
+                        .when(unread && mentions == 0 && !expanded, |d| d.child(UnreadDot))
+                        .when(mentions > 0, |d| d.child(CountBadge(mentions)))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("tree-more-{gid}")))
+                                .invisible()
+                                .group_hover("guild-row", |s| s.visible())
+                                .size(px(20.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(radius::SM)
+                                .text_color(t.text_faint)
+                                .hover(|s| s.text_color(t.text).bg(t.bg_selected))
+                                .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.show_guild_menu(more_id.clone(), e.position(), window, cx)
+                                }))
+                                .child(icon_sized(Icon::Ellipsis, px(14.))),
+                        ),
+                );
+                if expanded {
+                    tree = tree.child(div().pl_3().flex().flex_col().children(self.channel_rows(&gid, cx)));
+                }
+            }
         }
 
-        let me = client.user_id().unwrap_or_default().to_owned();
-        let my_name = client.display_name(None, &me);
-        let prefs = client.prefs.clone();
-        let my_avatar = client.avatar_url(None, &me);
-        let my_presence = match prefs.status.as_str() {
-            "idle" => Presence::Idle,
-            "dnd" => Presence::Dnd,
-            "invisible" => Presence::Offline,
-            _ => Presence::Online,
-        };
-        let my_status = prefs.custom_status.clone().unwrap_or_else(|| match prefs.status.as_str() {
-            "idle" => "Idle".into(),
-            "dnd" => "Do not disturb".into(),
-            "invisible" => "Invisible".into(),
-            _ => me.clone(),
-        });
-        let user_panel = div()
-            .h(px(56.))
-            .flex_none()
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .bg(t.bg_base)
-            .child(
-                div()
-                    .id("status-avatar")
-                    .cursor_pointer()
-                    .tooltip(tooltip("Set status"))
-                    .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.status_menu(e.position(), window, cx)))
-                    .child(Avatar::new(me.clone(), my_name.clone()).size(px(32.)).image(my_avatar.map(Into::into)).presence(Some(my_presence))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(text::MD).font_weight(FontWeight::SEMIBOLD).truncate().child(my_name))
-                    .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(my_status)),
-            )
-            .child(
-                IconButton::new("open-settings", Icon::Settings)
-                    .tooltip("Settings (Ctrl+,)")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
-            .child(
-                IconButton::new("sign-out", Icon::LogOut)
-                    .tooltip("Sign out")
-                    .on_click(cx.listener(|this, _, window, cx| this.ask_sign_out(window, cx))),
-            );
+        tree = tree.child(
+            div().pt_3().child(
+                ListRow::new("tree-add", "Join or create")
+                    .icon(Icon::Plus)
+                    .muted(true)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_dialog(DialogTab::Join, window, cx))),
+            ),
+        );
 
         div()
             .w(size::SIDEBAR)
@@ -1278,10 +1085,158 @@ impl Shell {
             .flex()
             .flex_col()
             .bg(t.bg_panel)
-            .child(header)
-            .child(channels)
-            .child(user_panel)
+            .border_r_1()
+            .border_color(t.border)
+            .child(tree)
             .into_any_element()
+    }
+
+    /// Friends and the private conversations, shown under "Direct messages".
+    fn conversation_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let mut rows = Vec::new();
+        let pending = client.incoming_friend_requests();
+        let c = self.client.clone();
+        rows.push(
+            ListRow::new("home-friends", "Friends")
+                .icon(Icon::Users)
+                .selected(client.home_conversation.is_none())
+                .when(pending > 0, |r| r.trailing(CountBadge(pending as u32)))
+                .on_click(move |_, _, cx| c.update(cx, |c, cx| c.open_conversation(None, cx)))
+                .into_any_element(),
+        );
+        if client.conversations.is_empty() {
+            rows.push(
+                div().px_2().py_1().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("no conversations yet").into_any_element(),
+            );
+        }
+        for conversation in &client.conversations {
+            let title = client.conversation_title(conversation);
+            let me = client.user_id().unwrap_or_default();
+            let other = conversation.members.iter().find(|m| m.user_id != me).map(|m| m.user_id.clone()).unwrap_or_default();
+            let selected = client.home_conversation.as_deref() == Some(conversation.id.as_str());
+            let unread = client.conversation_unread(&conversation.id);
+            let request = conversation.request_state.as_deref() == Some("pending");
+            let (c, id) = (self.client.clone(), conversation.id.clone());
+            let leading = if conversation.kind == "gc" {
+                div().size(px(20.)).rounded_full().bg(t.bg_selected).flex().items_center().justify_center().child(icon_sized(Icon::Users, px(12.))).into_any_element()
+            } else {
+                Avatar::new(other.clone(), title.clone()).size(px(20.)).into_any_element()
+            };
+            rows.push(
+                ListRow::new(SharedString::from(format!("conv-{}", conversation.id)), title)
+                    .leading(leading)
+                    .selected(selected)
+                    .strong(unread)
+                    .when(request, |r| r.trailing(Tag("REQUEST")))
+                    .on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        c.update(cx, |c, cx| c.open_conversation(Some(id), cx));
+                    })
+                    .into_any_element(),
+            );
+        }
+        rows.into_iter().map(|r| div().pl_3().child(r).into_any_element()).collect()
+    }
+
+    /// One guild's channels in order, with categories, voice occupants and unread state.
+    fn channel_rows(&self, gid: &str, cx: &Context<Self>) -> Vec<AnyElement> {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let Some(entry) = client.guild(gid) else { return Vec::new() };
+        let selected_channel = if client.showing_home { None } else { client.selected_channel().map(str::to_owned) };
+        let mut rows = Vec::new();
+        for ch in entry.ordered_channels() {
+            if ch.is_category() {
+                let collapsed = self.collapsed.contains(&ch.id);
+                let cat = ch.id.clone();
+                rows.push(
+                    div()
+                        .id(SharedString::from(format!("cat-{}", ch.id)))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl_1()
+                        .pt_3()
+                        .pb_1()
+                        .font_family(FONT_MONO)
+                        .text_size(text::XS)
+                        .text_color(t.text_faint)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(t.text_muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.collapsed.remove(&cat) {
+                                this.collapsed.insert(cat.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(icon_sized(if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, px(12.)).text_color(t.text_faint))
+                        .child(ch.name.to_lowercase())
+                        .into_any_element(),
+                );
+                continue;
+            }
+            let active = selected_channel.as_deref() == Some(ch.id.as_str());
+            let mark = client.read_mark(&ch.id);
+            // A collapsed category still shows its open channel and anything with news.
+            let hidden = ch.parent_id.as_ref().is_some_and(|p| self.collapsed.contains(p));
+            if hidden && !active && !mark.is_unread() && mark.mentions == 0 {
+                continue;
+            }
+            let glyph = match ch.kind.as_str() {
+                "voice" => Icon::Volume,
+                "announcement" => Icon::Megaphone,
+                "forum" => Icon::MessagesSquare,
+                _ => Icon::Hash,
+            };
+            let mut row = ListRow::new(SharedString::from(format!("chan-{}", ch.id)), ch.name.clone())
+                .icon(glyph)
+                .selected(active)
+                .strong(mark.is_unread())
+                .muted(mark.muted && !active)
+                .when(mark.mentions > 0, |r| r.trailing(CountBadge(mark.mentions)));
+            if ch.is_textual() || ch.is_voice() {
+                let id = ch.id.clone();
+                let client = self.client.clone();
+                row = row.on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    client.update(cx, |c, cx| c.select_channel(id, cx));
+                });
+            }
+            let menu_id = ch.id.clone();
+            row = row.on_secondary(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
+                this.channel_menu(menu_id.clone(), e.position, window, cx)
+            }));
+            rows.push(row.into_any_element());
+            if ch.is_voice() {
+                for state in client.voice_members(gid, &ch.id) {
+                    let name = client.display_name(Some(gid), &state.user_id);
+                    let avatar = client.avatar_url(Some(gid), &state.user_id);
+                    let muted = state.self_mute || state.server_mute;
+                    let deaf = state.self_deaf || state.server_deaf;
+                    rows.push(
+                        div()
+                            .pl(px(30.))
+                            .pr_2()
+                            .py_0p5()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(text::SM)
+                            .text_color(t.text_muted)
+                            .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into)))
+                            .child(div().flex_1().min_w_0().truncate().child(name))
+                            .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(12.)).text_color(t.danger)))
+                            .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(12.)).text_color(t.text_faint)))
+                            .when(muted, |d| d.child(icon_sized(Icon::MicOff, px(12.)).text_color(if state.server_mute { t.danger } else { t.text_faint })))
+                            .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(12.)).text_color(if state.server_deaf { t.danger } else { t.text_faint })))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        rows
     }
 
     fn members(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1461,20 +1416,24 @@ impl Shell {
     }
 }
 
-fn initials(name: &str) -> String {
-    let words: Vec<&str> = name.split_whitespace().collect();
-    let out: String = match words.as_slice() {
-        [] => "?".into(),
-        [one] => one.chars().take(2).collect(),
-        [first, .., last] => first.chars().take(1).chain(last.chars().take(1)).collect(),
-    };
-    if out.is_empty() { "?".into() } else { out }
-}
-
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail = self.rail(cx);
         let sidebar = self.sidebar(cx);
+        let status = {
+            let (a, b, c) = (cx.weak_entity(), cx.weak_entity(), cx.weak_entity());
+            StatusLine::new(
+                self.client.clone(),
+                move |at, window, cx| {
+                    a.update(cx, |v, cx| v.status_menu(at, window, cx)).ok();
+                },
+                move |window, cx| {
+                    b.update(cx, |v, cx| v.open_settings(window, cx)).ok();
+                },
+                move |window, cx| {
+                    c.update(cx, |v, cx| v.ask_sign_out(window, cx)).ok();
+                },
+            )
+        };
         let members = self.render_panel(cx);
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
@@ -1496,10 +1455,17 @@ impl Render for Shell {
             .relative()
             .size_full()
             .flex()
-            .child(rail)
-            .child(sidebar)
-            .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
-            .children(members)
+            .flex_col()
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(sidebar)
+                    .map(|d| if self.client.read(cx).showing_home { d.child(self.home.clone()) } else { d.child(self.chat.clone()) })
+                    .children(members),
+            )
+            .child(status)
             .children(toast)
             .children(dialog)
             .children(sign_out)

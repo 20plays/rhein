@@ -7,6 +7,7 @@ pub mod panels;
 pub mod rows;
 pub mod settings;
 pub mod shell;
+pub mod status;
 pub mod switcher;
 
 use gpui::{

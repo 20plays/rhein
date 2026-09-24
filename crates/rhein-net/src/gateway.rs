@@ -28,6 +28,8 @@ pub enum GatewayEvent {
     Status(GatewayStatus),
     Ready(Box<Ready>),
     Dispatch(Box<Event>),
+    /// Round trip of the last heartbeat, measured to its acknowledgement.
+    Latency(Duration),
 }
 
 enum Command {
@@ -175,6 +177,7 @@ async fn session(
     let (mut sink, mut stream) = socket.split();
     let mut heartbeat_every = Duration::from_secs(45);
     let mut next_beat: Option<Instant> = None;
+    let mut beat_sent: Option<Instant> = None;
     let mut queued: Vec<Value> = Vec::new();
     let mut ready = false;
 
@@ -190,6 +193,7 @@ async fn session(
                 if sink.send(WsMessage::text(rhein_proto::heartbeat().to_string())).await.is_err() {
                     return Outcome::Retry { quick: false };
                 }
+                beat_sent = Some(Instant::now());
                 next_beat = Some(Instant::now() + heartbeat_every);
             }
             cmd = commands.recv() => match cmd {
@@ -253,7 +257,8 @@ async fn session(
                                 };
                                 ready = true;
                                 *failures = 0;
-                                next_beat = Some(Instant::now() + heartbeat_every);
+                                // Beat once right away so the latency is known from the start.
+                                next_beat = Some(Instant::now());
                                 let _ = events.send(GatewayEvent::Ready(Box::new(data)));
                                 let _ = events.send(GatewayEvent::Status(GatewayStatus::Ready));
                                 for frame in queued.drain(..) {
@@ -263,6 +268,11 @@ async fn session(
                             "DISPATCH" => {
                                 if let Some(t) = frame.t {
                                     let _ = events.send(GatewayEvent::Dispatch(Box::new(Event::parse(&t, frame.d))));
+                                }
+                            }
+                            "HEARTBEAT_ACK" => {
+                                if let Some(at) = beat_sent.take() {
+                                    let _ = events.send(GatewayEvent::Latency(at.elapsed()));
                                 }
                             }
                             "INVALID_SESSION" => return Outcome::Rejected,

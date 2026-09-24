@@ -76,6 +76,8 @@ pub struct Server {
     pub api: Option<Api>,
     pub status: ServerStatus,
     pub error: Option<String>,
+    /// Round trip of the last gateway heartbeat; cleared while disconnected.
+    pub latency: Option<std::time::Duration>,
     gateway: Option<GatewayHandle>,
     connect: Option<Task<()>>,
 }
@@ -826,6 +828,7 @@ impl Client {
             api: None,
             status: ServerStatus::Connecting,
             error: None,
+            latency: None,
             gateway: None,
             connect: None,
         });
@@ -976,6 +979,9 @@ impl Client {
             GatewayEvent::Status(status) => {
                 let renew = matches!(status, GatewayStatus::Rejected);
                 if let Some(s) = self.server_mut(server) {
+                    if !matches!(status, GatewayStatus::Ready) {
+                        s.latency = None;
+                    }
                     s.status = match status {
                         GatewayStatus::Connecting => ServerStatus::Connecting,
                         GatewayStatus::Ready => ServerStatus::Ready,
@@ -990,6 +996,11 @@ impl Client {
             }
             GatewayEvent::Ready(ready) => self.on_ready(server, *ready, cx),
             GatewayEvent::Dispatch(event) => self.on_dispatch(server, *event, cx),
+            GatewayEvent::Latency(rtt) => {
+                if let Some(s) = self.server_mut(server) {
+                    s.latency = Some(rtt);
+                }
+            }
         }
         cx.notify();
     }

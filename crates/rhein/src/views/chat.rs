@@ -17,7 +17,7 @@ use gpui::{
 use rhein_proto::Message;
 use rhein_store::autocomplete::{self, Trigger};
 use rhein_store::{Client, ClientEvent, StagedState, perms};
-use rhein_ui::theme::{radius, size, text};
+use rhein_ui::theme::{FONT_MONO, radius, size, text};
 use rhein_ui::{
     ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, MenuEntry, MenuHost, Modal, Nav,
     TextInput, icon,
@@ -952,8 +952,11 @@ impl ChatView {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
-        let typing: Vec<String> =
-            client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect();
+        let typing: Vec<String> = if self.fixed.is_some() {
+            client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect()
+        } else {
+            Vec::new()
+        };
 
         let context_bar = if self.editing.is_some() {
             Some(("Editing message".to_owned(), None))
@@ -1071,12 +1074,23 @@ impl ChatView {
                         ),
                     ),
             )
-            .child(div().h(px(18.)).pt_0p5().text_size(text::XS).text_color(t.text_muted).child(match typing.len() {
-                0 => String::new(),
-                1 => format!("{} is typing…", typing[0]),
-                2 => format!("{} and {} are typing…", typing[0], typing[1]),
-                _ => "Several people are typing…".into(),
-            }))
+            // The main view reports typing in the status line; a thread panel has none, so it
+            // keeps its own line under the composer.
+            .map(|d| {
+                if self.fixed.is_some() {
+                    d.child(
+                        div()
+                            .h(px(18.))
+                            .pt_0p5()
+                            .font_family(FONT_MONO)
+                            .text_size(text::XS)
+                            .text_color(t.text_muted)
+                            .child(typing_label(&typing).unwrap_or_default()),
+                    )
+                } else {
+                    d.pb_3()
+                }
+            })
     }
 
     fn render_lightbox(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -1286,5 +1300,15 @@ impl Render for ChatView {
             .children(picker)
             .children(self.menu.element())
             .into_any_element()
+    }
+}
+
+/// "anna is typing…" and friends, or `None` when nobody is.
+pub fn typing_label(names: &[String]) -> Option<String> {
+    match names {
+        [] => None,
+        [one] => Some(format!("{one} is typing…")),
+        [a, b] => Some(format!("{a} and {b} are typing…")),
+        _ => Some("several people are typing…".into()),
     }
 }

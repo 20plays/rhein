@@ -106,7 +106,6 @@ pub mod text {
 /// Fixed layout sizes.
 pub mod size {
     use super::*;
-    pub const RAIL: Pixels = px(64.);
     pub const SIDEBAR: Pixels = px(240.);
     pub const PANEL: Pixels = px(260.);
     pub const HEADER: Pixels = px(48.);
