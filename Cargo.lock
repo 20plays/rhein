@@ -5321,6 +5321,7 @@ dependencies = [
  "rhein-auth",
  "rhein-net",
  "rhein-proto",
+ "rhein-rpc",
  "serde",
  "serde_json",
  "tokio",

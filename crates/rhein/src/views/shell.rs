@@ -157,7 +157,15 @@ impl Shell {
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
                 "signout" => this.ask_sign_out(window, cx),
-                // profile=@user:server opens that card once members are in.
+                // profile=@user:server opens that card once members are in; settings=Activity
+                // opens a settings section.
+                other if other.starts_with("settings=") => {
+                    this.open_settings(window, cx);
+                    let section = other.trim_start_matches("settings=").to_owned();
+                    if let Some((view, _)) = &this.settings {
+                        view.update(cx, |v, cx| v.open_named(&section, cx));
+                    }
+                }
                 other => {
                     if let Some(user) = other.strip_prefix("profile=").map(str::to_owned) {
                         cx.spawn(async move |this, cx| {
@@ -1245,7 +1253,16 @@ impl Shell {
                             .flex_col()
                             .gap_0p5()
                             .child(div().text_size(text::MD).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status)),
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).truncate().child(status))
+                            // What we share right now, if anything.
+                            .children(client.shared_activities().first().map(|a| {
+                                div()
+                                    .font_family(FONT_MONO)
+                                    .text_size(text::XS)
+                                    .text_color(t.text_muted)
+                                    .truncate()
+                                    .child(format!("▶ {}", a.summary().to_lowercase()))
+                            })),
                     ),
             )
             .child(

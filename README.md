@@ -12,6 +12,7 @@ Rhein talks to Telium servers directly and is meant to work next to the official
 | M1 – login (OPAQUE), guild chat | done: history, sending, editing, deleting, reactions, typing, members, file upload |
 | UI phases 1–6 | done: friends (requests, accept, block), conversation list, voice stage with live voice states; settings (account, devices, servers, appearance), status, guild/channel/member menus, profile cards, Ctrl+K switcher, keyboard navigation; emoji picker, autocomplete, message context menu, pins, threads, search; design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
 | M2 – multiple servers (federation) | done: extra servers, invites across servers, one gateway per server |
+| Profiles and rich presence | done: banners, accents and card themes (shown and edited); activities of others with artwork through camo; sharing your own from a Discord-compatible RPC server (IPC and WebSocket), game detection and MPRIS |
 | M3 – DMs (MLS) | planned in [`mplan.md`](mplan.md) |
 | M4 – voice/video | planned in [`mplan.md`](mplan.md) |
 
@@ -25,6 +26,7 @@ The plan and its risks are in `~/.claude/plans/lies-die-das-hier-vectorized-snai
 | `rhein-auth` | OPAQUE client (identical to `@serenity-kit/opaque` 1.1.0) and the device key |
 | `rhein-net` | Discovery, REST client, sign-in, assertion → guild session, gateway with reconnect |
 | `rhein-store` | GPUI state (`Client` entity) on a tokio runtime (`Io`) |
+| `rhein-rpc` | Local activity sources: Discord RPC server (`discord-ipc-N`, WebSocket 6463–6472), game detection from Discord's detectable list, MPRIS; no GPUI |
 | `rhein-ui` | Design system: black-and-white theme tokens, motion tokens, bundled fonts (Geist, Geist Mono), Lucide icons, components |
 | `rhein` | The app: views built from `rhein-ui` components |
 
@@ -48,7 +50,15 @@ node seed.mjs ../../.dev/config-demo
 RHEIN_CONFIG_DIR=$PWD/../../.dev/config-demo cargo run -p rhein
 ```
 
-The script registers two accounts, Anna and Ben, with password `rhein demo password`. It creates a guild "Riverside" with a few messages and signs Rhein in as Anna.
+The script registers two accounts, Anna and Ben, with password `rhein demo password`. It creates a guild "Riverside" with a few messages, gives both profile looks (banner, accent, theme) and signs Rhein in as Anna.
+
+```sh
+node looks.mjs @anna…:localhost @ben…:localhost      # profile looks for accounts seeded earlier
+node presence.mjs @ben…:localhost music             # keep Ben online with an activity (or: game)
+cargo run -p rhein-rpc --example watch              # print what Rhein would share from this machine
+```
+
+Debug builds can start on a given screen, for screenshots: `RHEIN_DEV_OPEN=home|settings|settings=Activity|join|switcher|signout|profile=@user:server`.
 
 ## Tests
 

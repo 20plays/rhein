@@ -33,6 +33,14 @@ pub fn path() -> PathBuf {
         .join("session.json")
 }
 
+/// Where caches live (the detectable-games list, resolved application names).
+pub fn cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("RHEIN_CONFIG_DIR") {
+        return PathBuf::from(dir).join("cache");
+    }
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("rhein")
+}
+
 pub fn load() -> Option<Saved> {
     let text = std::fs::read_to_string(path()).ok()?;
     serde_json::from_str(&text).ok()

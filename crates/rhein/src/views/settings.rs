@@ -20,12 +20,14 @@ enum Section {
     Devices,
     Servers,
     Appearance,
+    Activity,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [Section::Account, Section::Devices, Section::Servers, Section::Appearance, Section::Shortcuts, Section::About];
+    const ALL: [Section; 7] =
+        [Section::Account, Section::Devices, Section::Servers, Section::Appearance, Section::Activity, Section::Shortcuts, Section::About];
 
     fn label(self) -> &'static str {
         match self {
@@ -33,6 +35,7 @@ impl Section {
             Section::Devices => "Devices",
             Section::Servers => "Servers",
             Section::Appearance => "Appearance",
+            Section::Activity => "Activity",
             Section::Shortcuts => "Keyboard shortcuts",
             Section::About => "About Rhein",
         }
@@ -44,6 +47,7 @@ impl Section {
             Section::Devices => Icon::Monitor,
             Section::Servers => Icon::Server,
             Section::Appearance => Icon::Palette,
+            Section::Activity => Icon::Gamepad,
             Section::Shortcuts => Icon::Keyboard,
             Section::About => Icon::Info,
         }
@@ -187,6 +191,14 @@ impl SettingsView {
         if self.bio.read(cx).text().is_empty() {
             let text = profile.bio.unwrap_or_default();
             self.bio.update(cx, |i, cx| i.set_text(text, cx));
+        }
+    }
+
+    /// Opens a section by its label ("Activity"), for debug start screens.
+    #[cfg(debug_assertions)]
+    pub fn open_named(&mut self, label: &str, cx: &mut Context<Self>) {
+        if let Some(section) = Section::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(label)) {
+            self.open(section, cx);
         }
     }
 
@@ -646,13 +658,15 @@ impl SettingsView {
             div()
                 .p_3()
                 .rounded(radius::MD)
-                .bg(t.bg_panel)
+                .border_1()
+                .border_color(t.border)
                 .flex()
                 .items_center()
                 .gap_3()
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .child(div().font_weight(FontWeight::MEDIUM).child(title))
@@ -707,6 +721,129 @@ impl SettingsView {
                     .on_toggle(move |on, _, cx| c3.update(cx, |c, cx| c.update_prefs(cx, |p| p.reduce_motion = on)))
                     .into_any_element(),
             ))
+            .into_any_element()
+    }
+
+    /// Rich presence: what is shared, from which sources, and what is being shared right now.
+    fn activity_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let prefs = client.prefs.clone();
+        let status = client.rpc_status.clone();
+        let found = client.local_activities.clone();
+        let shared = client.shared_activities().to_vec();
+        let row = |title: &'static str, detail: &'static str, control: AnyElement| {
+            div()
+                .p_3()
+                .rounded(radius::MD)
+                .border_1()
+                .border_color(t.border)
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().text_size(text::SM).text_color(t.text_faint).child(detail)),
+                )
+                .child(control)
+        };
+        let toggle = |id: &'static str, on: bool, set: fn(&mut rhein_store::prefs::Prefs, bool)| {
+            let client = self.client.clone();
+            Switch::new(id, on).on_toggle(move |on, _, cx| client.update(cx, |c, cx| c.update_prefs(cx, |p| set(p, on)))).into_any_element()
+        };
+        let mono = |s: String| div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(s);
+
+        let sources = if !prefs.share_activity {
+            div().child(mono("sharing is off".into()))
+        } else {
+            let socket = status.socket.as_ref().map_or("not listening (another app holds every slot)".to_owned(), |p| p.display().to_string());
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(mono(format!("discord rpc   {socket}")))
+                .child(mono(format!("websocket     {}", status.websocket_port.map_or("not listening".to_owned(), |p| format!("127.0.0.1:{p}")))))
+                .child(mono(format!("rpc apps      {}", if status.clients.is_empty() { "none connected".to_owned() } else { status.clients.len().to_string() })))
+                .child(mono(format!("games         {}", if status.detected.is_empty() { "none running".to_owned() } else { status.detected.join(", ") })))
+                .child(mono(format!("media players {}", if status.players.is_empty() { "none".to_owned() } else { status.players.join(", ") })))
+        };
+
+        // Everything found, with whether it goes out; any of it can be hidden by name.
+        let mut list = div().flex().flex_col().gap_2();
+        if found.is_empty() && prefs.hidden_activities.is_empty() {
+            list = list.child(div().text_size(text::SM).text_color(t.text_faint).child("Nothing detected right now."));
+        }
+        for (i, a) in found.iter().enumerate() {
+            let is_shared = shared.contains(a);
+            let name = a.name.clone();
+            let client = self.client.clone();
+            list = list.child(
+                div()
+                    .p_3()
+                    .rounded(radius::MD)
+                    .border_1()
+                    .border_color(t.border)
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(icon(match a.kind { 2 => Icon::Music, 1 | 3 => Icon::Monitor, _ => Icon::Gamepad }).text_color(t.text_faint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().child(a.summary()))
+                            .child(mono(if is_shared { "shared".into() } else { "not shared".into() })),
+                    )
+                    .child(Button::new(("hide-activity", i), "Don't share").small().ghost().on_click(move |_, _, cx| {
+                        let name = name.clone();
+                        client.update(cx, |c, cx| {
+                            c.update_prefs(cx, |p| {
+                                if !p.hidden_activities.contains(&name) {
+                                    p.hidden_activities.push(name);
+                                }
+                            })
+                        });
+                    })),
+            );
+        }
+        for (i, name) in prefs.hidden_activities.iter().enumerate() {
+            let (client, name) = (self.client.clone(), name.clone());
+            list = list.child(
+                div()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().text_size(text::SM).text_color(t.text_muted).child(format!("{name} is never shared")))
+                    .child(Button::new(("unhide-activity", i), "Share again").small().ghost().on_click(move |_, _, cx| {
+                        let name = name.clone();
+                        client.update(cx, |c, cx| c.update_prefs(cx, |p| p.hidden_activities.retain(|n| *n != name)));
+                    })),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(row(
+                "Share my activity",
+                "Show what you are playing, listening to or watching, like Discord. Apps using Discord Rich Presence report to Rhein directly.",
+                toggle("share-activity", prefs.share_activity, |p, on| p.share_activity = on),
+            ))
+            .child(row("Games", "Games found running, and apps that report over Discord RPC.", toggle("share-games", prefs.share_games, |p, on| p.share_games = on)))
+            .child(row("Music", "The song a media player is playing.", toggle("share-music", prefs.share_music, |p, on| p.share_music = on)))
+            .child(row("Videos", "What a browser or video player is showing.", toggle("share-videos", prefs.share_videos, |p, on| p.share_videos = on)))
+            .child(div().pt_4().pb_1().font_weight(FontWeight::SEMIBOLD).child("Sources"))
+            .child(sources)
+            .child(div().pt_4().pb_1().font_weight(FontWeight::SEMIBOLD).child("Right now"))
+            .child(list)
             .into_any_element()
     }
 
@@ -781,6 +918,7 @@ impl Render for SettingsView {
             Section::Devices => self.devices_section(&t, cx),
             Section::Servers => self.servers_section(&t, cx),
             Section::Appearance => self.appearance(&t, cx),
+            Section::Activity => self.activity_section(&t, cx),
             Section::Shortcuts => self.shortcuts(&t),
             Section::About => self.about(&t),
         };

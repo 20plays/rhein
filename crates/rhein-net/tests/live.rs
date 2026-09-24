@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use rhein_auth::{DeviceKey, SerenityKsf};
 use rhein_net::gateway::{self, GatewayConfig};
+use rhein_proto::PresenceState;
 use rhein_net::{Api, GatewayEvent, auth, discover};
 use rhein_proto::{Event, SendMessage, USER_INTENTS};
 
@@ -68,8 +69,7 @@ async fn register_login_session_gateway_message() {
         url,
         token: session.session_token.clone(),
         intents: USER_INTENTS,
-        status: "online".into(),
-        custom_status: None,
+        presence: online(),
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -152,8 +152,7 @@ async fn guild_on_foreign_server() {
         url: session.gateway.clone().or(doc.gateway.clone()).unwrap(),
         token: session.session_token,
         intents: USER_INTENTS,
-        status: "online".into(),
-        custom_status: None,
+        presence: online(),
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -328,4 +327,78 @@ async fn friends_and_conversations() {
     a.remove_friend(&b_id).await.ok();
     assert!(a.conversations().await.expect("conversations").is_empty());
     println!("ok: friend request, accept, block, unblock and conversation list work");
+}
+
+/// Rich presence end to end: an activity set on one account's connection reaches another member
+/// of the same guild as a PRESENCE_UPDATE, in the shape the web client reads.
+#[tokio::test]
+async fn rich_presence_reaches_guild_members() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    let gateway_of = |s: &rhein_proto::GuildSession| s.gateway.clone().or(doc.gateway.clone()).expect("gateway");
+
+    let watcher_home = Api::new(http.clone(), &doc.api, None);
+    register_retrying(&watcher_home, &format!("rpw{}", std::process::id()), &ksf).await;
+    let watcher = Api::new(http.clone(), &doc.api, None);
+    let watcher_session = auth::guild_session(&watcher_home, &watcher, &doc.server_name).await.expect("session");
+    let guild = watcher.create_guild("Presence").await.expect("guild");
+    let code = watcher.create_invite(&guild.id, None).await.expect("invite")["code"].as_str().unwrap().to_owned();
+
+    let player_home = Api::new(http.clone(), &doc.api, None);
+    let player_id = register_retrying(&player_home, &format!("rpp{}", std::process::id()), &ksf).await.session.user_id;
+    let player = Api::new(http.clone(), &doc.api, None);
+    let player_session = auth::guild_session(&player_home, &player, &doc.server_name).await.expect("session");
+    player.join_invite(&code).await.expect("join");
+
+    let (_watch, mut events) = gateway::connect(GatewayConfig {
+        url: gateway_of(&watcher_session),
+        token: watcher_session.session_token.clone(),
+        intents: USER_INTENTS,
+        presence: online(),
+    });
+    let game = rhein_proto::Activity::normalize(&serde_json::json!({
+        "name": "Factorio",
+        "details": "Building a rail network",
+        "timestamps": { "start": 1_700_000_000_000u64 },
+    }))
+    .unwrap();
+    let (play, mut play_events) = gateway::connect(GatewayConfig {
+        url: gateway_of(&player_session),
+        token: player_session.session_token.clone(),
+        intents: USER_INTENTS,
+        presence: online(),
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(play_events.recv().await, Some(GatewayEvent::Ready(_))) {}
+    })
+    .await
+    .expect("player READY");
+    play.set_presence(PresenceState { activities: Some(vec![game.clone()]), ..online() });
+
+    let seen = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(GatewayEvent::Dispatch(event)) = events.recv().await
+                && let Event::PresenceUpdate { user_id, presence } = *event
+                && user_id == player_id
+            {
+                let activities = rhein_proto::activity::activities_of(&presence);
+                if !activities.is_empty() {
+                    return activities;
+                }
+            }
+        }
+    })
+    .await
+    .expect("PRESENCE_UPDATE with the activity");
+    assert_eq!(seen, vec![game]);
+    println!("ok: rich presence reached the other member");
+}
+
+fn online() -> PresenceState {
+    PresenceState { status: "online".into(), ..Default::default() }
 }

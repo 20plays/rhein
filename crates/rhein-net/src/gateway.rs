@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use rhein_proto::{Event, Frame, Hello, Ready, close};
+use rhein_proto::{Event, Frame, Hello, PresenceState, Ready, close};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout};
@@ -36,7 +36,7 @@ enum Command {
     Send(Value),
     Reconnect(String),
     /// Remember a presence for the next IDENTIFY and send it now.
-    Presence(String, Option<String>),
+    Presence(PresenceState),
     Close,
 }
 
@@ -51,8 +51,8 @@ impl GatewayHandle {
     }
 
     /// Sets this connection's presence now and for every later IDENTIFY.
-    pub fn set_presence(&self, status: String, custom_status: Option<String>) {
-        let _ = self.commands.send(Command::Presence(status, custom_status));
+    pub fn set_presence(&self, presence: PresenceState) {
+        let _ = self.commands.send(Command::Presence(presence));
     }
 
     /// Reconnects now with a fresh token (after a renewed session).
@@ -71,8 +71,7 @@ pub struct GatewayConfig {
     pub url: String,
     pub token: String,
     pub intents: u64,
-    pub status: String,
-    pub custom_status: Option<String>,
+    pub presence: PresenceState,
 }
 
 /// Starts the connection task on the current tokio runtime. Events arrive on the returned
@@ -125,10 +124,7 @@ async fn run(
                             break;
                         }
                         Some(Command::Send(_)) => {}
-                        Some(Command::Presence(status, custom)) => {
-                            config.status = status;
-                            config.custom_status = custom;
-                        }
+                        Some(Command::Presence(presence)) => config.presence = presence,
                         Some(Command::Close) | None => return,
                     }
                 }
@@ -143,10 +139,7 @@ async fn run(
                 cmd = commands.recv() => match cmd {
                     Some(Command::Reconnect(token)) => { config.token = token; break; }
                     Some(Command::Send(_)) => {}
-                    Some(Command::Presence(status, custom)) => {
-                        config.status = status;
-                        config.custom_status = custom;
-                    }
+                    Some(Command::Presence(presence)) => config.presence = presence,
                     Some(Command::Close) | None => return,
                 },
             }
@@ -197,10 +190,9 @@ async fn session(
                 next_beat = Some(Instant::now() + heartbeat_every);
             }
             cmd = commands.recv() => match cmd {
-                Some(Command::Presence(status, custom)) => {
-                    let frame = rhein_proto::presence(&status, custom.as_deref());
-                    config.status = status;
-                    config.custom_status = custom;
+                Some(Command::Presence(presence)) => {
+                    let frame = rhein_proto::presence(&presence);
+                    config.presence = presence;
                     if ready && sink.send(WsMessage::text(frame.to_string())).await.is_err() {
                         return Outcome::Retry { quick: false };
                     }
@@ -242,7 +234,7 @@ async fn session(
                                 if hello.heartbeat_interval_ms > 0 {
                                     heartbeat_every = Duration::from_millis(hello.heartbeat_interval_ms);
                                 }
-                                let identify = rhein_proto::identify(&config.token, config.intents, &config.status, config.custom_status.as_deref());
+                                let identify = rhein_proto::identify(&config.token, config.intents, &config.presence);
                                 if sink.send(WsMessage::text(identify.to_string())).await.is_err() {
                                     return Outcome::Retry { quick: false };
                                 }

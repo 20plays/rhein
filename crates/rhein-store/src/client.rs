@@ -13,7 +13,7 @@ use rhein_auth::{DeviceKey, SerenityKsf};
 use rhein_net::gateway::{self, GatewayConfig};
 use rhein_net::{Api, GatewayEvent, GatewayHandle, GatewayStatus, auth, discover};
 use rhein_proto::{
-    Attachment, Channel, Discovery, Event, Guild, Member, Message, Ready, SendMessage,
+    Attachment, Channel, Discovery, Event, Guild, Member, Message, PresenceState, Ready, SendMessage,
     USER_INTENTS, localpart,
 };
 
@@ -228,6 +228,14 @@ pub struct Client {
     dividers: HashMap<String, Divider>,
     staged: HashMap<String, Vec<Staged>>,
     embeds: HashMap<String, EmbedState>,
+    /// The activities this client shares: `None` while sharing is off, so another session's
+    /// (the Telium desktop app's, say) stay untouched.
+    sharing: Option<Vec<rhein_proto::Activity>>,
+    /// The local activity sources while sharing is on, and the task that follows them.
+    rpc: Option<(rhein_rpc::Handle, Task<()>)>,
+    /// Everything the sources found, before the sharing preferences filter it.
+    pub local_activities: Vec<rhein_proto::Activity>,
+    pub rpc_status: rhein_rpc::Status,
     /// Activity artwork re-hosted by one of our servers' camo caches, by original URL.
     artwork: HashMap<String, EmbedState>,
     /// guild id → user id → their voice state (only users in a channel).
@@ -296,6 +304,10 @@ impl Client {
             dividers: HashMap::new(),
             staged: HashMap::new(),
             embeds: HashMap::new(),
+            sharing: None,
+            rpc: None,
+            local_activities: Vec::new(),
+            rpc_status: rhein_rpc::Status::default(),
             artwork: HashMap::new(),
             voice: HashMap::new(),
             signin: None,
@@ -433,6 +445,7 @@ impl Client {
         self.phase = Phase::SignedIn;
         self.error = None;
         self.persist();
+        self.sync_rpc(cx);
         // The home server may host guilds too; it gets a guild session like any other server.
         self.add_server_named(home_input, Some(home_name), cx);
         for input in extra {
@@ -443,6 +456,9 @@ impl Client {
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         log::info!("signing out");
         persist::clear();
+        self.rpc = None;
+        self.sharing = None;
+        self.local_activities.clear();
         self.servers.clear();
         self.guilds.clear();
         self.logs.clear();
@@ -519,21 +535,115 @@ impl Client {
     /// Sets the status on every server now and for later reconnects.
     pub fn set_presence(&mut self, status: String, custom_status: Option<String>, cx: &mut Context<Self>) {
         let custom_status = custom_status.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
-        for server in &self.servers {
-            if let Some(gw) = &server.gateway {
-                gw.set_presence(status.clone(), custom_status.clone());
-            }
-        }
         self.prefs.status = status;
         self.prefs.custom_status = custom_status;
         self.save_prefs();
+        self.push_presence();
         cx.notify();
+    }
+
+    /// What every connection should say about us right now.
+    pub fn presence_state(&self) -> PresenceState {
+        PresenceState {
+            status: self.prefs.status.clone(),
+            custom_status: self.prefs.custom_status.clone(),
+            activities: self.sharing.clone(),
+        }
+    }
+
+    fn push_presence(&self) {
+        let presence = self.presence_state();
+        for server in &self.servers {
+            if let Some(gw) = &server.gateway {
+                gw.set_presence(presence.clone());
+            }
+        }
     }
 
     pub fn update_prefs(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut crate::prefs::Prefs)) {
         change(&mut self.prefs);
         self.save_prefs();
+        self.sync_rpc(cx);
+        self.share_local(cx);
         cx.notify();
+    }
+
+    // ---------------------------------------------------------------- rich presence
+
+    /// What this client shares right now (after the sharing preferences), if anything.
+    pub fn shared_activities(&self) -> &[rhein_proto::Activity] {
+        self.sharing.as_deref().unwrap_or_default()
+    }
+
+    /// Starts the local activity sources while signed in with sharing on, and stops them
+    /// otherwise. Stopping clears what we shared, once.
+    fn sync_rpc(&mut self, cx: &mut Context<Self>) {
+        let want = self.phase == Phase::SignedIn && self.prefs.share_activity;
+        if want && self.rpc.is_none() {
+            let config = rhein_rpc::Config::new(persist::cache_dir());
+            let handle = {
+                let _runtime = self.io.handle().enter();
+                rhein_rpc::start(config)
+            };
+            let (activities, status) = (handle.activities.clone(), handle.status.clone());
+            // The sources change at human speed; a glance once a second is plenty and costs
+            // nothing while idle.
+            let follow = cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    let (now, state) = (activities.borrow().clone(), status.borrow().clone());
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            let changed = this.local_activities != now || this.rpc_status != state;
+                            this.local_activities = now;
+                            this.rpc_status = state;
+                            if changed {
+                                this.share_local(cx);
+                                cx.notify();
+                            }
+                        })
+                        .is_ok();
+                    if !alive {
+                        break;
+                    }
+                }
+            });
+            self.rpc = Some((handle, follow));
+        } else if !want && self.rpc.is_some() {
+            self.rpc = None;
+            self.local_activities.clear();
+            self.rpc_status = rhein_rpc::Status::default();
+            if self.sharing.is_some() {
+                self.sharing = Some(Vec::new());
+                self.push_presence();
+                self.sharing = None;
+            }
+        }
+    }
+
+    /// Applies the sharing preferences to what the sources found and tells the servers when that
+    /// changes.
+    fn share_local(&mut self, cx: &mut Context<Self>) {
+        if self.rpc.is_none() {
+            return;
+        }
+        let prefs = &self.prefs;
+        let shared: Vec<rhein_proto::Activity> = self
+            .local_activities
+            .iter()
+            .filter(|a| match a.slot() {
+                rhein_proto::activity::Slot::Game => prefs.share_games,
+                rhein_proto::activity::Slot::Music => prefs.share_music,
+                rhein_proto::activity::Slot::Video => prefs.share_videos,
+            })
+            .filter(|a| !prefs.hidden_activities.contains(&a.name))
+            .cloned()
+            .collect();
+        if self.sharing.as_ref() != Some(&shared) {
+            self.sharing = Some(shared);
+            self.push_presence();
+            cx.notify();
+        }
     }
 
     fn save_prefs(&self) {
@@ -858,6 +968,7 @@ impl Client {
         if self.home.is_none() {
             return;
         }
+        let presence = self.presence_state();
         let Some(server) = self.server_mut(&key) else { return };
         server.status = ServerStatus::Connecting;
         server.error = None;
@@ -873,7 +984,6 @@ impl Client {
                 let doc = discover(&http, &input).await?;
                 let api = Api::new(http, &doc.api, None);
                 let session = auth::guild_session(&home_api, &api, &doc.server_name).await?;
-                let prefs = crate::prefs::load();
                 let url = session
                     .gateway
                     .clone()
@@ -883,8 +993,7 @@ impl Client {
                     url,
                     token: session.session_token,
                     intents: USER_INTENTS,
-                    status: prefs.status.clone(),
-                    custom_status: prefs.custom_status.clone(),
+                    presence,
                 });
                 Ok((doc, api, handle, events))
             }))

@@ -67,21 +67,43 @@ pub struct Ready {
     pub guilds: Vec<Guild>,
 }
 
-pub fn identify(token: &str, intents: u64, status: &str, custom_status: Option<&str>) -> Value {
+/// What this connection says about the user.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PresenceState {
+    /// online, idle, dnd or invisible.
+    pub status: String,
+    pub custom_status: Option<String>,
+    /// `None` leaves activity to whichever other session reports it (the server keeps the last
+    /// one); `Some` is ours, and an empty list clears it.
+    pub activities: Option<Vec<crate::Activity>>,
+}
+
+impl PresenceState {
+    pub fn to_json(&self) -> Value {
+        let mut d = json!({ "status": self.status, "custom_status": self.custom_status });
+        if let Some(list) = &self.activities {
+            // `activity` carries the first one as the v1 envelope for older servers and clients.
+            d["activity"] = json!(list.first().and_then(crate::activity::encode_envelope));
+            d["rich_activities"] = Value::Array(list.iter().map(crate::Activity::to_value).collect());
+        }
+        d
+    }
+}
+
+pub fn identify(token: &str, intents: u64, presence: &PresenceState) -> Value {
     json!({
         "op": "IDENTIFY",
         "d": {
             "token": token,
             "intents": intents,
-            "presence": { "status": status, "custom_status": custom_status },
+            "presence": presence.to_json(),
             "protocol": { "version": PROTOCOL_VERSION },
         }
     })
 }
 
-/// `status` is one of online, idle, dnd, invisible.
-pub fn presence(status: &str, custom_status: Option<&str>) -> Value {
-    json!({ "op": "PRESENCE_UPDATE", "d": { "status": status, "custom_status": custom_status } })
+pub fn presence(presence: &PresenceState) -> Value {
+    json!({ "op": "PRESENCE_UPDATE", "d": presence.to_json() })
 }
 
 pub fn heartbeat() -> Value {
@@ -238,8 +260,24 @@ mod tests {
 
     #[test]
     fn identify_shape() {
-        let v = identify("tok", USER_INTENTS, "online", None);
+        let v = identify("tok", USER_INTENTS, &PresenceState { status: "online".into(), ..Default::default() });
         assert_eq!(v["op"], "IDENTIFY");
         assert_eq!(v["d"]["intents"], 255);
+        // Without activities of our own, the field is left out so another session's stay.
+        assert!(v["d"]["presence"].get("activity").is_none());
+    }
+
+    #[test]
+    fn presence_carries_activities_both_ways() {
+        let game = crate::Activity::normalize(&json!({ "name": "Factorio" })).unwrap();
+        let mut state = PresenceState { status: "online".into(), activities: Some(vec![game]), ..Default::default() };
+        let d = presence(&state)["d"].clone();
+        assert!(d["activity"].as_str().unwrap().starts_with(crate::activity::ENVELOPE_PREFIX));
+        assert_eq!(d["rich_activities"][0]["name"], "Factorio");
+        // An empty list is an explicit clear.
+        state.activities = Some(Vec::new());
+        let d = presence(&state)["d"].clone();
+        assert!(d["activity"].is_null());
+        assert_eq!(d["rich_activities"], json!([]));
     }
 }
