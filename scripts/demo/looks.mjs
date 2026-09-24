@@ -28,7 +28,7 @@ async function call(method, path, body, token) {
   return text ? JSON.parse(text) : null;
 }
 
-async function signIn(user) {
+export async function signIn(user) {
   await opaque.ready;
   const { clientLoginState, startLoginRequest } = opaque.client.startLogin({ password });
   const start = await call('POST', '/login/opaque/start', { user, start_login_request: startLoginRequest });

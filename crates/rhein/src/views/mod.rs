@@ -1,3 +1,4 @@
+pub mod activity;
 pub mod chat;
 pub mod emoji_picker;
 pub mod home;

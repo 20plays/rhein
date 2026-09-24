@@ -18,7 +18,7 @@ use rhein_ui::{
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::home::HomeView;
-use crate::views::profile;
+use crate::views::{activity, profile};
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
 use crate::views::status::StatusLine;
@@ -110,6 +110,7 @@ pub struct Shell {
     settings: Option<(Entity<SettingsView>, Subscription)>,
     switcher: Option<(Entity<QuickSwitcher>, Subscription)>,
     profile_card: Option<(String, Option<String>, Point<Pixels>)>,
+    card_ticker: Option<gpui::Task<()>>,
     _subs: Vec<Subscription>,
 }
 
@@ -188,6 +189,7 @@ impl Shell {
             settings: None,
             switcher: None,
             profile_card: None,
+            card_ticker: None,
             _subs: subs,
         }
     }
@@ -816,6 +818,21 @@ impl Shell {
             c.profile(&uid, cx);
         });
         self.profile_card = Some((user_id, guild, at));
+        // Activity clocks tick once a second, only while a card is open.
+        self.card_ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let open = this
+                    .update(cx, |v, cx| {
+                        cx.notify();
+                        v.profile_card.is_some()
+                    })
+                    .unwrap_or(false);
+                if !open {
+                    break;
+                }
+            }
+        }));
         cx.notify();
     }
 
@@ -823,6 +840,33 @@ impl Shell {
         let (user_id, guild_id, at) = self.profile_card.clone()?;
         let t = cx.theme().clone();
         let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
+        // What they are doing, from the guild's member list or the friends list.
+        let activities = {
+            let client = self.client.read(cx);
+            guild_id
+                .as_deref()
+                .and_then(|g| client.members.get(g))
+                .and_then(|l| l.iter().find(|m| m.user_id == user_id))
+                .map(|m| m.activities())
+                .filter(|a| !a.is_empty())
+                .or_else(|| client.friends.iter().find(|f| f.user_id == user_id).map(|f| f.activities()))
+                .unwrap_or_default()
+        };
+        let now_ms = rhein_store::client::now_ms().max(0) as u64;
+        let activity_cards: Vec<AnyElement> = activities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let assets = a.assets.clone().unwrap_or_default();
+                let (large, small) = self.client.update(cx, |c, cx| {
+                    (
+                        assets.large_image.as_deref().and_then(|u| c.artwork_url(u, cx)),
+                        assets.small_image.as_deref().and_then(|u| c.artwork_url(u, cx)),
+                    )
+                });
+                activity::card(&format!("card-activity-{i}"), a, large, small, now_ms, &t)
+            })
+            .collect();
         let client = self.client.read(cx);
         let name = client.display_name(guild_id.as_deref(), &user_id);
         let avatar = client.avatar_url(guild_id.as_deref(), &user_id);
@@ -894,6 +938,7 @@ impl Shell {
                         div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
                     }))))
             });
+        let body = body.children(activity_cards);
         let card = profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
             .occlude()
             .shadow_lg()
@@ -1382,7 +1427,14 @@ impl Shell {
             let presence = Presence::parse(m.status());
             let (uid, uid2) = (m.user_id.clone(), m.user_id.clone());
             let (weak, weak2) = (this.clone(), this.clone());
+            // An activity beats a custom status for the second line, as in the web client.
+            let subtitle = m
+                .activities()
+                .first()
+                .map(|a| a.summary())
+                .or_else(|| m.presence.as_ref().and_then(|p| p.get("custom_status")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned));
             ListRow::new(SharedString::from(format!("member-{}", m.user_id)), name.clone())
+                .subtitle(subtitle)
                 .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).image(client.avatar_url(Some(&gid), &m.user_id).map(Into::into)).presence(Some(presence)))
                 .muted(presence == Presence::Offline)
                 .when(m.is_bot, |r| r.trailing(Tag("BOT")))

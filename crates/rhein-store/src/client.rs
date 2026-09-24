@@ -228,6 +228,8 @@ pub struct Client {
     dividers: HashMap<String, Divider>,
     staged: HashMap<String, Vec<Staged>>,
     embeds: HashMap<String, EmbedState>,
+    /// Activity artwork re-hosted by one of our servers' camo caches, by original URL.
+    artwork: HashMap<String, EmbedState>,
     /// guild id → user id → their voice state (only users in a channel).
     voice: HashMap<String, HashMap<String, rhein_proto::VoiceState>>,
     selected_channel: HashMap<String, String>,
@@ -294,6 +296,7 @@ impl Client {
             dividers: HashMap::new(),
             staged: HashMap::new(),
             embeds: HashMap::new(),
+            artwork: HashMap::new(),
             voice: HashMap::new(),
             signin: None,
         };
@@ -1168,11 +1171,15 @@ impl Client {
                         self.load_members(gid, cx);
                     }
             }
-            Event::PresenceUpdate { user_id, status } => {
+            Event::PresenceUpdate { user_id, presence } => {
+                // The whole object is kept: status, custom status and activities.
                 for list in self.members.values_mut() {
                     for m in list.iter_mut().filter(|m| m.user_id == user_id) {
-                        m.presence = Some(serde_json::json!({ "status": status }));
+                        m.presence = Some(presence.clone());
                     }
+                }
+                for f in self.friends.iter_mut().filter(|f| f.user_id == user_id) {
+                    f.presence = Some(presence.clone());
                 }
             }
             Event::VoiceStateUpdate(state) => {
@@ -2296,6 +2303,38 @@ impl Client {
             .ok();
         })
         .detach();
+    }
+
+    /// Someone else's activity artwork, safe to show: never the original host (that would tell it
+    /// who is looking), always a copy re-hosted by one of our own servers' camo caches, as the web
+    /// client does. `None` until that copy is known.
+    pub fn artwork_url(&mut self, url: &str, cx: &mut Context<Self>) -> Option<String> {
+        match self.artwork.get(url) {
+            Some(EmbedState::Ready(embed)) => return embed.image.clone(),
+            Some(EmbedState::Loading) => return None,
+            Some(EmbedState::Empty { retry_at }) if Instant::now() < *retry_at => return None,
+            _ => {}
+        }
+        let api = self.servers.iter().filter(|s| s.status == ServerStatus::Ready).find_map(|s| s.api.clone())?;
+        self.artwork.insert(url.to_owned(), EmbedState::Loading);
+        let io = self.io.clone();
+        let url = url.to_owned();
+        cx.spawn(async move |this, cx| {
+            let base = api.base().to_owned();
+            let asked = url.clone();
+            let result = join(io.spawn(async move { Ok(api.embed(&asked).await?) })).await;
+            this.update(cx, |this, cx| {
+                let state = match result.ok().and_then(|p| crate::embed::read(&p, &base, &url)).filter(|e| e.image.is_some()) {
+                    Some(embed) => EmbedState::Ready(embed),
+                    None => EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(300) },
+                };
+                this.artwork.insert(url, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        None
     }
 
     /// A custom emoji's picture, from the server that owns it when we are connected there,

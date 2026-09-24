@@ -183,6 +183,10 @@ impl Member {
             .and_then(Value::as_str)
             .unwrap_or("offline")
     }
+
+    pub fn activities(&self) -> Vec<crate::Activity> {
+        self.presence.as_ref().map(crate::activity::activities_of).unwrap_or_default()
+    }
 }
 
 /// `@alice:a.example` → `alice`.

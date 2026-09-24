@@ -105,6 +105,7 @@ pub struct ListRow {
     icon: Option<Icon>,
     leading: Option<AnyElement>,
     label: SharedString,
+    subtitle: Option<SharedString>,
     selected: bool,
     strong: bool,
     muted: bool,
@@ -121,6 +122,7 @@ impl ListRow {
             icon: None,
             leading: None,
             label: label.into(),
+            subtitle: None,
             selected: false,
             strong: false,
             muted: false,
@@ -138,6 +140,12 @@ impl ListRow {
 
     pub fn leading(mut self, element: impl IntoElement) -> Self {
         self.leading = Some(element.into_any_element());
+        self
+    }
+
+    /// A second, smaller line under the label (a status, an activity).
+    pub fn subtitle(mut self, subtitle: Option<impl Into<SharedString>>) -> Self {
+        self.subtitle = subtitle.map(Into::into);
         self
     }
 
@@ -185,9 +193,11 @@ impl RenderOnce for ListRow {
         let t = cx.theme();
         let color = if self.selected || self.strong { t.text } else { t.text_muted };
         let clickable = self.on_click.is_some();
+        let subtitle = self.subtitle;
+        let two_lines = subtitle.is_some();
         div()
             .id(self.id)
-            .h(px(32.))
+            .h(px(if two_lines { 42. } else { 32. }))
             .px_2()
             .rounded(radius::MD)
             .flex()
@@ -202,7 +212,17 @@ impl RenderOnce for ListRow {
             .when(clickable, |d| d.cursor_pointer())
             .when_some(self.icon, |d, i| d.child(icon(i).text_color(t.text_faint)))
             .children(self.leading)
-            .child(div().flex_1().min_w_0().truncate().child(self.label))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(self.label))
+                    .when_some(subtitle, |d, sub| {
+                        d.child(div().truncate().text_size(text::XS).font_weight(FontWeight::NORMAL).text_color(t.text_faint).child(sub))
+                    }),
+            )
             .children(self.trailing)
             .when_some(self.tooltip, |d, text| d.tooltip(crate::tooltip::tooltip(text)))
             .when_some(self.on_click, |d, h| d.on_click(move |e, window, cx| h(e, window, cx)))

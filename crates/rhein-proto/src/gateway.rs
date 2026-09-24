@@ -114,7 +114,8 @@ pub enum Event {
     MemberUpdate(Value),
     MemberRemove(Value),
     MemberListUpdate(Value),
-    PresenceUpdate { user_id: String, status: String },
+    /// `presence` is the whole object: status, custom status and activities.
+    PresenceUpdate { user_id: String, presence: Value },
     VoiceStateUpdate(crate::model::VoiceState),
     PinsUpdate { channel_id: String, message_id: String, pinned: bool },
     ThreadUpsert(crate::rest::Thread),
@@ -184,10 +185,7 @@ impl Event {
             "MEMBER_UPDATE" => Event::MemberUpdate(d),
             "MEMBER_REMOVE" => Event::MemberRemove(d),
             "MEMBER_LIST_UPDATE" => Event::MemberListUpdate(d),
-            "PRESENCE_UPDATE" => Event::PresenceUpdate {
-                user_id: str_of(&d, "user_id"),
-                status: str_of(&d, "status"),
-            },
+            "PRESENCE_UPDATE" => Event::PresenceUpdate { user_id: str_of(&d, "user_id"), presence: d },
             "CHANNEL_PINS_UPDATE" => Event::PinsUpdate {
                 channel_id: str_of(&d, "channel_id"),
                 message_id: str_of(&d, "message_id"),

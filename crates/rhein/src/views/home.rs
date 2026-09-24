@@ -89,7 +89,7 @@ impl HomeView {
             "pending_in" => "Incoming friend request".to_owned(),
             "pending_out" => "Outgoing friend request".to_owned(),
             "blocked" => "Blocked".to_owned(),
-            _ => f.user_id.clone(),
+            _ => f.activities().first().map(|a| a.summary()).unwrap_or_else(|| f.user_id.clone()),
         };
         let action = |label: &'static str, id: String, what: FriendAction, primary: bool, cx: &mut Context<Self>| {
             let b = Button::new(SharedString::from(format!("{label}-{i}")), label).small();

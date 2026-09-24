@@ -326,6 +326,10 @@ impl Friend {
             .and_then(|p| p.get("status").and_then(|s| s.as_str()).or_else(|| p.as_str()))
             .unwrap_or("offline")
     }
+
+    pub fn activities(&self) -> Vec<crate::Activity> {
+        self.presence.as_ref().map(crate::activity::activities_of).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

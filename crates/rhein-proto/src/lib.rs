@@ -3,10 +3,12 @@
 //! Every struct keeps unknown fields out of the way with `#[serde(default)]` so a server that
 //! grows new fields never breaks decoding. Field names follow the server's JSON exactly.
 
+pub mod activity;
 pub mod gateway;
 pub mod model;
 pub mod rest;
 
+pub use activity::Activity;
 pub use gateway::*;
 pub use model::*;
 pub use rest::*;
