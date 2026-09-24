@@ -24,7 +24,10 @@ pub struct Token {
 }
 
 static MENTION: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[\s(\[{>])([@#])([^\s@#:]{0,32})$").unwrap());
-static EMOJI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[\s(\[{])(:)([a-zA-Z0-9_+-]{2,32})$").unwrap());
+/// Emoji open after one character, like Discord (`:v` → ✌️). The first character must be a
+/// letter (or `_`, `+`, `-`) so clock times such as `at 10:3` or `:3` faces don't pop the list.
+static EMOJI: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|[\s(\[{])(:)([a-zA-Z_+-][a-zA-Z0-9_+-]{0,31})$").unwrap());
 
 /// The trigger the caret is in, if any. Only at a word boundary: `a@b` is an address.
 pub fn token_at(text: &str, caret: usize) -> Option<Token> {
@@ -50,7 +53,9 @@ mod tests {
         assert_eq!(token_at("nice :thu", 9).unwrap().trigger, Trigger::Emoji);
         assert!(token_at("mail a@b", 8).is_none());
         assert!(token_at("time 10:3", 9).is_none());
-        assert!(token_at("nice :t", 7).is_none());
+        assert_eq!(token_at("nice :v", 7).unwrap().query, "v");
+        assert!(token_at("face :3", 7).is_none());
+        assert!(token_at("nice :", 6).is_none());
         assert!(token_at("@anna done", 10).is_none());
     }
 }

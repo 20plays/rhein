@@ -42,24 +42,27 @@ pub fn with_tone(emoji: &'static Emoji, tone: u8) -> &'static Emoji {
     emoji.with_skin_tone(tone).unwrap_or(emoji)
 }
 
-/// Case-insensitive match on name and shortcodes; shortcode prefix matches first.
+/// Case-insensitive match on name and shortcodes: an exact shortcode first (`v` → ✌️), then
+/// shortcode prefixes, then anything containing the query.
 pub fn search(query: &str, limit: usize) -> Vec<&'static Emoji> {
     let q = query.trim().trim_matches(':').to_lowercase();
     if q.is_empty() {
         return Vec::new();
     }
-    let mut prefix = Vec::new();
-    let mut contains = Vec::new();
+    let (mut exact, mut prefix, mut contains) = (Vec::new(), Vec::new(), Vec::new());
     for e in emojis::iter().filter(|e| e.skin_tone().is_none_or(|t| t == emojis::SkinTone::Default)) {
-        if e.shortcodes().any(|s| s.starts_with(&q)) {
+        if e.shortcodes().any(|s| s == q) {
+            exact.push(e);
+        } else if e.shortcodes().any(|s| s.starts_with(&q)) {
             prefix.push(e);
         } else if e.name().to_lowercase().contains(&q) || e.shortcodes().any(|s| s.contains(&q)) {
             contains.push(e);
         }
     }
-    prefix.extend(contains);
-    prefix.truncate(limit);
-    prefix
+    exact.extend(prefix);
+    exact.extend(contains);
+    exact.truncate(limit);
+    exact
 }
 
 #[cfg(test)]
@@ -72,6 +75,7 @@ mod tests {
         assert!(found.iter().any(|e| e.as_str() == "👍"));
         assert_eq!(search("tada", 1)[0].as_str(), "🎉");
         assert!(search("", 5).is_empty());
+        assert_eq!(search("v", 8)[0].as_str(), "✌️");
     }
 
     #[test]
