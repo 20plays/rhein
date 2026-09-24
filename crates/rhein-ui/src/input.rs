@@ -149,6 +149,42 @@ pub struct TextInput {
     multi: Option<MultiLayout>,
     scroll_top: Pixels,
     capture_nav: bool,
+    block_cursor: bool,
+    bare: bool,
+    blink: Blink,
+}
+
+/// The block cursor's soft blink. It restarts fully visible whenever the text or the cursor
+/// changes, and only schedules frames while it is actually fading.
+#[derive(Default)]
+struct Blink {
+    epoch: Option<std::time::Instant>,
+    seen: (usize, usize, usize),
+    timer: bool,
+}
+
+/// One blink cycle: shown, fading out, hidden, fading in.
+const BLINK_SHOW: f32 = 0.6;
+const BLINK_FADE: f32 = 0.18;
+const BLINK_HIDE: f32 = 0.24;
+const BLINK_PERIOD: f32 = BLINK_SHOW + BLINK_FADE + BLINK_HIDE + BLINK_FADE;
+/// Fades are stepped at this rate; a handful of frames is enough to read as smooth.
+const BLINK_FPS: f32 = 30.;
+
+/// Cursor opacity `t` seconds into the blink, and how long until it next needs a frame.
+fn blink_at(t: f32) -> (f32, f32) {
+    let p = t % BLINK_PERIOD;
+    let step = 1. / BLINK_FPS;
+    let smooth = |x: f32| x * x * (3. - 2. * x);
+    if p < BLINK_SHOW {
+        (1., BLINK_SHOW - p)
+    } else if p < BLINK_SHOW + BLINK_FADE {
+        (1. - smooth((p - BLINK_SHOW) / BLINK_FADE), step)
+    } else if p < BLINK_SHOW + BLINK_FADE + BLINK_HIDE {
+        (0., BLINK_SHOW + BLINK_FADE + BLINK_HIDE - p)
+    } else {
+        (smooth((p - BLINK_SHOW - BLINK_FADE - BLINK_HIDE) / BLINK_FADE), step)
+    }
 }
 
 /// The last painted multi-line layout: one wrapped line per paragraph, with its byte offset
@@ -179,7 +215,27 @@ impl TextInput {
             multi: None,
             scroll_top: px(0.),
             capture_nav: false,
+            block_cursor: false,
+            bare: false,
+            blink: Blink::default(),
         }
+    }
+
+    /// A terminal-style block cursor that blinks softly while the field is focused and idle.
+    /// Multi-line fields only.
+    pub fn block_cursor(mut self) -> Self {
+        self.block_cursor = true;
+        self
+    }
+
+    /// No box of its own (background, border, padding), for fields the owner frames itself.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus_handle.is_focused(window)
     }
 
     /// Wraps text and grows up to `max_lines` before scrolling; Shift+Enter inserts a newline.
@@ -998,12 +1054,14 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .px_3()
-            .py_2()
-            .rounded(radius::MD)
-            .bg(t.bg_raised)
-            .border_1()
-            .border_color(if focused { t.text_faint } else { t.border_strong })
+            .when(!self.bare, |d| {
+                d.px_3()
+                    .py_2()
+                    .rounded(radius::MD)
+                    .bg(t.bg_raised)
+                    .border_1()
+                    .border_color(if focused { t.text_faint } else { t.border_strong })
+            })
             .text_size(text::MD)
             .text_color(t.text)
             .overflow_hidden()
@@ -1035,6 +1093,10 @@ struct MultiPrepaint {
     total: Pixels,
     scroll: Pixels,
     cursor: Option<PaintQuad>,
+    /// The character under a block cursor, re-shaped in the background colour.
+    under_cursor: Option<(ShapedLine, Point<Pixels>)>,
+    /// Seconds until the blink needs its next frame, when it is running.
+    blink_next: Option<f32>,
     selection: Vec<PaintQuad>,
 }
 
@@ -1139,6 +1201,14 @@ impl Element for MultiLineElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        // Restart the blink, fully visible, on focus and on every edit or cursor move.
+        self.input.update(cx, |input, _| {
+            let seen = (input.content.len(), input.selected_range.start, input.selected_range.end);
+            if input.block_cursor && (input.blink.epoch.is_none() || input.blink.seen != seen) {
+                input.blink.epoch = Some(std::time::Instant::now());
+                input.blink.seen = seen;
+            }
+        });
         let input = self.input.read(cx);
         let t = cx.theme().clone();
         let (text, run, font_size) = multi_source(input, window, cx);
@@ -1175,7 +1245,37 @@ impl Element for MultiLineElement {
         let origin = point(bounds.left(), bounds.top() - scroll);
         let range = input.selected_range.clone();
         let mut selection = Vec::new();
-        let cursor = if range.is_empty() {
+        let mut under_cursor = None;
+        let mut blink_next = None;
+        let cursor = if range.is_empty() && input.block_cursor {
+            let at = point(origin.x + cursor_at.x, origin.y + cursor_at.y);
+            let offset = input.cursor_offset();
+            let next = input.next_boundary(offset);
+            let glyph = (!empty && next > offset).then(|| input.content[offset..next].to_owned()).filter(|g| g != "\n");
+            // As wide as the character under it; a space's width at the end of a line.
+            let space = font_size * 0.55;
+            let width = glyph
+                .as_ref()
+                .map(|_| position(next))
+                .filter(|p| (p.y - cursor_at.y).abs() < px(0.5) && p.x > cursor_at.x)
+                .map_or(space, |p| p.x - cursor_at.x);
+            let alpha = if !window.is_window_active() || cx.reduce_motion() {
+                1.
+            } else {
+                let elapsed = input.blink.epoch.map_or(0., |e| e.elapsed().as_secs_f32());
+                let (alpha, next_frame) = blink_at(elapsed);
+                blink_next = Some(next_frame);
+                alpha
+            };
+            if alpha > 0.5
+                && let Some(g) = glyph.filter(|g| !g.trim().is_empty() && !crate::emoji::is_emoji(g))
+            {
+                let glyph_run = TextRun { len: g.len(), color: t.bg_base.into(), ..run.clone() };
+                let shaped = window.text_system().shape_line(g.into(), font_size, &[glyph_run], None);
+                under_cursor = Some((shaped, at));
+            }
+            Some(fill(Bounds::new(at, size(width, line_height)), gpui::Hsla::from(t.text).opacity(alpha)))
+        } else if range.is_empty() {
             Some(fill(
                 Bounds::new(point(origin.x + cursor_at.x, origin.y + cursor_at.y), size(px(2.), line_height)),
                 t.accent,
@@ -1200,7 +1300,7 @@ impl Element for MultiLineElement {
             }
             None
         };
-        MultiPrepaint { paragraphs, line_height, total, scroll, cursor, selection }
+        MultiPrepaint { paragraphs, line_height, total, scroll, cursor, under_cursor, blink_next, selection }
     }
 
     fn paint(
@@ -1220,6 +1320,8 @@ impl Element for MultiLineElement {
         let paragraphs = std::mem::take(&mut prepaint.paragraphs);
         let selection = std::mem::take(&mut prepaint.selection);
         let cursor = prepaint.cursor.take();
+        let under_cursor = prepaint.under_cursor.take();
+        let focused = focus_handle.is_focused(window);
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for quad in selection {
                 window.paint_quad(quad);
@@ -1228,18 +1330,65 @@ impl Element for MultiLineElement {
                 let at = point(bounds.left(), bounds.top() + *y - scroll);
                 line.paint(at, line_height, gpui::TextAlign::Left, None, window, cx).ok();
             }
-            if focus_handle.is_focused(window)
-                && let Some(cursor) = cursor
-            {
+            if focused && let Some(cursor) = cursor {
                 window.paint_quad(cursor);
+                if let Some((glyph, at)) = under_cursor {
+                    glyph.paint(at, line_height, gpui::TextAlign::Left, None, window, cx).ok();
+                }
             }
         });
         let empty = self.input.read(cx).content.is_empty();
         let total = prepaint.total;
+        let blink_next = prepaint.blink_next.filter(|_| focused);
+        let entity = self.input.downgrade();
         self.input.update(cx, |input, _cx| {
             input.multi = (!empty).then_some(MultiLayout { paragraphs, line_height, total });
             input.scroll_top = scroll;
             input.last_bounds = Some(bounds);
+            if !input.block_cursor {
+                return;
+            }
+            if !focused {
+                input.blink.epoch = None;
+                return;
+            }
+            // One pending wake-up at a time; nothing is scheduled when unfocused or reduced.
+            if let Some(wait) = blink_next
+                && !input.blink.timer
+            {
+                input.blink.timer = true;
+                window
+                    .spawn(_cx, async move |cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs_f32(wait)).await;
+                        entity
+                            .update(cx, |input, cx| {
+                                input.blink.timer = false;
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+                    .detach();
+            }
         });
+    }
+}
+
+#[cfg(test)]
+mod blink_tests {
+    use super::*;
+
+    #[test]
+    fn blink_holds_then_fades_then_returns() {
+        // Fully visible right after a keystroke, and no frames needed until the fade starts.
+        let (alpha, wait) = blink_at(0.);
+        assert_eq!(alpha, 1.);
+        assert!((wait - BLINK_SHOW).abs() < 1e-6);
+        // Halfway through the fade out.
+        let (alpha, wait) = blink_at(BLINK_SHOW + BLINK_FADE / 2.);
+        assert!(alpha > 0.4 && alpha < 0.6);
+        assert!((wait - 1. / BLINK_FPS).abs() < 1e-6);
+        // Hidden, then back to full at the start of the next cycle.
+        assert_eq!(blink_at(BLINK_SHOW + BLINK_FADE + 0.01).0, 0.);
+        assert_eq!(blink_at(BLINK_PERIOD + 0.01).0, 1.);
     }
 }

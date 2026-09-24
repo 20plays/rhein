@@ -1038,7 +1038,7 @@ impl Shell {
                                     cx.stop_propagation();
                                     this.toggle_guild(&chevron_id, cx);
                                 }))
-                                .child(icon_sized(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.))),
+                                .child(icon_sized(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.)).text_color(t.text_faint)),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(entry.guild.name.clone()))
                         .when(unread && mentions == 0 && !expanded, |d| d.child(UnreadDot))
@@ -1060,7 +1060,7 @@ impl Shell {
                                     cx.stop_propagation();
                                     this.show_guild_menu(more_id.clone(), e.position(), window, cx)
                                 }))
-                                .child(icon_sized(Icon::Ellipsis, px(14.))),
+                                .child(icon_sized(Icon::Ellipsis, px(14.)).text_color(t.text_muted)),
                         ),
                 );
                 if expanded {
@@ -1279,6 +1279,8 @@ impl Shell {
                 .h_full()
                 .flex_none()
                 .bg(t.bg_panel)
+                .border_l_1()
+                .border_color(t.border)
                 .px_2()
                 .overflow_y_scroll()
                 .child(online_label)

@@ -140,7 +140,7 @@ impl ChatView {
                     .ok();
             });
         }
-        let composer = cx.new(|cx| TextInput::new("Message", cx).multiline(COMPOSER_LINES));
+        let composer = cx.new(|cx| TextInput::new("message", cx).multiline(COMPOSER_LINES).block_cursor().bare());
         let subs = vec![
             cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Submit => this.submit(window, cx),
@@ -221,8 +221,8 @@ impl ChatView {
         let name = selected
             .as_deref()
             .and_then(|id| self.client.read(cx).channel(id))
-            .map(|c| format!("Message #{}", c.name))
-            .unwrap_or_else(|| "Message".into());
+            .map(|c| format!("message #{}", c.name))
+            .unwrap_or_else(|| "message".into());
         self.composer.update(cx, |c, cx| {
             c.clear(cx);
             c.set_placeholder(name, cx);
@@ -948,8 +948,9 @@ impl ChatView {
         )
     }
 
-    fn render_composer(&self, channel_id: &str, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_composer(&self, channel_id: &str, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = cx.theme().clone();
+        let focused = self.composer.read(cx).is_focused(window);
         let client = self.client.read(cx);
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
         let typing: Vec<String> = if self.fixed.is_some() {
@@ -1051,27 +1052,42 @@ impl ChatView {
             .flex_col()
             .children(chips)
             .children(context_bar)
+            // A prompt line: `›`, the text with its block cursor, and the attach and emoji buttons.
             .child(
                 div()
                     .flex()
                     .items_start()
-                    .gap_2()
+                    .gap_1()
+                    .px_1()
+                    .py_1()
+                    .rounded(radius::MD)
+                    .bg(t.bg_raised)
+                    .border_1()
+                    .border_color(if focused { t.text_faint } else { t.border_strong })
                     .child(
-                        div().pt_1().child(
-                            IconButton::new("attach", Icon::Paperclip)
-                                .tooltip("Attach files")
-                                .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
-                        ),
+                        div()
+                            .h(size::ICON_BUTTON)
+                            .w(px(18.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .font_family(FONT_MONO)
+                            .text_color(if focused { t.text } else { t.text_faint })
+                            .child("›"),
                     )
-                    .child(div().flex_1().min_w_0().child(self.composer.clone()))
+                    .child(div().flex_1().min_w_0().py(px(4.)).child(self.composer.clone()))
                     .child(
-                        div().pt_1().child(
-                            IconButton::new("composer-emoji", Icon::Smile)
-                                .tooltip("Emoji")
-                                .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| {
-                                    this.open_picker(e.position(), PickerTarget::Composer, window, cx)
-                                })),
-                        ),
+                        IconButton::new("attach", Icon::Paperclip)
+                            .tooltip("Attach files")
+                            .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
+                    )
+                    .child(
+                        IconButton::new("composer-emoji", Icon::Smile)
+                            .tooltip("Emoji")
+                            .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| {
+                                this.open_picker(e.position(), PickerTarget::Composer, window, cx)
+                            })),
                     ),
             )
             // The main view reports typing in the status line; a thread panel has none, so it
@@ -1157,7 +1173,7 @@ fn image_type(format: ImageFormat) -> (&'static str, &'static str) {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let channel_id = self.current();
         let client = self.client.read(cx);
@@ -1269,7 +1285,7 @@ impl Render for ChatView {
             )
         });
 
-        let composer = self.render_composer(&channel_id, cx);
+        let composer = self.render_composer(&channel_id, window, cx);
         let lightbox = self.render_lightbox(cx);
         let suggestions = self.render_suggestions(cx);
         let delete_confirm = self.render_delete_confirm(cx);
