@@ -1403,22 +1403,20 @@ impl Shell {
         div()
             .h(PROFILE_STRIP_H)
             .flex_none()
-            .px_2()
-            .pt_1p5()
-            .pb_2()
             .flex()
             .flex_col()
-            .justify_between()
             .border_t_1()
             .border_color(t.border)
             .child(
-                div().flex().items_center().gap_1().child(who).child(
+                div().flex_1().px_2().flex().items_center().gap_1().child(who).child(
                     IconButton::new("open-settings", Icon::Settings)
                         .tooltip("Settings (Ctrl+,)")
                         .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
                 ),
             )
-            .child(div().px_1().child(shared))
+            // The activity row is as tall as the status line beside it, so the line between who
+            // you are and what you are doing continues the status line's.
+            .child(div().h(size::STATUS).flex_none().px_3().flex().items_center().border_t_1().border_color(t.border).child(div().flex_1().min_w_0().child(shared)))
             .into_any_element()
     }
 
