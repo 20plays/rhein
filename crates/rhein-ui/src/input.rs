@@ -377,10 +377,9 @@ impl TextInput {
     fn previous_word(&self, offset: usize) -> usize {
         self.content
             .split_word_bound_indices()
-            .filter(|(i, w)| *i < offset && w.chars().any(char::is_alphanumeric))
-            .map(|(i, _)| i)
-            .last()
-            .unwrap_or(0)
+            .rev()
+            .find(|(i, w)| *i < offset && w.chars().any(char::is_alphanumeric))
+            .map_or(0, |(i, _)| i)
     }
 
     /// End of the word after `offset`.
