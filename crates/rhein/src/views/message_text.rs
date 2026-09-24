@@ -14,7 +14,7 @@ use gpui::{
 };
 use rhein_store::Client;
 use rhein_store::markdown::{Block, Document, Forward, Span};
-use rhein_ui::theme::{FONT_MONO, radius, text};
+use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, text};
 use rhein_ui::{ActiveTheme as _, Icon, Theme, icon};
 
 use crate::views::chat::ChatView;
@@ -104,6 +104,8 @@ fn inline(
     let base = HighlightStyle { color: Some(if ctx.pending { t.text_faint } else { t.text }.into()), ..Default::default() };
     flatten(spans, base, ctx, t, cx, &mut flat, spoiler_base);
     let used = flat.spoilers;
+    // Font overrides must be sorted and must not overlap (code spans hold no emoji ranges).
+    flat.mono.sort_by_key(|(r, _)| r.start);
     let styled = StyledText::new(flat.text).with_highlights(flat.highlights).with_font_family_overrides(flat.mono);
     if flat.clicks.is_empty() {
         return (styled.into_any_element(), used);
@@ -146,11 +148,25 @@ fn push(flat: &mut Flat, text: &str, style: HighlightStyle, click: Option<Action
     let start = flat.text.len();
     flat.text.push_str(text);
     let range = start..flat.text.len();
-    if !range.is_empty() {
-        flat.highlights.push((range.clone(), style));
-        if let Some(action) = click {
-            flat.clicks.push((range.clone(), action));
+    // GPUI only swaps the font of a run that lies wholly inside an override, so every emoji gets
+    // a highlight run of its own (same style) and an emoji-font override on exactly that run.
+    let mut at = start;
+    for r in rhein_store::emoji::emoji_ranges(text) {
+        let emoji = start + r.start..start + r.end;
+        if at < emoji.start {
+            flat.highlights.push((at..emoji.start, style));
         }
+        flat.highlights.push((emoji.clone(), style));
+        flat.mono.push((emoji.clone(), FONT_EMOJI.into()));
+        at = emoji.end;
+    }
+    if at < range.end {
+        flat.highlights.push((at..range.end, style));
+    }
+    if !range.is_empty()
+        && let Some(action) = click
+    {
+        flat.clicks.push((range.clone(), action));
     }
     range
 }
@@ -174,6 +190,7 @@ fn flatten(
             Span::Code(code) => {
                 let s = merge(style, HighlightStyle { background_color: Some(t.bg_base.into()), ..Default::default() });
                 let r = push(flat, code, s, None);
+                flat.mono.retain(|(m, _)| m.end <= r.start || m.start >= r.end);
                 flat.mono.push((r, FONT_MONO.into()));
             }
             Span::Bold(inner) => flatten(
@@ -297,7 +314,7 @@ fn jumbo(doc: &Document, ctx: &Context, t: &Theme, cx: &App) -> AnyElement {
                 Span::Text(text) => {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        row = row.child(trimmed.to_owned());
+                        row = row.child(div().font_family(FONT_EMOJI).child(trimmed.to_owned()));
                     }
                 }
                 _ => {}

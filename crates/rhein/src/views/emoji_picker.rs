@@ -11,7 +11,7 @@ use gpui::{
 };
 use rhein_store::Client;
 use rhein_store::emoji::{self, GROUPS};
-use rhein_ui::theme::{radius, text};
+use rhein_ui::theme::{FONT_EMOJI, radius, text};
 use rhein_ui::{ActiveTheme as _, Dismiss, InputEvent, TextInput, tooltip};
 
 const COLS: usize = 9;
@@ -215,7 +215,7 @@ impl Render for EmojiPicker {
                         .hover(|s| s.bg(t.bg_hover))
                         .tooltip(tooltip(*label))
                         .on_click(move |_, _, _| scroll.scroll_to_item(ix, ScrollStrategy::Top))
-                        .child(*icon),
+                        .child(div().font_family(FONT_EMOJI).child(*icon)),
                 );
             }
         }
@@ -290,7 +290,7 @@ impl Render for EmojiPicker {
                 .when(active, |d| d.bg(t.bg_selected))
                 .hover(|s| s.bg(t.bg_hover))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_tone(i as u8, cx)))
-                .child(*hand)
+                .child(div().font_family(FONT_EMOJI).child(*hand))
         }));
 
         let footer = div()
@@ -306,7 +306,7 @@ impl Render for EmojiPicker {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_size(px(20.)).child(g))
+                    .child(div().text_size(px(20.)).font_family(FONT_EMOJI).child(g))
                     .child(div().text_size(text::SM).text_color(t.text_muted).child(label))
             }))
             .child(div().flex_1())
@@ -314,6 +314,8 @@ impl Render for EmojiPicker {
 
         div()
             .id("emoji-picker")
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .track_focus(&self.focus)
             .key_context(PICKER_CONTEXT)
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(DismissEvent)))
@@ -345,7 +347,7 @@ fn glyph_text(g: &Glyph) -> String {
 
 fn glyph(g: &Glyph) -> AnyElement {
     match g {
-        Glyph::Unicode(s) => div().child(s.clone()).into_any_element(),
+        Glyph::Unicode(s) => div().font_family(FONT_EMOJI).child(s.clone()).into_any_element(),
         Glyph::Custom { url, name } => {
             let name = name.clone();
             img(url.clone())

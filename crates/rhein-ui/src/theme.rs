@@ -123,6 +123,8 @@ pub mod radius {
 
 pub const FONT_UI: &str = "Inter";
 pub const FONT_MONO: &str = "JetBrains Mono";
+/// Colour emoji; forced for emoji ranges because UI fonts carry monochrome glyphs for some of them.
+pub const FONT_EMOJI: &str = "Noto Color Emoji";
 
 const fn rgb(hex: u32) -> Rgba {
     rgba((hex << 8) | 0xff)

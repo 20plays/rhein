@@ -8,7 +8,7 @@ use gpui::{
 use rhein_proto::{Attachment, Message};
 use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::{Client, EmbedState, markdown};
-use rhein_ui::theme::{radius, size, text};
+use rhein_ui::theme::{FONT_EMOJI, radius, size, text};
 use rhein_ui::{ActiveTheme as _, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
 use crate::views::chat::ChatView;
@@ -16,7 +16,10 @@ use crate::views::message_text;
 
 /// Messages from the same author this close together share one header.
 const GROUP_WINDOW_MS: i64 = 7 * 60 * 1000;
-const QUICK_REACTIONS: [&str; 4] = ["👍", "❤️", "😂", "🎉"];
+const QUICK_REACTIONS: [&str; 1] = ["👍"];
+/// Room kept free on the right of every message for the hover action bar, so the bar never
+/// covers text: one quick reaction, add reaction, reply and "more", at 28 px each, plus padding.
+const ACTION_BAR_W: f32 = 4. * 28. + 14.;
 const IMAGE_MAX_W: f32 = 400.;
 const IMAGE_MAX_H: f32 = 300.;
 
@@ -241,7 +244,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .into_any_element()
     };
 
-    let actions = (!pending).then(|| hover_actions(ctx, ix, &message, mine, &group, &t));
+    let actions = (!pending).then(|| hover_actions(ctx, ix, &message, &group, &t));
 
     let row_bg: Option<Hsla> = if highlighted {
         Some(t.accent_soft.into())
@@ -262,7 +265,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .when(mentions_me, |d| d.border_l_2().border_color(t.warning))
         .when(row_bg.is_none(), |d| d.hover(|s| s.bg(t.bg_hover)))
         .children(reply_quote)
-        .child(div().flex().gap_4().child(gutter).child(body))
+        .child(div().flex().gap_4().pr(px(ACTION_BAR_W)).child(gutter).child(body))
         .children(actions)
         .when(!pending, |d| {
             let (view, m) = (ctx.view.clone(), message.clone());
@@ -294,11 +297,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     element
 }
 
-fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, mine: bool, group: &SharedString, t: &Theme) -> AnyElement {
+fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedString, t: &Theme) -> AnyElement {
     let mut bar = div()
         .absolute()
-        .top(px(-14.))
-        .right(px(16.))
+        .top(px(2.))
+        .right(px(12.))
         .flex()
         .gap_0p5()
         .p_0p5()
@@ -327,7 +330,7 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, mine: bool, group: 
                     let (chan, mid) = (chan.clone(), mid.clone());
                     client.update(cx, |c, cx| c.toggle_reaction(chan, mid, emoji.to_string(), cx));
                 })
-                .child(*emoji),
+                .child(div().font_family(FONT_EMOJI).child(*emoji)),
         );
     }
     let view = ctx.view.clone();
@@ -346,15 +349,6 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, mine: bool, group: 
             view.update(cx, |v, cx| v.start_reply(id, window, cx)).ok();
         },
     ));
-    if mine {
-        let view = ctx.view.clone();
-        let for_edit = message.clone();
-        bar = bar.child(IconButton::new(SharedString::from(format!("edit-{ix}")), Icon::Pencil).tooltip("Edit").on_click(
-            move |_, window, cx| {
-                view.update(cx, |v, cx| v.start_edit(&for_edit, window, cx)).ok();
-            },
-        ));
-    }
     let view = ctx.view.clone();
     let for_menu = message.clone();
     bar = bar.child(IconButton::new(SharedString::from(format!("more-{ix}")), Icon::Ellipsis).tooltip("More").on_click(
@@ -389,7 +383,11 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, t: &Theme) -> AnyElemen
                     let (chan, mid, emoji) = (chan.clone(), mid.clone(), emoji.clone());
                     client.update(cx, |c, cx| c.toggle_reaction(chan, mid, emoji, cx));
                 })
-                .child(format!("{} {}", r.emoji, r.count))
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().font_family(FONT_EMOJI).child(r.emoji.clone()))
+                .child(div().text_color(if r.me { t.accent } else { t.text_muted }).child(r.count.to_string()))
         }))
         .into_any_element()
 }

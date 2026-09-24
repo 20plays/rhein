@@ -798,6 +798,7 @@ impl Shell {
         };
         let presence = member.as_ref().map(|m| rhein_ui::Presence::parse(m.status()));
         let card = div()
+            .occlude()
             .w(px(300.))
             .p_4()
             .rounded(radius::LG)

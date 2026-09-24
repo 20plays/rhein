@@ -66,6 +66,7 @@ impl Render for Menu {
         let t = cx.theme().clone();
         let mut list = div()
             .id("menu")
+            .occlude()
             .track_focus(&self.focus)
             .key_context(MENU_CONTEXT)
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(DismissEvent)))

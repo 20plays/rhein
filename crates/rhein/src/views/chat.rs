@@ -673,7 +673,7 @@ impl ChatView {
                             .into_any_element(),
                         (_, Some(url), _) => img(url.clone()).size(px(22.)).into_any_element(),
                         (_, _, Some(i)) => icon(i).text_color(t.text_muted).into_any_element(),
-                        _ => div().w(px(24.)).text_size(px(18.)).child(item.insert.clone()).into_any_element(),
+                        _ => div().w(px(24.)).text_size(px(18.)).font_family(rhein_ui::theme::FONT_EMOJI).child(item.insert.clone()).into_any_element(),
                     };
                     div()
                         .id(("suggestion", i))
