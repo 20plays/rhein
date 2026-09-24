@@ -49,3 +49,7 @@ opt-level = 2
 # openmls with Telium's GroupInfo external_pub encoding; see vendor/openmls/RHEIN.md.
 [patch.crates-io]
 openmls = { path = "vendor/openmls" }
+
+# libwebrtc with RtpTransceiver::set_direction for mesh calls; see vendor/libwebrtc/RHEIN.md.
+[patch."https://github.com/livekit/rust-sdks"]
+libwebrtc = { path = "vendor/libwebrtc" }

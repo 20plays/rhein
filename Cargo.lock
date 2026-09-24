@@ -4246,7 +4246,6 @@ dependencies = [
 [[package]]
 name = "libwebrtc"
 version = "0.3.49"
-source = "git+https://github.com/livekit/rust-sdks?rev=c20fa7c37e50cb97f1a588a6ad50534b53c2037e#c20fa7c37e50cb97f1a588a6ad50534b53c2037e"
 dependencies = [
  "cxx",
  "jni",
