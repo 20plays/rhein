@@ -5290,6 +5290,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhein-rpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "futures",
+ "log",
+ "reqwest",
+ "rhein-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "zbus",
+]
+
+[[package]]
 name = "rhein-store"
 version = "0.1.0"
 dependencies = [

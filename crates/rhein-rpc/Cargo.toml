@@ -1,0 +1,23 @@
+[package]
+name = "rhein-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local activity sources for Rhein: a Discord-compatible RPC server, game detection and MPRIS"
+
+[dependencies]
+rhein-proto.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+log.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-tungstenite.workspace = true
+url.workspace = true
+zbus = "5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["fs", "io-util", "rt-multi-thread", "macros"] }
+env_logger.workspace = true
