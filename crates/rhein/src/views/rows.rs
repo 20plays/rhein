@@ -154,7 +154,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let body_text = (!message.content.trim().is_empty()).then(|| message_text::render(&doc, &text_ctx, cx));
 
     // Indexed by position in the message, which is how an encrypted attachment is found again.
-    let (images, files): (Vec<(usize, &Attachment)>, Vec<(usize, &Attachment)>) = message.attachments.iter().enumerate().partition(|(_, a)| a.is_image());
+    type Indexed<'a> = Vec<(usize, &'a Attachment)>;
+    let (images, files): (Indexed, Indexed) = message.attachments.iter().enumerate().partition(|(_, a)| a.is_image());
     let body = div()
         .flex()
         .flex_col()
