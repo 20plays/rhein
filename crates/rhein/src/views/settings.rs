@@ -7,7 +7,9 @@ use gpui::{
 };
 use rhein_proto::Device;
 use rhein_store::{Client, ServerStatus};
-use rhein_ui::theme::{radius, text};
+
+use crate::views::profile;
+use rhein_ui::theme::{FONT_MONO, radius, text};
 use rhein_ui::{ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, ListRow, Switch, TextInput, Theme, icon};
 
 pub const SETTINGS_CONTEXT: &str = "Settings";
@@ -81,6 +83,14 @@ pub struct SettingsView {
     bio: Entity<TextInput>,
     avatar_ref: Option<String>,
     avatar_dirty: bool,
+    banner_ref: Option<String>,
+    banner_dirty: bool,
+    accent: Option<u32>,
+    theme: Option<[u32; 2]>,
+    /// Accent or theme changed since the last save.
+    look_dirty: bool,
+    /// The profile's banner, accent and theme have been read in (they arrive with the profile).
+    look_loaded: bool,
     saving: bool,
     status: Option<(bool, String)>,
     devices: Option<Result<Vec<Device>, String>>,
@@ -118,7 +128,10 @@ impl SettingsView {
         });
         let add_server = cx.new(|cx| TextInput::new("chat.example.com", cx));
         let subs = vec![
-            cx.observe(&client, |_, _, cx| cx.notify()),
+            cx.observe(&client, |this, _, cx| {
+                this.load_look(cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&add_server, window, |this, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Submit) {
                     let text = input.read(cx).text().trim().to_owned();
@@ -139,12 +152,41 @@ impl SettingsView {
             bio,
             avatar_ref,
             avatar_dirty: false,
+            banner_ref: None,
+            banner_dirty: false,
+            accent: None,
+            theme: None,
+            look_dirty: false,
+            look_loaded: false,
             saving: false,
             status: None,
             devices: None,
             add_server,
             focus,
             _subs: subs,
+        }
+    }
+
+    /// Takes the banner, accent and theme from the profile once it has arrived, and whatever the
+    /// profile had for pronouns and bio if those fields are still untouched.
+    fn load_look(&mut self, cx: &mut Context<Self>) {
+        if self.look_loaded {
+            return;
+        }
+        let client = self.client.read(cx);
+        let Some(me) = client.user_id().map(str::to_owned) else { return };
+        let Some(profile) = client.cached_profile(&me).cloned() else { return };
+        self.look_loaded = true;
+        self.banner_ref = profile.banner_ref.filter(|r| !r.is_empty());
+        self.accent = profile.accent_color;
+        self.theme = profile.theme_colors;
+        if self.pronouns.read(cx).text().is_empty() {
+            let text = profile.pronouns.unwrap_or_default();
+            self.pronouns.update(cx, |i, cx| i.set_text(text, cx));
+        }
+        if self.bio.read(cx).text().is_empty() {
+            let text = profile.bio.unwrap_or_default();
+            self.bio.update(cx, |i, cx| i.set_text(text, cx));
         }
     }
 
@@ -182,6 +224,13 @@ impl SettingsView {
         if self.avatar_dirty {
             patch["avatar_ref"] = serde_json::json!(self.avatar_ref);
         }
+        if self.banner_dirty {
+            patch["banner_ref"] = serde_json::json!(self.banner_ref);
+        }
+        if self.look_dirty {
+            patch["accent_color"] = serde_json::json!(self.accent);
+            patch["theme_colors"] = serde_json::json!(self.theme);
+        }
         self.saving = true;
         self.status = None;
         let this = cx.weak_entity();
@@ -191,7 +240,11 @@ impl SettingsView {
                 move |result, cx| {
                     this.update(cx, |v, cx| {
                         v.saving = false;
-                        v.avatar_dirty = false;
+                        if result.is_ok() {
+                            v.avatar_dirty = false;
+                            v.banner_dirty = false;
+                            v.look_dirty = false;
+                        }
                         v.status = Some(match result {
                             Ok(()) => (true, "Saved.".into()),
                             Err(e) => (false, format!("Couldn't save: {e}")),
@@ -207,11 +260,20 @@ impl SettingsView {
     }
 
     fn pick_avatar(&mut self, cx: &mut Context<Self>) {
+        self.pick_media(false, cx);
+    }
+
+    fn pick_banner(&mut self, cx: &mut Context<Self>) {
+        self.pick_media(true, cx);
+    }
+
+    /// Uploads a picture for the avatar or the banner; it applies on save.
+    fn pick_media(&mut self, banner: bool, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose a picture".into()),
+            prompt: Some(if banner { "Choose a banner".into() } else { "Choose a picture".into() }),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
@@ -220,11 +282,16 @@ impl SettingsView {
                 v.status = Some((true, "Uploading…".into()));
                 let weak = cx.weak_entity();
                 v.client.update(cx, |c, cx| {
-                    c.upload_avatar(
+                    c.upload_profile_media(
                         path,
                         move |result, cx| {
                             weak.update(cx, |v, cx| {
                                 match result {
+                                    Ok(reference) if banner => {
+                                        v.banner_ref = Some(reference);
+                                        v.banner_dirty = true;
+                                        v.status = Some((true, "Banner uploaded – save to apply.".into()));
+                                    }
                                     Ok(reference) => {
                                         v.avatar_ref = Some(reference);
                                         v.avatar_dirty = true;
@@ -306,6 +373,7 @@ impl SettingsView {
             .child(field("Display name", &self.display_name))
             .child(field("Pronouns", &self.pronouns))
             .child(field("About me", &self.bio))
+            .child(self.look_editor(t, cx))
             .child(
                 div()
                     .flex()
@@ -320,6 +388,136 @@ impl SettingsView {
                     .children(self.status.clone().map(|(ok, msg)| {
                         div().text_size(text::SM).text_color(if ok { t.success } else { t.danger }).child(msg)
                     })),
+            )
+            .into_any_element()
+    }
+
+    /// Banner, accent and theme, with a live preview of the card as others will see it.
+    fn look_editor(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let me = client.user_id().unwrap_or_default().to_owned();
+        let name = Some(self.display_name.read(cx).text().trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| me.clone());
+        let face_url = self.avatar_ref.as_deref().and_then(|r| client.home_media_url(r));
+        let look = profile::Look {
+            banner: self.banner_ref.as_deref().and_then(|r| client.home_media_url(r)),
+            accent: self.accent,
+            theme: self.theme,
+        };
+        let pronouns = self.pronouns.read(cx).text().trim().to_owned();
+        let face = Avatar::new(me.clone(), name.clone()).size(px(profile::FACE_SIZE)).image(face_url.map(Into::into)).into_any_element();
+        let preview = profile::frame(
+            &look,
+            t,
+            div().flex().flex_col().child(profile::header(&look, face, t)).child(
+                div()
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(div().text_size(text::SM).text_color(t.text_faint).child(me))
+                    .when(!pronouns.is_empty(), |d| d.child(div().text_size(text::SM).text_color(t.text_muted).child(pronouns))),
+            ),
+        );
+
+        // A row of colour swatches with "none" first; `pick` applies a choice.
+        let swatches = |id: &'static str, current: Option<u32>, pick: fn(&mut Self, Option<u32>), cx: &mut Context<Self>| {
+            let mut row = div().flex().flex_wrap().gap_2();
+            let choices = std::iter::once(None).chain(profile::ACCENTS.iter().map(|(_, c)| Some(*c)));
+            for (i, choice) in choices.enumerate() {
+                let selected = current == choice;
+                let label = choice.map_or("None", |c| profile::ACCENTS.iter().find(|(_, x)| *x == c).map_or("", |(n, _)| *n));
+                row = row.child(
+                    div()
+                        .id((id, i))
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .tooltip(rhein_ui::tooltip(label))
+                        .map(|d| match choice {
+                            Some(c) => d.bg(profile::rgb(c)),
+                            None => d.border_1().border_color(t.border_strong).child(icon(Icon::X).text_color(t.text_faint)),
+                        })
+                        .when(selected, |d| d.border_2().border_color(t.text))
+                        .when(selected && choice.is_some(), |d| d.child(icon(Icon::Check).text_color(gpui::white())))
+                        .on_click(cx.listener(move |v, _, _, cx| {
+                            pick(v, choice);
+                            v.look_dirty = true;
+                            cx.notify();
+                        })),
+                );
+            }
+            row
+        };
+        let label = |title: &'static str, hint: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .child(div().text_size(text::SM).text_color(t.text_muted).child(title))
+                .child(div().text_size(text::XS).text_color(t.text_faint).child(hint))
+        };
+        let top = self.theme.map(|[a, _]| a);
+        let bottom = self.theme.map(|[_, b]| b);
+        let banner = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(label("Banner", "A wide picture across the top of your card."))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(Button::new("banner-change", "Change banner").icon(Icon::Image).on_click(cx.listener(|v, _, _, cx| v.pick_banner(cx))))
+                    .when(self.banner_ref.is_some(), |d| {
+                        d.child(Button::new("banner-remove", "Remove").ghost().on_click(cx.listener(|v, _, _, cx| {
+                            v.banner_ref = None;
+                            v.banner_dirty = true;
+                            cx.notify();
+                        })))
+                    }),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_5()
+            .child(
+                div()
+                    .flex()
+                    .gap_8()
+                    .items_start()
+                    .child(banner)
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("preview"))
+                            .child(preview),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(label("Accent", "Behind your name, wherever your card is drawn without a banner."))
+                    .child(swatches("accent", self.accent, |v, c| v.accent = c, cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(label("Theme", "The border and background of your card, from top to bottom."))
+                    // Picking one end fills the other if it was empty; "none" on either clears both.
+                    .child(swatches("theme-top", top, |v, c| v.theme = c.map(|c| [c, v.theme.map_or(c, |[_, b]| b)]), cx))
+                    .child(swatches("theme-bottom", bottom, |v, c| v.theme = c.map(|c| [v.theme.map_or(c, |[a, _]| a), c]), cx)),
             )
             .into_any_element()
     }

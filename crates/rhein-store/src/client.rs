@@ -567,6 +567,11 @@ impl Client {
         None
     }
 
+    /// A profile already fetched, without asking for it.
+    pub fn cached_profile(&self, user_id: &str) -> Option<&rhein_proto::Profile> {
+        self.profiles.get(user_id).and_then(Option::as_ref)
+    }
+
     /// Saves profile fields (only those given) and refreshes what this client shows.
     pub fn save_profile(&mut self, patch: serde_json::Value, done: impl FnOnce(Result<(), String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
         let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
@@ -602,7 +607,8 @@ impl Client {
     }
 
     /// Uploads a picture as the profile avatar; `done` receives the new `avatar_ref`.
-    pub fn upload_avatar(&mut self, path: std::path::PathBuf, done: impl FnOnce(Result<String, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+    /// Uploads a picture for the profile (avatar or banner) and hands back its media reference.
+    pub fn upload_profile_media(&mut self, path: std::path::PathBuf, done: impl FnOnce(Result<String, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
         let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
         let io = self.io.clone();
         cx.spawn(async move |this, cx| {
@@ -1949,6 +1955,15 @@ impl Client {
         }
         let reference = home.avatar_ref.as_deref().filter(|r| !r.is_empty())?;
         Some(crate::media::media_url(&home.doc.api, reference, None))
+    }
+
+    /// The banner picture of a profile fetched from the home server; a remote user's media is
+    /// served through the home server's federation proxy.
+    pub fn banner_url(&self, user_id: &str, banner_ref: &str) -> Option<String> {
+        let home = self.home.as_ref()?;
+        let reference = Some(banner_ref).filter(|r| !r.is_empty())?;
+        let origin = crate::media::remote_origin(user_id, &home.doc.server_name);
+        Some(crate::media::media_url(&home.doc.api, reference, origin))
     }
 
     pub fn typing_in(&self, channel_id: &str) -> Vec<String> {

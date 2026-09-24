@@ -11,6 +11,7 @@
 import * as opaque from '@serenity-kit/opaque';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
+import { applyLooks } from './looks.mjs';
 
 await opaque.ready;
 
@@ -58,6 +59,7 @@ const anna = await register(`anna${tag}`);
 const ben = await register(`ben${tag}`);
 await call('PATCH', '/profile', { display_name: 'Anna' }, anna.access_token).catch(() => {});
 await call('PATCH', '/profile', { display_name: 'Ben' }, ben.access_token).catch(() => {});
+await applyLooks(anna.access_token, ben.access_token);
 
 const annaGuild = await guildToken(anna, serverName);
 const benGuild = await guildToken(ben, serverName);

@@ -12,6 +12,12 @@ pub struct Profile {
     pub avatar_ref: Option<String>,
     pub bio: Option<String>,
     pub pronouns: Option<String>,
+    /// Media reference of the wide picture across the top of the profile card.
+    pub banner_ref: Option<String>,
+    /// 0xRRGGBB; fills the banner area when there is no banner picture.
+    pub accent_color: Option<u32>,
+    /// 0xRRGGBB top and bottom of the card's border and background gradient.
+    pub theme_colors: Option<[u32; 2]>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +199,19 @@ pub fn domain_of(user_id: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_card_look_decodes() {
+        let p: Profile = serde_json::from_str(
+            r#"{"user_id":"@a:x","banner_ref":"h?cap=c","accent_color":7101439,"theme_colors":[11111375,3048688]}"#,
+        )
+        .unwrap();
+        assert_eq!(p.banner_ref.as_deref(), Some("h?cap=c"));
+        assert_eq!(p.accent_color, Some(0x6c5bff));
+        assert_eq!(p.theme_colors, Some([0xa98bcf, 0x2e84f0]));
+        let bare: Profile = serde_json::from_str(r#"{"user_id":"@a:x","theme_colors":null}"#).unwrap();
+        assert_eq!(bare.theme_colors, None);
+    }
 
     #[test]
     fn user_id_parts() {

@@ -4,6 +4,7 @@ pub mod home;
 pub mod login;
 pub mod message_text;
 pub mod panels;
+pub mod profile;
 pub mod rows;
 pub mod settings;
 pub mod shell;

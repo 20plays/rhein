@@ -18,6 +18,7 @@ use rhein_ui::{
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::home::HomeView;
+use crate::views::profile;
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
 use crate::views::status::StatusLine;
@@ -138,7 +139,7 @@ impl Shell {
         let focus = chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
         // Debug builds can start on a given screen, for screenshots without input:
-        // RHEIN_DEV_OPEN=home|settings|join|switcher|signout.
+        // RHEIN_DEV_OPEN=home|settings|join|switcher|signout|profile=@user:server.
         #[cfg(debug_assertions)]
         if let Ok(what) = std::env::var("RHEIN_DEV_OPEN") {
             cx.defer_in(window, move |this: &mut Self, window, cx| match what.as_str() {
@@ -155,7 +156,16 @@ impl Shell {
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
                 "signout" => this.ask_sign_out(window, cx),
-                _ => {}
+                // profile=@user:server opens that card once members are in.
+                other => {
+                    if let Some(user) = other.strip_prefix("profile=").map(str::to_owned) {
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                            this.update(cx, |v, cx| v.show_profile(user, gpui::point(px(420.), px(90.)), cx)).ok();
+                        })
+                        .detach();
+                    }
+                }
             });
         }
         Self {
@@ -822,23 +832,22 @@ impl Shell {
             _ => Vec::new(),
         };
         let presence = member.as_ref().map(|m| rhein_ui::Presence::parse(m.status()));
-        let card = div()
-            .occlude()
-            .w(px(300.))
-            .p_4()
-            .rounded(radius::LG)
-            .bg(t.bg_panel)
-            .border_1()
-            .border_color(t.border_strong)
-            .shadow_lg()
+        let look = profile::Look {
+            banner: profile.as_ref().and_then(|p| p.banner_ref.as_deref()).and_then(|r| client.banner_url(&user_id, r)),
+            accent: profile.as_ref().and_then(|p| p.accent_color),
+            theme: profile.as_ref().and_then(|p| p.theme_colors),
+        };
+        let face = Avatar::new(user_id.clone(), name.clone())
+            .size(px(profile::FACE_SIZE))
+            .image(avatar.map(Into::into))
+            .presence(presence)
+            .into_any_element();
+        let body = div()
+            .px_4()
+            .pb_4()
             .flex()
             .flex_col()
             .gap_3()
-            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
-                v.profile_card = None;
-                cx.notify();
-            }))
-            .child(Avatar::new(user_id.clone(), name.clone()).size(px(64.)).image(avatar.map(Into::into)).presence(presence))
             .child(
                 div().flex().flex_col()
                     .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
@@ -885,6 +894,13 @@ impl Shell {
                         div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
                     }))))
             });
+        let card = profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
+            .occlude()
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|v, _, _, cx| {
+                v.profile_card = None;
+                cx.notify();
+            }));
         Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card.relative(), "profile-card-in"))).with_priority(2).into_any_element())
     }
 
