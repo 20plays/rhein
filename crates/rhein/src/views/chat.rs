@@ -1024,6 +1024,7 @@ impl ChatView {
     /// A private conversation's call, while anyone is in it: who, who is speaking, how private
     /// it is, and joining or leaving.
     fn render_dm_call(&self, conversation: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let controls = self.call_controls("dm-call", cx);
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let members = client.voice_members(conversation, conversation);
@@ -1057,15 +1058,12 @@ impl ChatView {
             None => format!("{} in a call", names.join(", ")),
         };
         let failed = call.is_some_and(|c| matches!(c.status, rhein_store::CallStatus::Failed(_)));
-        let button = match call {
-            Some(_) => {
-                let c = self.client.clone();
-                Button::new("dm-call-leave", "Leave").danger().icon(Icon::PhoneOff).on_click(move |_, _, cx| c.update(cx, |c, cx| c.leave_voice(cx)))
-            }
-            None => {
-                let (c, id) = (self.client.clone(), conversation.to_owned());
-                Button::new("dm-call-join", "Join").primary().icon(Icon::Phone).on_click(move |_, _, cx| c.update(cx, |c, cx| c.join_dm_call(id.clone(), cx)))
-            }
+        let in_call = call.is_some();
+        let button = if in_call {
+            controls
+        } else {
+            let (c, id) = (self.client.clone(), conversation.to_owned());
+            Button::new("dm-call-join", "Join").primary().icon(Icon::Phone).on_click(move |_, _, cx| c.update(cx, |c, cx| c.join_dm_call(id.clone(), cx))).into_any_element()
         };
         Some(
             div()
@@ -1084,8 +1082,47 @@ impl ChatView {
         )
     }
 
+    /// The call's controls, where the call is shown: microphone, sound, screen share, leave.
+    fn call_controls(&self, prefix: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let (muted, deafened) = (client.voice_muted(), client.voice_deafened());
+        let sharing = client.call().is_some_and(|c| c.sharing_screen);
+        let (c1, c2, c3, c4) = (self.client.clone(), self.client.clone(), self.client.clone(), self.client.clone());
+        let id = |what: &str| SharedString::from(format!("{prefix}-{what}"));
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                IconButton::new(id("mute"), if muted { Icon::MicOff } else { Icon::Mic })
+                    .danger(muted)
+                    .tooltip(if muted { "Unmute" } else { "Mute" })
+                    .on_click(move |_, _, cx| c1.update(cx, |c, cx| c.set_voice_muted(!muted, cx))),
+            )
+            .child(
+                IconButton::new(id("deafen"), if deafened { Icon::HeadphoneOff } else { Icon::Headphones })
+                    .danger(deafened)
+                    .tooltip(if deafened { "Undeafen" } else { "Deafen" })
+                    .on_click(move |_, _, cx| c2.update(cx, |c, cx| c.set_voice_deafened(!deafened, cx))),
+            )
+            .child(
+                IconButton::new(id("screen"), Icon::ScreenShare)
+                    .active(sharing)
+                    .tooltip(if sharing { "Stop sharing your screen" } else { "Share your screen" })
+                    .on_click(move |_, _, cx| c3.update(cx, |c, cx| if sharing { c.stop_screen_share(cx) } else { c.start_screen_share(cx) })),
+            )
+            .child(
+                IconButton::new(id("leave"), Icon::PhoneOff)
+                    .danger(true)
+                    .tooltip("Leave the call")
+                    .on_click(move |_, _, cx| c4.update(cx, |c, cx| c.leave_voice(cx))),
+            )
+            .into_any_element()
+    }
+
     /// A voice channel: who is in it, who is speaking, and joining or leaving it.
     fn render_voice_stage(&self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let mut controls = Some(self.call_controls("voice", cx));
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let name = client.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
@@ -1237,17 +1274,14 @@ impl ChatView {
                             .items_center()
                             .gap_2()
                             .child(if in_call {
-                                let c = self.client.clone();
-                                Button::new("voice-leave", "Leave")
-                                    .danger()
-                                    .icon(Icon::PhoneOff)
-                                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.leave_voice(cx)))
+                                div().p_1().rounded(radius::LG).bg(t.bg_panel).border_1().border_color(t.border).child(controls.take().unwrap_or_else(|| div().into_any_element())).into_any_element()
                             } else {
                                 let (c, id) = (self.client.clone(), channel_id.to_owned());
                                 Button::new("voice-join", "Join voice")
                                     .primary()
                                     .icon(Icon::Phone)
                                     .on_click(move |_, _, cx| c.update(cx, |c, cx| c.join_voice(id.clone(), cx)))
+                                    .into_any_element()
                             })
                             .children(note.map(|(line, color)| div().text_size(text::SM).text_color(color).child(line))),
                     ),

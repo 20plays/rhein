@@ -1589,6 +1589,7 @@ impl Shell {
     }
 
     /// While in a call: how it is going, where it is, and the way out.
+    /// Where the call is, as one line; a click goes back to it (its controls are there).
     fn call_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
@@ -1613,7 +1614,7 @@ impl Shell {
             _ => place,
         };
         let (open, conversation) = (call.channel_id.clone(), call.conversation);
-        let (open_client, leave_client) = (self.client.clone(), self.client.clone());
+        let open_client = self.client.clone();
         Some(
             div()
                 .flex_none()
@@ -1645,19 +1646,6 @@ impl Shell {
                         })
                         .child(div().flex().items_center().gap_1p5().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).text_color(color).child(icon_sized(Icon::Volume, px(14.)).text_color(color)).child(label))
                         .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(detail)),
-                )
-                .child({
-                    let (sharing, c) = (call.sharing_screen, self.client.clone());
-                    IconButton::new("call-screen", Icon::ScreenShare)
-                        .active(sharing)
-                        .tooltip(if sharing { "Stop sharing your screen" } else { "Share your screen" })
-                        .on_click(move |_, _, cx| c.update(cx, |c, cx| if sharing { c.stop_screen_share(cx) } else { c.start_screen_share(cx) }))
-                })
-                .child(
-                    IconButton::new("call-leave", Icon::PhoneOff)
-                        .danger(true)
-                        .tooltip("Disconnect")
-                        .on_click(move |_, _, cx| leave_client.update(cx, |c, cx| c.leave_voice(cx))),
                 )
                 .into_any_element(),
         )
