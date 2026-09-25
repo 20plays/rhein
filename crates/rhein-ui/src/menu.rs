@@ -34,6 +34,13 @@ pub enum MenuEntry {
     Label(SharedString),
     /// Content that is not an action, such as a card heading the menu.
     Custom(Build),
+    /// A row that opens in place to show more items below it (the presence choices behind the
+    /// current one), and closes again on a second click.
+    Expand {
+        label: SharedString,
+        leading: Option<Build>,
+        entries: Vec<MenuEntry>,
+    },
 }
 
 impl MenuEntry {
@@ -41,12 +48,17 @@ impl MenuEntry {
         MenuEntry::Item { label: label.into(), icon: None, leading: None, checked: false, danger: false, action: Rc::new(action) }
     }
 
+    /// A row showing `label`, opening to `entries` when clicked.
+    pub fn expand(label: impl Into<SharedString>, entries: Vec<MenuEntry>) -> Self {
+        MenuEntry::Expand { label: label.into(), leading: None, entries }
+    }
+
     pub fn custom(build: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
         MenuEntry::Custom(Rc::new(build))
     }
 
     pub fn with_leading(mut self, build: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
-        if let MenuEntry::Item { leading, .. } = &mut self {
+        if let MenuEntry::Item { leading, .. } | MenuEntry::Expand { leading, .. } = &mut self {
             *leading = Some(Rc::new(build));
         }
         self
@@ -80,6 +92,8 @@ pub struct Menu {
     width: Option<Pixels>,
     /// Closed and fading out: drawn without any handlers, so input goes to what's beneath.
     closing: bool,
+    /// The expanding rows that are open.
+    open: std::collections::HashSet<usize>,
 }
 
 impl EventEmitter<DismissEvent> for Menu {}
@@ -92,7 +106,48 @@ impl Focusable for Menu {
 
 impl Menu {
     pub fn new(entries: Vec<MenuEntry>, cx: &mut Context<Self>) -> Self {
-        Self { entries, focus: cx.focus_handle(), width: None, closing: false }
+        Self { entries, focus: cx.focus_handle(), width: None, closing: false, open: Default::default() }
+    }
+}
+
+impl Menu {
+    /// One action row; `nested` indents it under the expanding row it belongs to.
+    fn item(&self, id: gpui::ElementId, entry: &MenuEntry, nested: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let MenuEntry::Item { label, icon: glyph, leading, checked, danger, action } = entry else { return div().into_any_element() };
+        let t = cx.theme().clone();
+        let action = action.clone();
+        let color = if *danger { t.danger } else { t.text };
+        let hover_bg = if *danger { t.danger_soft } else { t.bg_selected };
+        let hover_fg = if *danger { t.danger } else { t.text };
+        let row = div()
+            .id(id)
+            .px_2()
+            .when(nested, |d| d.pl_5())
+            .py_1p5()
+            .rounded(radius::SM)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_color(color)
+            .map(|d| match (leading, glyph) {
+                (Some(build), _) => d.child(build(window, cx)),
+                (None, Some(g)) => d.child(icon(*g).text_color(color)),
+                (None, None) => d,
+            })
+            .child(div().flex_1().min_w_0().truncate().child(label.clone()))
+            .when(*checked, |d| d.child(icon(Icon::Check).text_color(t.text_muted)));
+        // A closing menu is only an afterimage: no hover, no clicks.
+        if self.closing {
+            row.into_any_element()
+        } else {
+            row.cursor_pointer()
+                .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    cx.emit(DismissEvent);
+                    action(window, cx);
+                }))
+                .into_any_element()
+        }
     }
 }
 
@@ -128,39 +183,38 @@ impl Render for Menu {
                     div().px_2().pt_1p5().pb_1().text_size(text::XS).text_color(t.text_faint).child(label.clone()),
                 ),
                 MenuEntry::Custom(build) => list.child(build(window, cx)),
-                MenuEntry::Item { label, icon: glyph, leading, checked, danger, action } => {
-                    let action = action.clone();
-                    let color = if *danger { t.danger } else { t.text };
-                    let hover_bg = if *danger { t.danger_soft } else { t.bg_selected };
-                    let hover_fg = if *danger { t.danger } else { t.text };
+                MenuEntry::Item { .. } => list.child(self.item(("menu-item", i).into(), entry, false, window, cx)),
+                MenuEntry::Expand { label, leading, entries } => {
+                    let open = self.open.contains(&i);
                     let row = div()
-                        .id(("menu-item", i))
+                        .id(("menu-expand", i))
                         .px_2()
                         .py_1p5()
                         .rounded(radius::SM)
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_color(color)
-                        .map(|d| match (leading, glyph) {
-                            (Some(build), _) => d.child(build(window, cx)),
-                            (None, Some(g)) => d.child(icon(*g).text_color(color)),
-                            (None, None) => d,
-                        })
+                        .text_color(t.text)
+                        .children(leading.as_ref().map(|build| build(window, cx)))
                         .child(div().flex_1().min_w_0().truncate().child(label.clone()))
-                        .when(*checked, |d| d.child(icon(Icon::Check).text_color(t.text_muted)));
-                    // A closing menu is only an afterimage: no hover, no clicks.
-                    if closing {
-                        list.child(row)
+                        .child(icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }).text_color(t.text_muted));
+                    let row = if closing {
+                        row
                     } else {
-                        list.child(
-                            row.cursor_pointer()
-                                .hover(move |s| s.bg(hover_bg).text_color(hover_fg))
-                                .on_click(cx.listener(move |_, _, window, cx| {
-                                    cx.emit(DismissEvent);
-                                    action(window, cx);
-                                })),
-                        )
+                        row.cursor_pointer().hover(|s| s.bg(t.bg_selected)).on_click(cx.listener(move |menu, _, _, cx| {
+                            if !menu.open.remove(&i) {
+                                menu.open.insert(i);
+                            }
+                            cx.notify();
+                        }))
+                    };
+                    let list = list.child(row);
+                    if open {
+                        let children: Vec<AnyElement> =
+                            entries.iter().enumerate().map(|(j, e)| self.item(("menu-sub", i * 1000 + j).into(), e, true, window, cx)).collect();
+                        list.children(children)
+                    } else {
+                        list
                     }
                 }
             };

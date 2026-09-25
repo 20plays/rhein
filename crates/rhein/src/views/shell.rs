@@ -862,14 +862,21 @@ impl Shell {
             }));
         }
 
-        // Presence, with the current one checked.
-        for (status, label) in [("online", "Online"), ("idle", "Idle"), ("dnd", "Do not disturb"), ("invisible", "Invisible")] {
-            let (c, keep) = (self.client.clone(), prefs.custom_status.clone());
-            entries.push(
-                MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_presence(status.into(), keep.clone(), cx)))
-                    .with_leading(move |_, cx| presence_dot(presence_of(status), cx))
-                    .checked(prefs.status == status),
-            );
+        // Presence: the current one, opening to all four with it checked.
+        {
+            const CHOICES: [(&str, &str); 4] = [("online", "Online"), ("idle", "Idle"), ("dnd", "Do not disturb"), ("invisible", "Invisible")];
+            let choices = CHOICES
+                .iter()
+                .map(|&(status, label)| {
+                    let (c, keep) = (self.client.clone(), prefs.custom_status.clone());
+                    MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_presence(status.into(), keep.clone(), cx)))
+                        .with_leading(move |_, cx| presence_dot(presence_of(status), cx))
+                        .checked(prefs.status == status)
+                })
+                .collect();
+            let current = prefs.status.clone();
+            let label = CHOICES.iter().find(|(s, _)| *s == current).map_or("Online", |(_, l)| *l);
+            entries.push(MenuEntry::expand(label, choices).with_leading(move |_, cx| presence_dot(presence_of(&current), cx)));
         }
         {
             let v = this.clone();
