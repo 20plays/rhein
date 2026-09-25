@@ -550,7 +550,10 @@ impl SettingsView {
                 .child(input.clone())
         };
         let copy_id = me.clone();
-        div()
+        let fields = div()
+            .flex_1()
+            .min_w(px(340.))
+            .max_w(px(480.))
             .flex()
             .flex_col()
             .gap_5()
@@ -611,12 +614,30 @@ impl SettingsView {
                     .children(self.status.clone().map(|(ok, msg)| {
                         div().text_size(text::SM).text_color(if ok { t.success } else { t.danger }).child(msg)
                     })),
+            );
+        // The fields on the left, the card as others will see it on the right (below them when
+        // the window is too narrow for both).
+        div()
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .gap_10()
+            .child(fields)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(profile::CARD_W))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("preview"))
+                    .child(self.preview_card(t, cx)),
             )
             .into_any_element()
     }
 
-    /// Banner, accent and theme, with a live preview of the card as others will see it.
-    fn look_editor(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// Your card as others will see it, with what is typed so far.
+    fn preview_card(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let me = client.user_id().unwrap_or_default().to_owned();
         let name = Some(self.display_name.read(cx).text().trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| me.clone());
@@ -627,8 +648,9 @@ impl SettingsView {
             theme: self.theme,
         };
         let pronouns = self.pronouns.read(cx).text().trim().to_owned();
+        let bio = self.bio.read(cx).text().trim().to_owned();
         let face = Avatar::new(me.clone(), name.clone()).size(px(profile::FACE_SIZE)).image(face_url.map(Into::into)).into_any_element();
-        let preview = profile::frame(
+        profile::frame(
             &look,
             t,
             div().flex().flex_col().child(profile::header(&look, face, t)).child(
@@ -637,12 +659,32 @@ impl SettingsView {
                     .pb_4()
                     .flex()
                     .flex_col()
-                    .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
-                    .child(div().text_size(text::SM).text_color(t.text_faint).child(me))
-                    .when(!pronouns.is_empty(), |d| d.child(div().text_size(text::SM).text_color(t.text_muted).child(pronouns))),
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
+                            .child(div().text_size(text::SM).text_color(t.text_faint).child(me))
+                            .when(!pronouns.is_empty(), |d| d.child(div().text_size(text::SM).text_color(t.text_muted).child(pronouns))),
+                    )
+                    .when(!bio.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("about me"))
+                                .child(div().text_size(text::SM).child(bio)),
+                        )
+                    }),
             ),
-        );
+        )
+        .into_any_element()
+    }
 
+    /// Banner, accent and theme (the preview beside the fields shows them).
+    fn look_editor(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // A row of colour swatches with "none" first; `pick` applies a choice.
         let swatches = |id: &'static str, current: Option<u32>, pick: fn(&mut Self, Option<u32>), cx: &mut Context<Self>| {
             let mut row = div().flex().flex_wrap().gap_2();
@@ -708,22 +750,7 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap_5()
-            .child(
-                div()
-                    .flex()
-                    .gap_8()
-                    .items_start()
-                    .child(banner)
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("preview"))
-                            .child(preview),
-                    ),
-            )
+            .child(banner)
             .child(
                 div()
                     .flex()
@@ -1249,7 +1276,8 @@ impl Render for SettingsView {
                     .py_8()
                     .child(
                         div()
-                            .max_w(px(640.))
+                            // The profile's fields and its preview side by side need more room.
+                            .max_w(px(if self.section == Section::Account { 860. } else { 640. }))
                             .flex()
                             .flex_col()
                             .gap_5()
