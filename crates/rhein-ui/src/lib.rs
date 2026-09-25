@@ -15,6 +15,7 @@ pub mod input;
 mod menu;
 mod modal;
 pub mod motion;
+pub mod scaled_image;
 pub mod smooth;
 pub mod theme;
 mod tooltip;

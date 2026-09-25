@@ -11,6 +11,7 @@ gpui.workspace = true
 log.workspace = true
 unicode-segmentation.workspace = true
 emojis.workspace = true
+image = { version = "0.25", default-features = false }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

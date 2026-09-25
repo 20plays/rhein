@@ -7148,6 +7148,7 @@ dependencies = [
  "anyhow",
  "emojis",
  "gpui",
+ "image",
  "log",
  "unicode-segmentation",
 ]

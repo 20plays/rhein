@@ -56,7 +56,7 @@ impl Avatar {
 }
 
 impl RenderOnce for Avatar {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let size = self.size;
         let letter = self
@@ -77,7 +77,7 @@ impl RenderOnce for Avatar {
             .font_weight(FontWeight::SEMIBOLD)
             .child(letter);
         let face = match self.image {
-            Some(url) => img(url)
+            Some(url) => img(crate::scaled_image::scaled(url, size, window))
                 .size(size)
                 .rounded_full()
                 .object_fit(ObjectFit::Cover)
