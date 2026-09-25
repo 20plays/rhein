@@ -259,7 +259,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, &t)))
         .children(thread_chip);
 
-    let group = SharedString::from(format!("msg-{ix}"));
+    let group = message_group(ix);
     let gutter = if grouped {
         div()
             .w(px(avatar_size))
@@ -359,10 +359,12 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
 }
 
 fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedString, t: &Theme) -> AnyElement {
+    // Astride the row's top edge, as in Discord, so it covers a short message's neighbours
+    // least; the first row keeps it inside, where the list would clip it.
     let mut bar = div()
         .absolute()
-        .top(px(2.))
-        .right(px(12.))
+        .top(px(if ix == 0 { 2. } else { -16. }))
+        .right(px(16.))
         .flex()
         .gap_0p5()
         .p_0p5()
@@ -470,7 +472,7 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
 /// picture again).
 fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, t: &Theme, cx: &App) -> AnyElement {
     let group = SharedString::from(format!("gif-group-{ix}-{n}"));
-    let star = gif_star(ctx, format!("gif-star-{ix}-{n}"), group.clone(), media.clone(), t, cx);
+    let star = gif_star(ctx, format!("gif-star-{ix}-{n}"), message_group(ix), media.clone(), t, cx);
     let view = ctx.view.clone();
     let (open, raised, faint) = (media.clone(), t.bg_raised, t.text_faint);
     div()
@@ -513,8 +515,13 @@ fn gif_share_link(ix: usize, n: usize, url: String, provider: &str, t: &Theme) -
         .into_any_element()
 }
 
-/// The star over a GIF (shown while the pointer is on it): adds it to the favourites or takes it
-/// out.
+/// The hover group of the message at `ix`.
+fn message_group(ix: usize) -> SharedString {
+    SharedString::from(format!("msg-{ix}"))
+}
+
+/// The star over a GIF (shown while the pointer is on its message, favourite or not): adds it
+/// to the favourites or takes it out.
 fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Theme, cx: &App) -> AnyElement {
     let starred = ctx.client.read(cx).is_gif_favorite(&url);
     let client = ctx.client.clone();
@@ -524,7 +531,8 @@ fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Them
         .left_1p5()
         .rounded(radius::MD)
         .bg(t.bg_base)
-        .when(!starred, |d| d.invisible().group_hover(group, |s| s.visible()))
+        .invisible()
+        .group_hover(group, |s| s.visible())
         .child(
             IconButton::new(SharedString::from(id), if starred { Icon::StarFilled } else { Icon::Star })
                 .active(starred)
@@ -538,7 +546,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
     let (w, aspect) = fit(a.width, a.height);
     let group = SharedString::from(format!("img-group-{ix}-{i}"));
-    let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), group.clone(), url.clone(), t, cx));
+    let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), message_group(ix), url.clone(), t, cx));
     let view = ctx.view.clone();
     let (open, name) = (url.clone(), a.filename.clone());
     let fallback_name = a.filename.clone();
@@ -705,7 +713,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         let (open, name) = (image.clone(), e.url.clone());
         // A GIF is kept by its picture's own link, which draws anywhere.
         let group = SharedString::from(format!("embed-group-{ix}-{n}"));
-        let star = (gif_links::is_gif(&image) || gif_links::is_gif(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), group.clone(), image.clone(), t, cx));
+        let star = (gif_links::is_gif(&image) || gif_links::is_gif(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), message_group(ix), image.clone(), t, cx));
         return div()
             .id(SharedString::from(format!("embed-{ix}-{n}")))
             .group(group)
