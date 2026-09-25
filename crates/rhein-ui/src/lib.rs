@@ -10,6 +10,7 @@ mod button;
 mod controls;
 pub mod emoji;
 mod icon;
+pub mod hover;
 pub mod input;
 mod menu;
 mod modal;

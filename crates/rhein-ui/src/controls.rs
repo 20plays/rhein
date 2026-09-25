@@ -189,13 +189,16 @@ impl ListRow {
 }
 
 impl RenderOnce for ListRow {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let t = cx.theme();
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = cx.theme().clone();
         let color = if self.selected || self.strong { t.text } else { t.text_muted };
         let clickable = self.on_click.is_some();
         let subtitle = self.subtitle;
         let two_lines = subtitle.is_some();
-        div()
+        let id = self.id.clone();
+        let clear: gpui::Rgba = gpui::transparent_black().into();
+        let rest = crate::hover::Paint { bg: if self.selected { t.bg_selected } else { clear }, text: color };
+        let row = div()
             .id(self.id)
             .h(px(if two_lines { 42. } else { 32. }))
             .px_2()
@@ -204,12 +207,18 @@ impl RenderOnce for ListRow {
             .items_center()
             .gap_2()
             .text_size(text::MD)
-            .text_color(color)
             .when(self.strong, |d| d.font_weight(FontWeight::SEMIBOLD))
             .when(self.muted, |d| d.opacity(0.5))
-            .when(self.selected, |d| d.bg(t.bg_selected))
-            .when(clickable && !self.selected, |d| d.hover(|s| s.bg(t.bg_hover).text_color(t.text)))
-            .when(clickable, |d| d.cursor_pointer())
+            .when(clickable, |d| d.cursor_pointer());
+        // Clickable rows ease into their hover and press tints; a selected one stays selected.
+        let row = if clickable && !self.selected {
+            let lit = crate::hover::Paint { bg: t.bg_hover, text: t.text };
+            let held = crate::hover::Paint { bg: t.bg_selected, text: t.text };
+            crate::hover::hover_fade(row, &id, rest, lit, held, window, cx)
+        } else {
+            row.bg(rest.bg).text_color(rest.text)
+        };
+        row
             .when_some(self.icon, |d, i| d.child(icon(i).text_color(t.text_faint)))
             .children(self.leading)
             .child(

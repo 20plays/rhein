@@ -5,6 +5,7 @@ use gpui::{
     SharedString, Styled as _, Window, div, prelude::*, px,
 };
 
+use crate::hover::{Paint, hover_fade, hover_fade_with};
 use crate::icon::{Icon, icon};
 use crate::theme::{ActiveTheme as _, radius, size, text};
 use crate::tooltip::tooltip;
@@ -100,7 +101,7 @@ impl Button {
 }
 
 impl RenderOnce for Button {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let (bg, hover, fg) = match self.kind {
             ButtonKind::Primary => (t.accent, t.accent_hover, t.text_on_accent),
@@ -109,8 +110,14 @@ impl RenderOnce for Button {
             ButtonKind::Danger => (t.danger, t.danger, gpui::white().into()),
         };
         let hover_fg = if self.kind == ButtonKind::Ghost { t.text } else { fg };
+        // Held down: a step past hover (filled buttons darken, quiet ones take the selection tint).
+        let press_bg = match self.kind {
+            ButtonKind::Primary | ButtonKind::Danger => crate::hover::darken(hover, 0.12),
+            _ => t.bg_selected,
+        };
         let disabled = self.disabled;
-        div()
+        let id = self.id.clone();
+        let el = div()
             .id(self.id)
             .h(if self.small { size::CONTROL_SM } else { size::CONTROL })
             .flex_none()
@@ -120,16 +127,19 @@ impl RenderOnce for Button {
             .justify_center()
             .gap_2()
             .rounded(radius::MD)
-            .bg(bg)
             .when(self.kind == ButtonKind::Secondary, |d| d.border_1().border_color(t.border_strong))
-            .text_color(fg)
             .text_size(if self.small { text::SM } else { text::MD })
             .font_weight(FontWeight::MEDIUM)
             .when(self.full_width, |d| d.w_full())
-            .when(disabled, |d| d.opacity(0.5))
-            .when(!disabled, |d| {
-                d.cursor_pointer().hover(move |s| s.bg(hover).text_color(hover_fg))
-            })
+            .when(disabled, |d| d.opacity(0.5).bg(bg).text_color(fg))
+            .when(!disabled, |d| d.cursor_pointer());
+        let el = if disabled {
+            el
+        } else {
+            let (rest, lit) = (Paint { bg, text: fg }, Paint { bg: hover, text: hover_fg });
+            hover_fade(el, &id, rest, lit, Paint { bg: press_bg, text: hover_fg }, window, cx)
+        };
+        el
             .when_some(self.tooltip, |d, text| d.tooltip(tooltip(text)))
             .when_some(self.icon, |d, i| d.child(icon(i).text_color(fg)))
             .when_some(self.label, |d, label| d.child(label))
@@ -186,7 +196,7 @@ impl IconButton {
 }
 
 impl RenderOnce for IconButton {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let color = if self.danger {
             t.danger
@@ -196,7 +206,9 @@ impl RenderOnce for IconButton {
             t.text_muted
         };
         let hover_color = if self.danger || self.active { color } else { t.text };
-        div()
+        let id = self.id.clone();
+        let clear: gpui::Rgba = gpui::transparent_black().into();
+        let el = div()
             .id(self.id)
             .size(if self.large { size::ICON_BUTTON_LG } else { size::ICON_BUTTON })
             .flex_none()
@@ -204,11 +216,15 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded(radius::MD)
-            .text_color(color)
-            .cursor_pointer()
-            .hover(move |s| s.bg(t.bg_hover).text_color(hover_color))
-            .when_some(self.tooltip, |d, text| d.tooltip(tooltip(text)))
-            .child(icon(self.icon).text_color(color))
+            .cursor_pointer();
+        let (rest, lit, held) = (
+            Paint { bg: clear, text: color },
+            Paint { bg: t.bg_hover, text: hover_color },
+            Paint { bg: t.bg_selected, text: hover_color },
+        );
+        let (el, now) = hover_fade_with(el, &id, rest, lit, held, window, cx);
+        el.when_some(self.tooltip, |d, text| d.tooltip(tooltip(text)))
+            .child(icon(self.icon).text_color(now.text))
             .when_some(self.on_click, |d, handler| {
                 d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| handler(event, window, cx))
