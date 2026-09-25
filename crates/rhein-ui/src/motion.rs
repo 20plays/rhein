@@ -1,5 +1,6 @@
 //! Motion tokens and the few transitions Rhein uses. Motion is only there to make changes feel
-//! continuous: short, ease-out, never looping on its own.
+//! continuous: short, ease-out, never looping on its own (but for `pulse`, which says that
+//! something is still on its way).
 //!
 //! Everything here is built on GPUI's `with_animation`, which honours `App::reduce_motion`: with it
 //! set, elements render in their final state and no frames are scheduled.
@@ -57,6 +58,18 @@ where
     E: IntoElement + Styled + 'static,
 {
     el.with_animation(id, animation(FAST), |el, v| el.opacity(1. - v))
+}
+
+/// A slow breathing, for a placeholder while what it stands for loads. Under reduce motion it
+/// holds still at full strength.
+pub fn pulse<E>(el: E, id: impl Into<ElementId>) -> impl IntoElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    el.with_animation(id, Animation::new(Duration::from_millis(1400)).repeat(), |el, v| {
+        let wave = (v * std::f32::consts::TAU).cos() * 0.5 + 0.5;
+        el.opacity(0.45 + 0.55 * wave)
+    })
 }
 
 #[cfg(test)]

@@ -681,7 +681,8 @@ impl SettingsView {
                     .child(
                         Button::new("profile-save", if self.saving { "Saving…" } else { "Save changes" })
                             .primary()
-                            .disabled(self.saving)
+                            // Saving before the profile arrived would wipe its banner and colours.
+                            .disabled(self.saving || !self.look_loaded)
                             .on_click(cx.listener(|v, _, _, cx| v.save_profile(cx))),
                     )
                     .children(self.status.clone().map(|(ok, msg)| {
@@ -704,7 +705,9 @@ impl SettingsView {
                     .flex_col()
                     .gap_2()
                     .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("preview"))
-                    .child(self.preview_card(t, cx)),
+                    // Until the profile has arrived, a placeholder: the fields would otherwise
+                    // show a card without its banner and colours.
+                    .child(if self.look_loaded { self.preview_card(t, cx) } else { preview_placeholder(t) }),
             )
             .into_any_element()
     }
@@ -1950,4 +1953,30 @@ impl Render for SettingsView {
             ))
             .children(self.crop.as_ref().map(|(dialog, _)| dialog.clone()))
     }
+}
+
+/// The profile card's shape, breathing, while the profile loads.
+fn preview_placeholder(t: &Theme) -> AnyElement {
+    let bar = |w: f32, h: f32| div().w(px(w)).h(px(h)).rounded(radius::SM).bg(t.bg_selected);
+    let look = profile::Look::default();
+    let face = div().size(px(profile::FACE_SIZE)).rounded_full().bg(t.bg_raised).into_any_element();
+    let card = profile::frame(
+        &look,
+        t,
+        div().flex().flex_col().child(profile::header(&look, face, t)).child(
+            div()
+                .px_4()
+                .pt_1()
+                .pb_4()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(bar(120., 16.))
+                .child(bar(170., 12.))
+                .child(div().h_2())
+                .child(bar(56., 10.))
+                .child(bar(210., 12.)),
+        ),
+    );
+    rhein_ui::motion::pulse(card, "profile-placeholder").into_any_element()
 }
