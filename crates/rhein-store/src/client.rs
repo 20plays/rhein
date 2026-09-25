@@ -36,6 +36,8 @@ use crate::persist::{self, Saved};
 
 const PAGE: u32 = 50;
 const TYPING_SHOWN_FOR: Duration = Duration::from_secs(8);
+/// How long a passing notice (a friend request, say) stays up.
+const NOTICE_SHOWN_FOR: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -1677,7 +1679,20 @@ impl Client {
                     self.load_emoji(guild_id, cx);
                 }
             }
-            Event::FriendUpdate(friend) => crate::social::upsert_friend(&mut self.friends, friend),
+            Event::FriendUpdate(friend) => {
+                let before = self.friend_state(&friend.user_id).map(str::to_owned);
+                let news = crate::social::friend_news(before.as_deref(), &friend.state);
+                let user_id = friend.user_id.clone();
+                crate::social::upsert_friend(&mut self.friends, friend);
+                if let Some(news) = news {
+                    let name = self.display_name(None, &user_id);
+                    let text = match news {
+                        crate::social::FriendNews::Requested => format!("{name} sent you a friend request."),
+                        crate::social::FriendNews::Accepted => format!("{name} accepted your friend request."),
+                    };
+                    self.flash_notice(text, cx);
+                }
+            }
             Event::FriendRemove { user_id } => crate::social::remove_friend(&mut self.friends, &user_id),
             Event::ConversationActivity { conversation_id, message } => {
                 if message && self.home_conversation.as_deref() != Some(conversation_id.as_str()) {
@@ -1775,6 +1790,27 @@ impl Client {
 
     pub fn incoming_friend_requests(&self) -> usize {
         crate::social::incoming_requests(&self.friends)
+    }
+
+    /// Incoming requests not looked at yet, for the mark on Direct messages.
+    pub fn unseen_friend_requests(&self) -> usize {
+        let Some(me) = self.user_id() else { return 0 };
+        crate::social::unseen_requests(&self.friends, me, &self.prefs.seen_requests)
+    }
+
+    /// Remembers the incoming requests as looked at (the Pending tab is on screen). Requests
+    /// that are gone are forgotten, other accounts' kept.
+    pub fn mark_requests_seen(&mut self, cx: &mut Context<Self>) {
+        if self.unseen_friend_requests() == 0 {
+            return;
+        }
+        let Some(me) = self.user_id().map(str::to_owned) else { return };
+        let mine = format!("{me} ");
+        let mut seen: Vec<String> = self.prefs.seen_requests.iter().filter(|k| !k.starts_with(&mine)).cloned().collect();
+        seen.extend(self.friends.iter().filter(|f| f.state == "pending_in").map(|f| crate::social::seen_key(&me, &f.user_id)));
+        self.prefs.seen_requests = seen;
+        self.save_prefs();
+        cx.notify();
     }
 
     pub fn friend_state(&self, user_id: &str) -> Option<&str> {
@@ -3078,6 +3114,24 @@ impl Client {
             .ok();
         });
         task.detach();
+    }
+
+    /// A notice that goes away by itself after a while, unless another has taken its place.
+    pub fn flash_notice(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text: SharedString = text.into();
+        self.notice = Some(text.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_SHOWN_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.notice.as_ref() == Some(&text) {
+                    this.notice = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {

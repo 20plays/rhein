@@ -1452,7 +1452,7 @@ impl Shell {
             .border_b_1()
             .border_color(t.border);
         {
-            let requests = client.incoming_friend_requests() as u32;
+            let requests = client.unseen_friend_requests() as u32;
             let dm_unread = client.conversations.iter().any(|c| client.conversation_unread(&c.id));
             let c = self.client.clone();
             top = top.child(div().flex_1().child(
@@ -1859,7 +1859,7 @@ impl Shell {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let mut rows = Vec::new();
-        let pending = client.incoming_friend_requests();
+        let pending = client.unseen_friend_requests();
         let c = self.client.clone();
         rows.push(
             ListRow::new("home-friends", "Friends")

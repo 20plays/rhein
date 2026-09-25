@@ -27,6 +27,9 @@ pub struct Prefs {
     /// Activities never shared, by application name.
     pub hidden_activities: Vec<String>,
     pub voice: VoicePrefs,
+    /// Incoming friend requests already looked at (`social::seen_key`), so the Direct messages
+    /// row marks only new ones.
+    pub seen_requests: Vec<String>,
 }
 
 /// Calls: devices, processing, push-to-talk, the gate, and what stays between calls.
@@ -74,6 +77,7 @@ impl Default for Prefs {
             share_videos: false,
             hidden_activities: Vec::new(),
             voice: VoicePrefs::default(),
+            seen_requests: Vec::new(),
         }
     }
 }

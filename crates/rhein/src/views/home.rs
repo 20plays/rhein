@@ -166,6 +166,11 @@ impl HomeView {
     fn friends_page(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let friends: Vec<Friend> = self.client.read(cx).friends.iter().filter(|f| self.tab.shows(f)).cloned().collect();
         let pending = self.client.read(cx).incoming_friend_requests();
+        // Requests on screen count as looked at: the mark on Direct messages goes.
+        if self.tab == Tab::Pending && self.client.read(cx).unseen_friend_requests() > 0 {
+            let client = self.client.clone();
+            cx.defer(move |cx| client.update(cx, |c, cx| c.mark_requests_seen(cx)));
+        }
         let this = cx.weak_entity();
         let labels: Vec<String> = Tab::ALL
             .iter()

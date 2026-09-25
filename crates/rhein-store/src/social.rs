@@ -19,6 +19,34 @@ pub fn incoming_requests(list: &[Friend]) -> usize {
     list.iter().filter(|f| f.state == "pending_in").count()
 }
 
+/// What a `FRIEND_UPDATE` means to say out loud, from the state before it and after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriendNews {
+    /// Someone sent us a request.
+    Requested,
+    /// Someone took up the request we sent.
+    Accepted,
+}
+
+pub fn friend_news(before: Option<&str>, after: &str) -> Option<FriendNews> {
+    match (before, after) {
+        (Some("pending_in"), "pending_in") => None,
+        (_, "pending_in") => Some(FriendNews::Requested),
+        (Some("pending_out"), "accepted") => Some(FriendNews::Accepted),
+        _ => None,
+    }
+}
+
+/// How a request we have looked at is remembered: whose account it came to, and from whom.
+pub fn seen_key(me: &str, from: &str) -> String {
+    format!("{me} {from}")
+}
+
+/// Incoming requests to `me` not yet looked at.
+pub fn unseen_requests(list: &[Friend], me: &str, seen: &[String]) -> usize {
+    list.iter().filter(|f| f.state == "pending_in" && !seen.contains(&seen_key(me, &f.user_id))).count()
+}
+
 /// A conversation's title from this user's point of view: the other person for a DM, the
 /// members (or the group's own name) for a group. `name` resolves a user id to a display name.
 pub fn conversation_title(c: &Conversation, me: &str, name: impl Fn(&str) -> String) -> String {
@@ -60,6 +88,25 @@ mod tests {
         assert_eq!(incoming_requests(&list), 0);
         remove_friend(&mut list, "@c:x");
         assert_eq!(list.iter().map(|f| f.user_id.as_str()).collect::<Vec<_>>(), vec!["@b:x"]);
+    }
+
+    #[test]
+    fn what_a_friend_update_says() {
+        assert_eq!(friend_news(None, "pending_in"), Some(FriendNews::Requested));
+        assert_eq!(friend_news(Some("pending_in"), "pending_in"), None);
+        assert_eq!(friend_news(Some("pending_out"), "accepted"), Some(FriendNews::Accepted));
+        // Accepting someone else's request is our own doing: nothing to announce.
+        assert_eq!(friend_news(Some("pending_in"), "accepted"), None);
+        assert_eq!(friend_news(None, "pending_out"), None);
+        assert_eq!(friend_news(Some("accepted"), "blocked"), None);
+    }
+
+    #[test]
+    fn requests_looked_at() {
+        let list = vec![friend("@b:x", "pending_in"), friend("@c:x", "pending_in"), friend("@d:x", "accepted")];
+        assert_eq!(unseen_requests(&list, "@me:x", &[]), 2);
+        let seen = vec![seen_key("@me:x", "@b:x"), seen_key("@other:x", "@c:x")];
+        assert_eq!(unseen_requests(&list, "@me:x", &seen), 1);
     }
 
     #[test]
