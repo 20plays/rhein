@@ -308,15 +308,8 @@ impl RenderOnce for Toast {
             .child(icon(glyph).flex_none().text_color(color))
             .child(div().flex_1().min_w_0().child(self.text.clone()))
             .when_some(self.on_dismiss, |d, h| {
-                d.child(
-                    div()
-                        .id("toast-close")
-                        .cursor_pointer()
-                        .text_color(t.text_faint)
-                        .hover(|s| s.text_color(t.text))
-                        .on_click(move |e, window, cx| h(e, window, cx))
-                        .child(icon(Icon::X)),
-                )
+                // A button of its own: the icon takes its colour from it (an SVG does not inherit one).
+                d.child(crate::button::IconButton::new("toast-close", Icon::X).tooltip("Dismiss").on_click(move |e, window, cx| h(e, window, cx)))
             });
         // Keyed by the text, so a new message rises in again.
         let key = SharedString::from(format!("toast-{}", self.text));
