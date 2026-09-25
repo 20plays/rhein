@@ -277,6 +277,8 @@ pub struct Client {
     window_active: bool,
     /// Sounds, the ringing call and their pacing.
     alerts: notify::Alerts,
+    /// Conversations we told we are typing in, until we say we stopped.
+    typing_sent: std::collections::HashSet<String>,
     /// The voice channel whose chat column is open (its messages count as read only then).
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
@@ -387,6 +389,7 @@ impl Client {
             alerts: notify::Alerts::default(),
             dm_seen: HashMap::new(),
             voice_chat_open: None,
+            typing_sent: std::collections::HashSet::new(),
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -2926,11 +2929,26 @@ impl Client {
         self.fire(cx, async move { api.react(&message_id, &emoji, !mine).await.map(drop) });
     }
 
+    /// Says we stopped typing in a conversation we said we were typing in (a guild channel's
+    /// typing just runs out on the server).
+    pub fn stop_typing(&mut self, channel_id: &str) {
+        if !self.typing_sent.remove(channel_id) {
+            return;
+        }
+        log::debug!("typing stopped in {channel_id}");
+        let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
+        if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {
+            gw.send(rhein_proto::dm_typing(channel_id, false));
+        }
+    }
+
     pub fn send_typing(&mut self, channel_id: &str) {
+        log::debug!("typing in {channel_id}");
         if self.is_dm(channel_id) {
             if !self.signal("typing", Some(channel_id), true) {
                 return;
             }
+            self.typing_sent.insert(channel_id.to_owned());
             // Through the home server's gateway, which relays it to the conversation.
             let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
             if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {

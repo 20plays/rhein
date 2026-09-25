@@ -28,6 +28,8 @@ use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::rows::{RowCtx, format_size, message_key, render_row};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
+/// How long without a key before a conversation hears we stopped typing.
+const TYPING_IDLE: Duration = Duration::from_secs(8);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(1600);
 const COMPOSER_LINES: usize = 10;
 const LIGHTBOX_CONTEXT: &str = "Lightbox";
@@ -44,6 +46,10 @@ pub struct ChatView {
     editing: Option<String>,
     replying: Option<String>,
     last_typing: Option<Instant>,
+    /// Says "stopped typing" once the keys have been still for a while.
+    typing_idle: Option<gpui::Task<()>>,
+    /// The composer's length at the last change, to tell typing from deleting.
+    composer_len: usize,
     /// Which side panel the shell shows, so the header can highlight its button.
     active_panel: Option<PanelKind>,
     /// A thread shown in the side panel: this view is pinned to that channel.
@@ -186,6 +192,8 @@ impl ChatView {
             editing: None,
             replying: None,
             last_typing: None,
+            typing_idle: None,
+            composer_len: 0,
             active_panel: None,
             fixed,
             picker: None,
@@ -237,6 +245,12 @@ impl ChatView {
         if *self.channel.borrow() == selected {
             return;
         }
+        if let Some(old) = self.channel.borrow().clone() {
+            self.client.update(cx, |c, _| c.stop_typing(&old));
+        }
+        self.last_typing = None;
+        self.typing_idle = None;
+        self.composer_len = 0;
         *self.channel.borrow_mut() = selected.clone();
         self.voice_chat = None;
         self.editing = None;
@@ -337,6 +351,7 @@ impl ChatView {
 
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(channel) = self.current() else { return };
+        let channel_for_stop = channel.clone();
         let text = self.composer.read(cx).text().to_owned();
         if let Some(message_id) = self.editing.take() {
             if !text.trim().is_empty() {
@@ -351,21 +366,45 @@ impl ChatView {
             self.client.update(cx, |c, cx| c.send_message(channel, text, reply, cx));
         }
         self.last_typing = None;
+        self.typing_idle = None;
+        self.client.update(cx, |c, _| c.stop_typing(&channel_for_stop));
         self.composer.update(cx, |c, cx| c.clear(cx));
+        self.composer_len = 0;
         self.list.set_follow_mode(FollowMode::Tail);
         cx.notify();
     }
 
+    /// The composer changed. Only text that grew is typing (a key or a paste); a deletion, an
+    /// emptied composer or an edit is not, and an emptied one says we stopped.
     fn typed(&mut self, cx: &mut Context<Self>) {
-        if self.editing.is_some() || self.composer.read(cx).text().is_empty() {
+        let len = self.composer.read(cx).text().len();
+        let grew = len > self.composer_len;
+        self.composer_len = len;
+        let Some(channel) = self.current() else { return };
+        if len == 0 {
+            self.stop_typing(&channel, cx);
             return;
         }
+        if self.editing.is_some() || !grew {
+            return;
+        }
+        // In a conversation the others are told when we stop: after a while without a key.
+        let idle = channel.clone();
+        self.typing_idle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_IDLE).await;
+            this.update(cx, |this, cx| this.stop_typing(&idle, cx)).ok();
+        }));
         if self.last_typing.is_some_and(|at| at.elapsed() < TYPING_EVERY) {
             return;
         }
         self.last_typing = Some(Instant::now());
-        let Some(channel) = self.current() else { return };
         self.client.update(cx, |c, _| c.send_typing(&channel));
+    }
+
+    fn stop_typing(&mut self, channel: &str, cx: &mut Context<Self>) {
+        self.last_typing = None;
+        self.typing_idle = None;
+        self.client.update(cx, |c, _| c.stop_typing(channel));
     }
 
     pub(crate) fn start_edit(&mut self, message: &Message, window: &mut Window, cx: &mut Context<Self>) {
