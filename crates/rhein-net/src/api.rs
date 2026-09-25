@@ -299,6 +299,43 @@ impl Api {
         self.get(&format!("/channels/{}/voice", urlencoding::encode(channel_id))).await
     }
 
+    // --- conversation calls, on the home server (`server/src/routes/dmvoice.rs`) ---
+
+    /// Joins a conversation's call. `wants_sfu` is the one bit the sequencer learns about our
+    /// posture; `custom_sfu` says the group names its own SFU.
+    pub async fn conversation_voice_join(&self, id: &str, self_mute: bool, self_deaf: bool, wants_sfu: bool, custom_sfu: bool) -> ApiResult<VoiceJoin> {
+        let body = serde_json::json!({
+            "self_mute": self_mute, "self_deaf": self_deaf, "self_video": false,
+            "wants_sfu": wants_sfu, "custom_sfu": custom_sfu,
+        });
+        self.post(&format!("/conversations/{}/voice/join", urlencoding::encode(id)), &body).await
+    }
+
+    pub async fn conversation_voice_leave(&self, id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/voice/leave", urlencoding::encode(id)), &serde_json::json!({})).await
+    }
+
+    /// Changes flags (`self_mute`, `self_deaf`, `self_video`, `streaming`, `wants_sfu`).
+    pub async fn conversation_voice_state(&self, id: &str, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/voice/state", urlencoding::encode(id)), patch).await
+    }
+
+    /// One relay payload (a mesh signal or a hello) for another participant.
+    pub async fn conversation_voice_signal(&self, id: &str, target: &str, payload: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "target": target, "payload": payload });
+        self.post_patiently(&format!("/conversations/{}/voice/signal", urlencoding::encode(id)), &body).await
+    }
+
+    /// Where the call is now (after a switch to an SFU): `{voice_server}`.
+    pub async fn conversation_voice_server(&self, id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/conversations/{}/voice/server", urlencoding::encode(id)), &serde_json::json!({})).await
+    }
+
+    /// Who is in a conversation's call.
+    pub async fn conversation_voice(&self, id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/conversations/{}/voice", urlencoding::encode(id))).await
+    }
+
     /// The server's SFU regions: `{default, regions: [{name, sfu, healthy, ...}], ...}`.
     pub async fn voice_regions(&self) -> ApiResult<serde_json::Value> {
         self.get("/voice/regions").await

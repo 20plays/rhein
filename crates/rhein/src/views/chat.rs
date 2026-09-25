@@ -915,6 +915,69 @@ impl ChatView {
         cx.emit(ChatEvent::OpenThread(thread_id));
     }
 
+    /// A private conversation's call, while anyone is in it: who, who is speaking, how private
+    /// it is, and joining or leaving.
+    fn render_dm_call(&self, conversation: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let members = client.voice_members(conversation, conversation);
+        let call = client.call().filter(|c| c.channel_id == conversation);
+        if members.is_empty() && call.is_none() {
+            return None;
+        }
+        let faces = members.iter().map(|state| {
+            let who = client.display_name(None, &state.user_id);
+            let avatar = client.avatar_url(None, &state.user_id);
+            div()
+                .rounded_full()
+                .border_2()
+                .border_color(if client.is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
+                .child(Avatar::new(state.user_id.clone(), who).size(px(28.)).image(avatar.map(Into::into)))
+        });
+        let names: Vec<String> = members.iter().map(|m| client.display_name(None, &m.user_id)).collect();
+        let line = match call {
+            Some(call) => match &call.status {
+                rhein_store::CallStatus::Connecting => "Connecting…".to_owned(),
+                rhein_store::CallStatus::Failed(err) => err.clone(),
+                rhein_store::CallStatus::Connected => {
+                    let how = match (&call.mode, call.posture) {
+                        (Some(rhein_store::CallMode::Sfu { .. }), _) => "through an SFU, end-to-end encrypted",
+                        (_, Some(rhein_voice::posture::Posture::Relay | rhein_voice::posture::Posture::Sfu)) => "peer to peer through relays",
+                        _ => "peer to peer",
+                    };
+                    format!("In the call {how}")
+                }
+            },
+            None => format!("{} in a call", names.join(", ")),
+        };
+        let failed = call.is_some_and(|c| matches!(c.status, rhein_store::CallStatus::Failed(_)));
+        let button = match call {
+            Some(_) => {
+                let c = self.client.clone();
+                Button::new("dm-call-leave", "Leave").danger().icon(Icon::PhoneOff).on_click(move |_, _, cx| c.update(cx, |c, cx| c.leave_voice(cx)))
+            }
+            None => {
+                let (c, id) = (self.client.clone(), conversation.to_owned());
+                Button::new("dm-call-join", "Join").primary().icon(Icon::Phone).on_click(move |_, _, cx| c.update(cx, |c, cx| c.join_dm_call(id.clone(), cx)))
+            }
+        };
+        Some(
+            div()
+                .mx_4()
+                .mt_2()
+                .p_2()
+                .rounded(radius::MD)
+                .bg(t.bg_panel)
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(div().flex().gap_1().children(faces))
+                .child(div().flex_1().min_w_0().truncate().text_size(text::SM).text_color(if failed { t.danger } else { t.text_muted }).child(line))
+                .child(button)
+                .into_any_element(),
+        )
+    }
+
     /// A voice channel: who is in it, who is speaking, and joining or leaving it.
     fn render_voice_stage(&self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
@@ -1399,7 +1462,17 @@ impl Render for ChatView {
             .when(is_dm, |d| d.child(icon(Icon::Lock).text_color(t.text_faint)))
             .map(|header| {
                 if is_dm {
-                    return header;
+                    let (c, id) = (self.client.clone(), channel_id.clone());
+                    let in_call = self.client.read(cx).in_call(&channel_id);
+                    return header.child(
+                        IconButton::new("dm-call", if in_call { Icon::PhoneOff } else { Icon::Phone })
+                            .large()
+                            .danger(in_call)
+                            .tooltip(if in_call { "Leave the call" } else { "Start a call" })
+                            .on_click(move |_, _, cx| {
+                                c.update(cx, |c, cx| if in_call { c.leave_voice(cx) } else { c.join_dm_call(id.clone(), cx) })
+                            }),
+                    );
                 }
                 if self.fixed.is_some() {
                     return header.child(
@@ -1503,6 +1576,7 @@ impl Render for ChatView {
                 this.stage_paths(drop_channel.clone(), paths.paths().to_vec(), cx);
             }))
             .child(header)
+            .children(is_dm.then(|| self.render_dm_call(&channel_id, cx)).flatten())
             .children(top_note.map(|note| div().px_4().pt_3().text_size(text::SM).text_color(t.text_faint).child(note)))
             .child(
                 div()

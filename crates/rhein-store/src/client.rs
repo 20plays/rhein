@@ -1459,7 +1459,8 @@ impl Client {
                 }
             }
             Event::VoiceStateUpdate(state) => {
-                let Some(guild) = state.guild_id.clone() else { return };
+                // A guild's roster, or a conversation's call (on the home gateway).
+                let Some(guild) = state.guild_id.clone().or_else(|| state.conversation_id.clone()) else { return };
                 let roster = self.voice.entry(guild).or_default();
                 if state.channel_id.is_some() {
                     roster.insert(state.user_id.clone(), state.clone());

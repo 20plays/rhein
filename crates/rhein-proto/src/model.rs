@@ -94,6 +94,8 @@ pub struct Guild {
 #[serde(default)]
 pub struct VoiceState {
     pub guild_id: Option<String>,
+    /// Set instead of `guild_id` for a call in a conversation.
+    pub conversation_id: Option<String>,
     pub user_id: String,
     pub channel_id: Option<String>,
     pub self_mute: bool,
@@ -267,6 +269,9 @@ pub enum VoiceServer {
         relay: bool,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
+        /// Bumped by a conversation's sequencer on every topology change.
+        #[serde(default)]
+        generation: Option<u64>,
     },
     /// Through a Telium SFU: `token` is spent at `{endpoint}/session`.
     Sfu {
@@ -274,7 +279,9 @@ pub enum VoiceServer {
         channel_id: Option<String>,
         #[serde(default)]
         region: Option<String>,
+        #[serde(default, deserialize_with = "null_as_empty")]
         endpoint: String,
+        #[serde(default, deserialize_with = "null_as_empty")]
         token: String,
         #[serde(default)]
         token_ttl: Option<u64>,
@@ -282,6 +289,17 @@ pub enum VoiceServer {
         max_bitrate: Option<u64>,
         #[serde(default)]
         ice_servers: Vec<IceServer>,
+        /// A conversation's own SFU: the address is in the MLS group, not in `endpoint`.
+        #[serde(default)]
+        custom: bool,
+        /// Whether our home has a TURN relay.
+        #[serde(default)]
+        relay: bool,
+        #[serde(default)]
+        generation: Option<u64>,
+        /// `"required"` for conversation calls: media must be end-to-end encrypted.
+        #[serde(default)]
+        e2ee: Option<String>,
     },
 }
 
@@ -321,4 +339,23 @@ pub struct SfuSession {
     pub room: Option<String>,
     #[serde(default)]
     pub max_bitrate: Option<u64>,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+
+    #[test]
+    fn a_conversation_sfu_with_a_custom_endpoint_parses() {
+        let server: VoiceServer = serde_json::from_value(serde_json::json!({
+            "mode": "sfu", "custom": true, "endpoint": null, "token": "t", "e2ee": "required", "relay": true, "generation": 2,
+        }))
+        .unwrap();
+        let VoiceServer::Sfu { endpoint, custom, e2ee, .. } = server else { panic!() };
+        assert!(endpoint.is_empty() && custom && e2ee.as_deref() == Some("required"));
+    }
 }

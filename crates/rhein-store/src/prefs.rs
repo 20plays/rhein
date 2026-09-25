@@ -45,6 +45,8 @@ pub struct VoicePrefs {
     pub deafened: bool,
     /// Local playback volume per user, 0..200.
     pub volumes: std::collections::HashMap<String, u32>,
+    /// Call privacy in conversations: `direct`, `relay` or `sfu` (see `docs/calls.md`).
+    pub posture: String,
     /// Open ALSA's null devices instead of real ones (`RHEIN_AUDIO=null`, for screenshots and
     /// demos that must not touch the speakers). Never saved.
     #[serde(skip)]

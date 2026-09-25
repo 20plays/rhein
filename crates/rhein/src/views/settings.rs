@@ -370,10 +370,36 @@ impl SettingsView {
                 None => div().text_size(text::SM).text_color(t.text_faint).child("Join a call to see your microphone's level here.").into_any_element(),
             });
         let (c1, c2) = (self.client.clone(), self.client.clone());
+        // Call privacy in conversations: the copy is the web client's (`POSTURE_COPY`).
+        let postures = [
+            ("direct", "Direct", "Connect straight to the others when the network allows. The quickest path, but in a peer-to-peer call everyone in it can see your IP address."),
+            ("relay", "Relay only", "Every connection goes through a TURN relay, so nobody in the call learns your address. Needs a relay on your server, or an SFU."),
+            ("sfu", "Through an SFU", "Media goes through an SFU and is encrypted end to end, so the SFU cannot hear or see it. The SFU still sees your address and when you talk."),
+        ];
+        let current = if voice.posture.is_empty() { "direct" } else { voice.posture.as_str() };
+        let explained = postures.iter().find(|(id, ..)| *id == current).map(|(.., copy)| *copy).unwrap_or_default();
+        let posture_control = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().flex().gap_1().children(postures.iter().map(|(id, label, _)| {
+                let (client, id) = (self.client.clone(), id.to_string());
+                pill(
+                    SharedString::from(format!("posture-{id}")),
+                    label.to_string(),
+                    current == id,
+                    Box::new(move |cx| {
+                        let id = id.clone();
+                        client.update(cx, |c, cx| c.update_voice_prefs(cx, |v| v.posture = id))
+                    }),
+                )
+            })))
+            .child(div().text_size(text::SM).text_color(t.text_faint).child(explained));
         div()
             .flex()
             .flex_col()
             .gap_2()
+            .child(row("Call privacy", "For calls in direct messages and group chats. A call is as private as its most cautious participant asks; no server learns your choice.", posture_control.into_any_element()))
             .child(row("Microphone", "Where your voice comes from.", device_pills(true)))
             .child(row("Speakers", "Where calls are played.", device_pills(false)))
             .child(row("Input sensitivity", "Below this level the microphone sends silence, so keyboards and fans stay out of the call.", sensitivity.into_any_element()))

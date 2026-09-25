@@ -7147,10 +7147,13 @@ dependencies = [
 name = "rhein-voice"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "base64 0.22.1",
  "cpal",
  "env_logger",
  "futures",
+ "getrandom 0.3.4",
  "libwebrtc",
  "livekit",
  "livekit-api",

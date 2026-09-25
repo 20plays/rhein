@@ -178,6 +178,15 @@ impl Engine {
         self.group(id).is_some()
     }
 
+    /// A call secret of a conversation's current epoch (`MLS-Exporter(label, conversation id,
+    /// 32)`) and that epoch: the media key of an encrypted SFU call, or the hello key.
+    pub fn call_secret(&mut self, conversation: &str, label: &str) -> Option<(Vec<u8>, u64)> {
+        self.group(conversation)?;
+        let group = self.groups.get(conversation)?;
+        let key = self.device.export(group, label, conversation.as_bytes(), 32).ok()?;
+        Some((key, group.epoch().as_u64()))
+    }
+
     fn group(&mut self, id: &str) -> Option<&mut MlsGroup> {
         if !self.groups.contains_key(id) {
             let group = MlsGroup::load(self.device.provider.storage(), &GroupId::from_slice(id.as_bytes())).ok().flatten()?;

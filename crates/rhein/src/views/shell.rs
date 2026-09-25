@@ -194,10 +194,27 @@ impl Shell {
                         this.update(cx, |v, cx| {
                             v.client.update(cx, |c, cx| {
                                 let Some(call) = c.call() else { return };
-                                let (guild, channel) = (call.guild_id.clone(), call.channel_id.clone());
+                                let (guild, channel) = (call.room_id.clone(), call.channel_id.clone());
                                 let streaming: Vec<String> = c.voice_members(&guild, &channel).into_iter().filter(|s| s.streaming).map(|s| s.user_id).collect();
                                 for user in streaming {
                                     c.watch_screen(&user, true, cx);
+                                }
+                            });
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
+                // The first private conversation, and its call (run with RHEIN_AUDIO=null).
+                "dmcall" => {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                        this.update(cx, |v, cx| {
+                            let first = v.client.read(cx).conversations.first().map(|c| c.id.clone());
+                            v.client.update(cx, |c, cx| {
+                                c.open_conversation(first.clone(), cx);
+                                if let Some(id) = first {
+                                    c.join_dm_call(id, cx);
                                 }
                             });
                         })
@@ -1388,15 +1405,21 @@ impl Shell {
             CallStatus::Connected => ("Voice connected".to_owned(), t.success),
             CallStatus::Failed(_) => ("Call failed".to_owned(), t.danger),
         };
-        let channel = client.channel(&call.channel_id).map(|c| c.name.clone()).unwrap_or_default();
-        let guild = client.guild(&call.guild_id).map(|g| g.guild.name.clone()).unwrap_or_default();
+        let place = if call.conversation {
+            client.conversations.iter().find(|c| c.id == call.room_id).map(|c| client.conversation_title(c)).unwrap_or_default()
+        } else {
+            let channel = client.channel(&call.channel_id).map(|c| c.name.clone()).unwrap_or_default();
+            let guild = client.guild(&call.room_id).map(|g| g.guild.name.clone()).unwrap_or_default();
+            format!("{channel} / {guild}")
+        };
         let detail = match (&call.status, &call.mode) {
             (CallStatus::Failed(err), _) => err.clone(),
-            (_, Some(CallMode::Sfu { region })) => format!("{channel} / {guild} · SFU{}", region.as_ref().map(|r| format!(" {r}")).unwrap_or_default()),
-            (_, Some(CallMode::Mesh)) => format!("{channel} / {guild} · peer to peer"),
-            _ => format!("{channel} / {guild}"),
+            (_, Some(CallMode::Sfu { region })) if call.conversation => format!("{place} · SFU, encrypted{}", region.as_ref().map(|r| format!(" ({r})")).unwrap_or_default()),
+            (_, Some(CallMode::Sfu { region })) => format!("{place} · SFU{}", region.as_ref().map(|r| format!(" {r}")).unwrap_or_default()),
+            (_, Some(CallMode::Mesh)) => format!("{place} · peer to peer"),
+            _ => place,
         };
-        let open = call.channel_id.clone();
+        let (open, conversation) = (call.channel_id.clone(), call.conversation);
         let (open_client, leave_client) = (self.client.clone(), self.client.clone());
         Some(
             div()
@@ -1418,7 +1441,14 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|d| d.bg(t.bg_hover))
                         .on_click(move |_, _, cx| {
-                            open_client.update(cx, |c, cx| c.select_channel(open.clone(), cx))
+                            open_client.update(cx, |c, cx| {
+                                if conversation {
+                                    c.show_home(cx);
+                                    c.open_conversation(Some(open.clone()), cx);
+                                } else {
+                                    c.select_channel(open.clone(), cx);
+                                }
+                            })
                         })
                         .child(div().flex().items_center().gap_1p5().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).text_color(color).child(icon_sized(Icon::Volume, px(14.)).text_color(color)).child(label))
                         .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(detail)),

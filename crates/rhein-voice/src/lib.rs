@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod e2ee;
 pub mod mesh;
+pub mod posture;
 pub mod region;
 pub mod screen;
 pub mod sfu;
