@@ -4,6 +4,7 @@
 pub mod autocomplete;
 pub mod client;
 pub mod conversations;
+pub mod crop;
 pub mod guild_keys;
 pub mod dm;
 pub mod embed;

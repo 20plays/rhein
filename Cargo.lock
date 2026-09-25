@@ -7018,6 +7018,7 @@ dependencies = [
  "env_logger",
  "gpui",
  "gpui_platform",
+ "image",
  "jiff",
  "log",
  "reqwest",

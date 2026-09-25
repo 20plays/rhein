@@ -361,6 +361,15 @@ impl Shell {
                     let user = other.trim_start_matches("switch=").to_owned();
                     this.client.update(cx, |c, cx| c.switch_account(&user, cx));
                 }
+                // The crop dialog on a file: `crop=banner:/path` or `crop=avatar:/path`.
+                other if other.starts_with("crop=") => {
+                    this.open_settings(window, cx);
+                    let (kind, path) = other.trim_start_matches("crop=").split_once(':').unwrap_or(("avatar", ""));
+                    let (banner, path) = (kind == "banner", std::path::PathBuf::from(path));
+                    if let Some((view, _)) = &this.settings {
+                        view.update(cx, |v, cx| v.dev_crop(path, banner, cx));
+                    }
+                }
                 other if other.starts_with("settings=") => {
                     this.open_settings(window, cx);
                     let section = other.trim_start_matches("settings=").to_owned();

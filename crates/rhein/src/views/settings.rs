@@ -8,6 +8,7 @@ use gpui::{
 use rhein_proto::Device;
 use rhein_store::{Client, ServerStatus};
 
+use crate::views::crop::{self, CropDialog, CropEvent};
 use crate::views::profile;
 use rhein_ui::theme::{FONT_MONO, radius, text};
 use rhein_ui::{ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, ListRow, Switch, TextInput, Theme, icon};
@@ -113,6 +114,9 @@ pub struct SettingsView {
     look_loaded: bool,
     saving: bool,
     status: Option<(bool, String)>,
+    /// The crop dialog for a picked avatar or banner.
+    crop: Option<(Entity<CropDialog>, Subscription)>,
+    crop_focus: bool,
     devices: Option<Result<Vec<Device>, String>>,
     /// Microphones and speakers, once listed.
     audio_devices: Option<(Vec<rhein_voice::audio::AudioDevice>, Vec<rhein_voice::audio::AudioDevice>)>,
@@ -187,6 +191,8 @@ impl SettingsView {
             look_loaded: false,
             saving: false,
             status: None,
+            crop: None,
+            crop_focus: false,
             devices: None,
             audio_devices: None,
             meter: None,
@@ -490,7 +496,8 @@ impl SettingsView {
         self.pick_media(true, cx);
     }
 
-    /// Uploads a picture for the avatar or the banner; it applies on save.
+    /// Picks a picture for the avatar or the banner and opens it in the crop dialog; the crop
+    /// is uploaded, and applies on save.
     fn pick_media(&mut self, banner: bool, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -501,39 +508,78 @@ impl SettingsView {
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
-            this.update(cx, |v, cx| {
-                v.status = Some((true, "Uploading…".into()));
-                let weak = cx.weak_entity();
-                v.client.update(cx, |c, cx| {
-                    c.upload_profile_media(
-                        path,
-                        move |result, cx| {
-                            weak.update(cx, |v, cx| {
-                                match result {
-                                    Ok(reference) if banner => {
-                                        v.banner_ref = Some(reference);
-                                        v.banner_dirty = true;
-                                        v.status = Some((true, "Banner uploaded – save to apply.".into()));
-                                    }
-                                    Ok(reference) => {
-                                        v.avatar_ref = Some(reference);
-                                        v.avatar_dirty = true;
-                                        v.status = Some((true, "Picture uploaded – save to apply.".into()));
-                                    }
-                                    Err(e) => v.status = Some((false, format!("Upload failed: {e}"))),
-                                }
-                                cx.notify();
-                            })
-                            .ok();
-                        },
-                        cx,
-                    )
-                });
-                cx.notify();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("picture").to_owned();
+            let prepared = cx
+                .background_spawn(async move { std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| crop::prepare(bytes, &name)) })
+                .await;
+            this.update(cx, |v, cx| match prepared {
+                Ok(prepared) => v.open_crop(prepared, banner, cx),
+                Err(e) => {
+                    v.status = Some((false, format!("Couldn't open that picture: {e}")));
+                    cx.notify();
+                }
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Opens the crop dialog on a file, without the file picker (`RHEIN_DEV_OPEN=crop=…`).
+    #[cfg(debug_assertions)]
+    pub fn dev_crop(&mut self, path: std::path::PathBuf, banner: bool, cx: &mut Context<Self>) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("picture").to_owned();
+        match std::fs::read(&path).map_err(anyhow::Error::from).and_then(|bytes| crop::prepare(bytes, &name)) {
+            Ok(prepared) => self.open_crop(prepared, banner, cx),
+            Err(e) => log::warn!("dev crop: {e:#}"),
+        }
+    }
+
+    fn open_crop(&mut self, prepared: crop::Prepared, banner: bool, cx: &mut Context<Self>) {
+        let preset = if banner { rhein_store::crop::BANNER } else { rhein_store::crop::AVATAR };
+        let dialog = cx.new(|cx| CropDialog::new(prepared, preset, cx));
+        let sub = cx.subscribe(&dialog, move |v, _, event: &CropEvent, cx| {
+            v.crop = None;
+            if let CropEvent::Done(encoded) = event {
+                v.upload_media(encoded.clone(), banner, cx);
+            }
+            cx.notify();
+        });
+        self.crop = Some((dialog, sub));
+        self.crop_focus = true;
+        cx.notify();
+    }
+
+    fn upload_media(&mut self, encoded: rhein_store::crop::Encoded, banner: bool, cx: &mut Context<Self>) {
+        self.status = Some((true, "Uploading…".into()));
+        let weak = cx.weak_entity();
+        self.client.update(cx, |c, cx| {
+            c.upload_profile_bytes(
+                encoded.bytes,
+                encoded.filename,
+                encoded.mime,
+                move |result, cx| {
+                    weak.update(cx, |v, cx| {
+                        match result {
+                            Ok(reference) if banner => {
+                                v.banner_ref = Some(reference);
+                                v.banner_dirty = true;
+                                v.status = Some((true, "Banner uploaded – save to apply.".into()));
+                            }
+                            Ok(reference) => {
+                                v.avatar_ref = Some(reference);
+                                v.avatar_dirty = true;
+                                v.status = Some((true, "Picture uploaded – save to apply.".into()));
+                            }
+                            Err(e) => v.status = Some((false, format!("Upload failed: {e}"))),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                cx,
+            )
+        });
+        cx.notify();
     }
 
     fn account(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1225,7 +1271,7 @@ fn date(ms: i64) -> String {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let mut nav = div().w(px(220.)).flex_none().flex().flex_col().gap_0p5().p_3().bg(t.bg_panel);
         nav = nav.child(div().px_2().pb_2().font_family(rhein_ui::theme::FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("settings"));
@@ -1253,6 +1299,12 @@ impl Render for SettingsView {
             Section::Shortcuts => self.shortcuts(&t),
             Section::About => self.about(&t),
         };
+        // A new crop dialog takes the keyboard, so Escape closes it rather than the settings.
+        if let Some((dialog, _)) = &self.crop
+            && std::mem::take(&mut self.crop_focus)
+        {
+            window.focus(&dialog.focus_handle(cx), cx);
+        }
         div()
             .id("settings")
             .track_focus(&self.focus)
@@ -1295,5 +1347,6 @@ impl Render for SettingsView {
                             .child(body),
                     ),
             ))
+            .children(self.crop.as_ref().map(|(dialog, _)| dialog.clone()))
     }
 }

@@ -1,5 +1,6 @@
 pub mod activity;
 pub mod chat;
+pub mod crop;
 pub mod emoji_picker;
 pub mod gif_picker;
 pub mod home;

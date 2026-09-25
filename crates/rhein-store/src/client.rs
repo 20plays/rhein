@@ -948,6 +948,29 @@ impl Client {
         .detach();
     }
 
+    /// Uploads an avatar or banner already prepared in memory (a crop), like `upload_profile_media`.
+    pub fn upload_profile_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        filename: String,
+        mime: &'static str,
+        done: impl FnOnce(Result<String, String>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = join(io.spawn(async move {
+                let media = api.upload_profile_media(&filename, mime, bytes).await?;
+                let cap = media.capability.clone().unwrap_or_default();
+                Ok(format!("{}?cap={cap}", media.hash))
+            }))
+            .await;
+            this.update(cx, |_, cx| done(result.map_err(|e| friendly(&e)), cx)).ok();
+        })
+        .detach();
+    }
+
     /// The media URL for an `avatar_ref` on the home server (for previews in settings).
     pub fn home_media_url(&self, reference: &str) -> Option<String> {
         let home = self.home.as_ref()?;
