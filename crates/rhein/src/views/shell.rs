@@ -176,22 +176,33 @@ impl Shell {
                 // Joins the selected guild's first voice channel (run with RHEIN_AUDIO=null).
                 "voice" => {
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
-                        this.update(cx, |v, cx| {
-                            let client = v.client.read(cx);
-                            let guild = client.selected_guild.clone().and_then(|g| client.guild(&g).map(|g| g.guild.clone()));
-                            let voice = guild.and_then(|g| g.channels.iter().find(|c| c.is_voice()).map(|c| c.id.clone()));
-                            if let Some(id) = voice {
-                                v.client.update(cx, |c, cx| {
-                                    c.select_channel(id.clone(), cx);
-                                    c.join_voice(id, cx);
-                                });
+                        // Once READY has brought the guild and its channels.
+                        for _ in 0..40 {
+                            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            let joined = this
+                                .update(cx, |v, cx| {
+                                    let client = v.client.read(cx);
+                                    let guild = client.selected_guild.clone().and_then(|g| client.guild(&g).map(|g| g.guild.clone()));
+                                    let voice = guild.and_then(|g| g.channels.iter().find(|c| c.is_voice()).map(|c| c.id.clone()));
+                                    let Some(id) = voice else { return false };
+                                    v.client.update(cx, |c, cx| {
+                                        c.select_channel(id.clone(), cx);
+                                        c.join_voice(id, cx);
+                                    });
+                                    true
+                                })
+                                .unwrap_or(true);
+                            if joined {
+                                break;
                             }
-                        })
-                        .ok();
+                        }
                         // RHEIN_DEV_SHARE=1: then presses the screen share button.
-                        if std::env::var("RHEIN_DEV_SHARE").is_ok() {
-                            this.update(cx, |v, cx| v.client.update(cx, |c, cx| c.start_screen_share(cx))).ok();
+                        // (=pattern shares a test pattern instead of asking the desktop.)
+                        if let Ok(how) = std::env::var("RHEIN_DEV_SHARE") {
+                            this.update(cx, |v, cx| {
+                                v.client.update(cx, |c, cx| if how == "pattern" { c.share_test_pattern(cx) } else { c.start_screen_share(cx) })
+                            })
+                            .ok();
                         }
                         // Then watches whoever shares a screen.
                         cx.background_executor().timer(std::time::Duration::from_secs(4)).await;

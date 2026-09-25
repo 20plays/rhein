@@ -73,6 +73,8 @@ pub struct ActiveCall {
     commands: Option<mpsc::UnboundedSender<Command>>,
     speaking: HashSet<String>,
     screen: Option<ScreenShare>,
+    /// A test pattern shared in place of a screen (`RHEIN_DEV_SHARE=pattern`).
+    test_pattern: Option<rhein_voice::video::TestPattern>,
     videos: HashMap<(String, Slot), VideoFeed>,
     /// The picture drawn for each video, and which frame it is.
     images: HashMap<(String, Slot), (u64, Arc<gpui::RenderImage>)>,
@@ -324,6 +326,7 @@ impl Client {
             commands: Some(commands),
             speaking: HashSet::new(),
             screen: None,
+            test_pattern: None,
             videos: HashMap::new(),
             images: HashMap::new(),
             _task: Some(task),
@@ -605,6 +608,7 @@ impl Client {
             return;
         }
         let io = self.io.clone();
+        let me = self.home.as_ref().map(|h| h.user_id.clone());
         cx.spawn(async move |this, cx| {
             let started = io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await }).await;
             let started = match started {
@@ -617,6 +621,10 @@ impl Client {
                     Ok(share) => {
                         if let Some(commands) = &call.commands {
                             let _ = commands.send(Command::Publish { slot: Slot::Screen, video: share.video().clone() });
+                        }
+                        // Our own screen on our own stage.
+                        if let Some(me) = me.clone() {
+                            call.videos.insert((me, Slot::Screen), share.preview());
                         }
                         call.screen = Some(share);
                         call.sharing_screen = true;
@@ -643,6 +651,28 @@ impl Client {
         .detach();
     }
 
+    /// Shares a moving test pattern as if it were a screen, without asking the desktop: the
+    /// same publishing and preview, for screenshots in a headless session.
+    pub fn share_test_pattern(&mut self, cx: &mut Context<Self>) {
+        let me = self.home.as_ref().map(|h| h.user_id.clone());
+        let Some(call) = self.call.as_mut() else { return };
+        let _inside = self.io.handle().enter();
+        let (preview, sink) = rhein_voice::video::VideoFeed::local(1280, 10);
+        let video = VideoOut::new(1280, 720, true).with_preview(sink);
+        call.test_pattern = Some(rhein_voice::video::TestPattern::start(video.clone(), 1280, 720));
+        if let Some(commands) = &call.commands {
+            let _ = commands.send(Command::Publish { slot: Slot::Screen, video });
+        }
+        if let Some(me) = me {
+            call.videos.insert((me, Slot::Screen), preview);
+        }
+        call.sharing_screen = true;
+        if let Some(route) = self.route() {
+            self.io.spawn(async move { route.stream(true).await });
+        }
+        cx.notify();
+    }
+
     pub fn stop_screen_share(&mut self, cx: &mut Context<Self>) {
         let Some(call) = self.call.as_mut() else { return };
         if !call.sharing_screen {
@@ -650,6 +680,13 @@ impl Client {
         }
         call.sharing_screen = false;
         call.screen = None;
+        call.test_pattern = None;
+        if let Some(me) = self.home.as_ref().map(|h| h.user_id.clone()) {
+            call.videos.remove(&(me.clone(), Slot::Screen));
+            if let Some((_, image)) = call.images.remove(&(me, Slot::Screen)) {
+                cx.drop_image(image, None);
+            }
+        }
         if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Unpublish(Slot::Screen));
         }

@@ -1000,8 +1000,12 @@ impl ChatView {
         });
         let me = client.user_id().map(str::to_owned);
         let sfu = call.is_some_and(|c| matches!(c.mode, Some(rhein_store::CallMode::Sfu { .. })));
-        // The screen on the stage: the first one we have a picture of.
-        let screen = members.iter().find_map(|m| client.video(&m.user_id, rhein_store::Slot::Screen).map(|img| (m.user_id.clone(), img)));
+        // The screen on the stage: someone else's we watch, else our own while we share.
+        let screen = members
+            .iter()
+            .filter(|m| me.as_deref() != Some(m.user_id.as_str()))
+            .chain(members.iter().filter(|m| me.as_deref() == Some(m.user_id.as_str())))
+            .find_map(|m| client.video(&m.user_id, rhein_store::Slot::Screen).map(|img| (m.user_id.clone(), img)));
         let tiles = members.iter().map(|state| {
             let camera = client.video(&state.user_id, rhein_store::Slot::Camera).filter(|_| state.self_video);
             let mine = me.as_deref() == Some(state.user_id.as_str());
@@ -1088,7 +1092,11 @@ impl ChatView {
                     .gap_6()
                     .p_8()
                     .children(screen.map(|(user, picture)| {
-                        let who = client.display_name(guild_id.as_deref(), &user);
+                        let label = if me.as_deref() == Some(user.as_str()) {
+                            "Your screen".to_owned()
+                        } else {
+                            format!("{}'s screen", client.display_name(guild_id.as_deref(), &user))
+                        };
                         div()
                             .w_full()
                             .flex_1()
@@ -1108,7 +1116,7 @@ impl ChatView {
                                     .rounded(radius::SM)
                                     .bg(t.bg_base)
                                     .text_size(text::SM)
-                                    .child(format!("{who}'s screen")),
+                                    .child(label),
                             )
                     }))
                     .child(if members.is_empty() {

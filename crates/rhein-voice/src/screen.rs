@@ -72,6 +72,7 @@ pub struct ScreenShare {
     /// Set when the capture ends on its own (the portal session was closed from the desktop).
     ended: Arc<AtomicBool>,
     out: VideoOut,
+    preview: crate::video::VideoFeed,
 }
 
 impl ScreenShare {
@@ -94,6 +95,8 @@ impl ScreenShare {
         let ended = Arc::new(AtomicBool::new(false));
         // Sized once the first picture says how big the share is.
         let (first_tx, first_rx) = mpsc::channel::<Result<VideoOut>>();
+        // What we share, for our own eyes: at most 10 pictures a second, 1280 px wide.
+        let (preview, preview_sink) = crate::video::VideoFeed::local(1280, 10);
         let (running, over) = (stop.clone(), ended.clone());
         std::thread::Builder::new()
             .name("rhein-screen".into())
@@ -117,7 +120,7 @@ impl ScreenShare {
                             let (w, h) = (frame.width() as u32, frame.height() as u32);
                             let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
                             let video = sink.get_or_insert_with(|| {
-                                let video = VideoOut::new_in(&handle, w, h, true);
+                                let video = VideoOut::new_in(&handle, w, h, true).with_preview(preview_sink.clone());
                                 let _ = first.send(Ok(video.clone()));
                                 video
                             });
@@ -143,12 +146,17 @@ impl ScreenShare {
             })?;
         // The picker waits for the person; give them time.
         let out = first_rx.recv_timeout(Duration::from_secs(120)).map_err(|_| ShareError::Cancelled)??;
-        Ok(ScreenShare { stop, ended, out })
+        Ok(ScreenShare { stop, ended, out, preview })
     }
 
     /// The source to publish.
     pub fn video(&self) -> &VideoOut {
         &self.out
+    }
+
+    /// What is being shared, for the sharer's own stage.
+    pub fn preview(&self) -> crate::video::VideoFeed {
+        self.preview.clone()
     }
 
     /// Whether the capture ended from the desktop's side (its own "stop sharing").

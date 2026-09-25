@@ -73,6 +73,46 @@ impl VideoFeed {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
     }
+
+    /// A feed of our own pictures (a screen we share), filled through the returned sink.
+    pub fn local(max_width: u32, fps: u32) -> (VideoFeed, PreviewSink) {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let feed = VideoFeed { latest: Arc::default(), seq: Arc::default(), stopped: stopped.clone(), _guard: Arc::new(StopOnDrop(stopped)) };
+        let sink = PreviewSink {
+            latest: feed.latest.clone(),
+            seq: feed.seq.clone(),
+            every: Duration::from_millis(1000 / fps.max(1) as u64),
+            max_width,
+            last: Arc::new(Mutex::new(None)),
+        };
+        (feed, sink)
+    }
+}
+
+/// Where our own outgoing pictures are previewed: a few per second, scaled down.
+#[derive(Clone)]
+pub struct PreviewSink {
+    latest: Arc<Mutex<Option<Arc<Picture>>>>,
+    seq: Arc<AtomicU64>,
+    every: Duration,
+    max_width: u32,
+    last: Arc<Mutex<Option<Instant>>>,
+}
+
+impl PreviewSink {
+    /// Takes a picture on its way out, unless one was taken too recently.
+    pub fn offer(&self, buffer: &dyn VideoBuffer) {
+        {
+            let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|at| at.elapsed() < self.every) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let picture = to_picture(buffer, self.max_width);
+        *self.latest.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(picture));
+        self.seq.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn to_picture(buffer: &dyn VideoBuffer, max_width: u32) -> Picture {
@@ -95,12 +135,19 @@ fn to_picture(buffer: &dyn VideoBuffer, max_width: u32) -> Picture {
 #[derive(Clone)]
 pub struct VideoOut {
     source: NativeVideoSource,
+    preview: Option<PreviewSink>,
 }
 
 impl VideoOut {
     /// Must be called inside a tokio runtime: the source keeps a task of its own there.
     pub fn new(width: u32, height: u32, screencast: bool) -> VideoOut {
-        VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast) }
+        VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast), preview: None }
+    }
+
+    /// Also shows what goes out, through `sink`.
+    pub fn with_preview(mut self, sink: PreviewSink) -> VideoOut {
+        self.preview = Some(sink);
+        self
     }
 
     /// The same from any thread, with the runtime to run the source's task on.
@@ -120,6 +167,9 @@ impl VideoOut {
         let (sy, su, sv) = i420.strides();
         let (y, u, v) = i420.data_mut();
         yuv_helper::argb_to_i420(bgra, stride, y, sy, u, su, v, sv, width as i32, height as i32);
+        if let Some(preview) = &self.preview {
+            preview.offer(&i420);
+        }
         let frame = VideoFrame { rotation: VideoRotation::VideoRotation0, timestamp_us: 0, frame_metadata: None, buffer: i420 };
         self.source.capture_frame(&frame);
     }
@@ -181,5 +231,22 @@ mod tests {
         })
         .join()
         .expect("no panic on the capture thread");
+    }
+
+    /// What we share shows up in our own preview, scaled and a few times a second.
+    #[tokio::test]
+    async fn outgoing_pictures_reach_the_preview() {
+        let (feed, sink) = VideoFeed::local(320, 10);
+        let out = VideoOut::new(640, 360, true).with_preview(sink);
+        assert!(feed.latest().is_none());
+        let picture = vec![200u8; 640 * 360 * 4];
+        out.send(&picture, 640 * 4, 640, 360);
+        let (first, shown) = feed.latest().expect("a preview");
+        assert_eq!((shown.width, shown.height), (320, 180));
+        out.send(&picture, 640 * 4, 640, 360);
+        assert_eq!(feed.latest().unwrap().0, first, "the next one 0 ms later is skipped");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        out.send(&picture, 640 * 4, 640, 360);
+        assert!(feed.latest().unwrap().0 > first);
     }
 }
