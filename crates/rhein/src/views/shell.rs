@@ -1914,12 +1914,13 @@ impl Shell {
             if ch.is_textual() || ch.is_voice() {
                 let (id, voice) = (ch.id.clone(), ch.is_voice());
                 let client = self.client.clone();
-                // A voice channel is joined by clicking it, as in the web client.
-                row = row.on_click(move |_, _, cx| {
+                // A click opens a voice channel's window; a double click joins its call.
+                row = row.on_click(move |e, _, cx| {
                     let id = id.clone();
+                    let join = voice && e.click_count() >= 2;
                     client.update(cx, |c, cx| {
                         c.select_channel(id.clone(), cx);
-                        if voice {
+                        if join {
                             c.join_voice(id, cx);
                         }
                     });
