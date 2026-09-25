@@ -141,6 +141,8 @@ pub enum Event {
     ReactionAdd { message_id: String, channel_id: String, emoji: String, user_id: String },
     ReactionRemove { message_id: String, channel_id: String, emoji: String, user_id: String },
     TypingStart { channel_id: String, user_id: String },
+    /// Someone stopped typing in a conversation (guild typing just runs out).
+    TypingStop { channel_id: String, user_id: String },
     ChannelCreate(crate::model::Channel),
     ChannelUpdate(crate::model::Channel),
     ChannelDelete { id: String, guild_id: Option<String> },
@@ -217,6 +219,10 @@ impl Event {
             // Typing in an encrypted conversation is a plaintext gateway signal, keyed by the
             // conversation as a channel would be.
             "DM_TYPING_START" => Event::TypingStart {
+                channel_id: str_of(&d, "conversation_id"),
+                user_id: str_of(&d, "user_id"),
+            },
+            "DM_TYPING_STOP" => Event::TypingStop {
                 channel_id: str_of(&d, "conversation_id"),
                 user_id: str_of(&d, "user_id"),
             },

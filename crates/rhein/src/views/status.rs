@@ -6,7 +6,6 @@ use rhein_store::{Client, ServerStatus};
 use rhein_ui::theme::{FONT_MONO, size, text};
 use rhein_ui::{ActiveTheme as _, tooltip};
 
-use crate::views::chat::typing_label;
 
 #[derive(IntoElement)]
 pub struct StatusLine {
@@ -24,27 +23,20 @@ impl RenderOnce for StatusLine {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
 
-        // Where you are, then what's happening there.
-        let (location, typing) = if client.showing_home {
-            let place = match client.home_conversation.as_deref().and_then(|id| client.conversations.iter().find(|c| c.id == id)) {
+        // Where you are (who is typing shows above the message bar).
+        let location = if client.showing_home {
+            match client.home_conversation.as_deref().and_then(|id| client.conversations.iter().find(|c| c.id == id)) {
                 Some(c) => format!("direct messages › {}", client.conversation_title(c)),
                 None => "direct messages › friends".into(),
-            };
-            (place, None)
+            }
         } else {
             let channel = client.selected_channel().and_then(|id| client.channel(id).map(|c| (id.to_owned(), c.name.clone())));
             let entry = channel.as_ref().and_then(|(id, _)| client.guild_of_channel(id));
-            let place = match (entry, &channel) {
+            match (entry, &channel) {
                 (Some(e), Some((_, ch))) => format!("{} › {} › #{ch}", e.server, e.guild.name),
                 (Some(e), None) => format!("{} › {}", e.server, e.guild.name),
                 _ => String::new(),
-            };
-            let typing = channel.as_ref().and_then(|(id, _)| {
-                let gid = entry.map(|e| e.guild.id.as_str());
-                let names: Vec<String> = client.typing_in(id).iter().map(|u| client.display_name(gid, u)).collect();
-                typing_label(&names)
-            });
-            (place, typing)
+            }
         };
         let mentions = client.total_mentions();
 
@@ -73,7 +65,6 @@ impl RenderOnce for StatusLine {
                     .items_center()
                     .gap_3()
                     .child(div().min_w_0().truncate().child(location))
-                    .when_some(typing, |d, typing| d.child(div().flex_none().text_color(t.text_muted).child(typing)))
                     .when(mentions > 0, |d| {
                         let label = if mentions == 1 { "1 mention".to_owned() } else { format!("{mentions} mentions") };
                         d.child(div().flex_none().text_color(t.danger).child(label))

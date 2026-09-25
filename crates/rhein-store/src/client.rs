@@ -1572,6 +1572,11 @@ impl Client {
             Event::ReactionRemove { message_id, channel_id, emoji, user_id } => {
                 self.reaction(channel_id, message_id, emoji, user_id, false, cx);
             }
+            Event::TypingStop { channel_id, user_id } => {
+                if let Some(list) = self.typing.get_mut(&channel_id) {
+                    list.retain(|(u, _)| *u != user_id);
+                }
+            }
             Event::TypingStart { channel_id, user_id } => {
                 if Some(user_id.as_str()) == self.user_id() {
                     return;

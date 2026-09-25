@@ -1405,11 +1405,36 @@ impl ChatView {
         let focused = self.composer.read(cx).is_focused(window);
         let client = self.client.read(cx);
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
-        let typing: Vec<String> = if self.fixed.is_some() {
-            client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect()
-        } else {
-            Vec::new()
-        };
+        let typing: Vec<String> = client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect();
+        // Who is typing, just above the message bar, as in Discord: floating over the end of the
+        // list, so the chat does not move when it comes and goes.
+        let typing_line = typing_label(&typing).map(|label| {
+            let dot = |i: usize| {
+                gpui::AnimationExt::with_animation(div().size(px(5.)).rounded_full().bg(t.text_muted),
+                    ("typing-dot", i),
+                    gpui::Animation::new(Duration::from_millis(1200)).repeat(),
+                    move |d, delta| {
+                        let phase = (delta * std::f32::consts::TAU - i as f32 * 0.9).sin() * 0.5 + 0.5;
+                        d.opacity(0.3 + 0.7 * phase)
+                    },
+                )
+            };
+            div()
+                .absolute()
+                .left(px(20.))
+                .top(px(-16.))
+                .h(px(18.))
+                .px_1()
+                .rounded(radius::SM)
+                .bg(t.bg_base)
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .text_size(text::XS)
+                .text_color(t.text_muted)
+                .child(div().flex().items_center().gap(px(3.)).child(dot(0)).child(dot(1)).child(dot(2)))
+                .child(label)
+        });
 
         let context_bar = if self.editing.is_some() {
             Some(("Editing message".to_owned(), None))
@@ -1497,12 +1522,14 @@ impl ChatView {
         });
 
         div()
+            .relative()
             .flex_none()
             .px_4()
             .pt_2()
             .pb_2()
             .flex()
             .flex_col()
+            .children(typing_line)
             .children(chips)
             .children(context_bar)
             // A prompt line: `›`, the text with its block cursor, and the attach and emoji buttons.
@@ -1565,23 +1592,7 @@ impl ChatView {
                             })),
                     ),
             )
-            // The main view reports typing in the status line; a thread panel has none, so it
-            // keeps its own line under the composer.
-            .map(|d| {
-                if self.fixed.is_some() {
-                    d.child(
-                        div()
-                            .h(px(18.))
-                            .pt_0p5()
-                            .font_family(FONT_MONO)
-                            .text_size(text::XS)
-                            .text_color(t.text_muted)
-                            .child(typing_label(&typing).unwrap_or_default()),
-                    )
-                } else {
-                    d.pb_3()
-                }
-            })
+            .pb_1()
     }
 
     fn render_lightbox(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -1897,6 +1908,6 @@ pub fn typing_label(names: &[String]) -> Option<String> {
         [] => None,
         [one] => Some(format!("{one} is typing…")),
         [a, b] => Some(format!("{a} and {b} are typing…")),
-        _ => Some("several people are typing…".into()),
+        _ => Some("Several people are typing…".into()),
     }
 }
