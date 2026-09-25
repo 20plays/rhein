@@ -11,7 +11,6 @@
 //! video activity, normalised the way the Telium web client does. This crate knows nothing about
 //! Telium servers; the store decides what to share and sends it.
 
-mod cover;
 pub mod commands;
 pub mod detect;
 pub mod ipc;

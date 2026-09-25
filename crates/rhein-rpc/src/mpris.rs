@@ -136,7 +136,6 @@ pub async fn run(reports: Reports) {
         }
     };
     let mut last: Option<(Track, u64)> = None;
-    let mut covers = crate::cover::Covers::default();
     loop {
         match playing(&conn).await {
             Ok((players, track)) => {
@@ -153,16 +152,7 @@ pub async fn run(reports: Reports) {
                     (t, start)
                 });
                 if next != last {
-                    let mut activity = next.as_ref().and_then(|(t, start)| activity(t, *start));
-                    // A song whose player has only a local cover: one from the catalogues.
-                    if let (Some(a), Some((t, _))) = (activity.as_mut(), next.as_ref())
-                        && a["type"] == 2
-                        && a.get("assets").is_none()
-                        && let Some(artist) = t.artists.first()
-                        && let Some(cover) = covers.find(artist, t.album.as_deref(), t.title.as_deref()).await
-                    {
-                        a["assets"] = json!({ "large_image": cover, "large_text": t.album });
-                    }
+                    let activity = next.as_ref().and_then(|(t, start)| activity(t, *start));
                     let _ = reports.send(SourceEvent::Report(Report { key: "mpris".into(), activity, priority: PRIORITY_DETECTED }));
                     last = next;
                 }

@@ -16,7 +16,6 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-tungstenite.workspace = true
 url.workspace = true
-urlencoding.workspace = true
 zbus = "5"
 
 [dev-dependencies]
