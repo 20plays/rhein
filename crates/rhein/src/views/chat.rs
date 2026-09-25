@@ -2,7 +2,7 @@
 //! replies, edits and staged attachments.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,6 +65,12 @@ pub struct ChatView {
     lightbox_focus: FocusHandle,
     /// A running glide to the newest message; replaced by the next one.
     glide: Option<gpui::Task<()>>,
+    /// Pictures asked for ahead of the view, and the ones that have arrived.
+    prefetched: HashSet<String>,
+    arrived: HashSet<String>,
+    /// How far each nearby row's previews and pictures had got when last looked at; a row whose
+    /// state moves on is measured again (see `prefetch`).
+    row_progress: HashMap<String, u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -192,6 +198,9 @@ impl ChatView {
             lightbox: None,
             lightbox_focus: cx.focus_handle(),
             glide: None,
+            prefetched: HashSet::new(),
+            arrived: HashSet::new(),
+            row_progress: HashMap::new(),
             _subs: subs,
         };
         this.sync_channel(cx);
@@ -397,6 +406,67 @@ impl ChatView {
             self.glide_to_end(cx);
         }
         cx.notify();
+    }
+
+    /// Gets the rows around the view ready before they come into it: their previews and GIF
+    /// share pages asked for, their pictures loaded, and each one measured again whenever one of
+    /// those arrives. The list measures a row above the view once and keeps that height; without
+    /// this, a picture that loads later makes the row grow as it scrolls in, and everything below
+    /// jumps.
+    fn prefetch(&mut self, cx: &mut Context<Self>) {
+        const ABOVE: usize = 40;
+        const BELOW: usize = 20;
+        let Some(channel) = self.current() else { return };
+        let count = self.count(cx);
+        let top = self.list.logical_scroll_top().item_ix.min(count);
+        let range = top.saturating_sub(ABOVE)..(top + BELOW).min(count);
+        let (mut embeds, mut shares, mut pictures, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        {
+            let client = self.client.read(cx);
+            let Some(log) = client.logs.get(&channel) else { return };
+            for ix in range {
+                let Some(message) = log.messages.get(ix) else { break };
+                let media = crate::views::rows::row_media(client, &channel, message);
+                let arrived = media.pictures.iter().filter(|p| self.arrived.contains(*p)).count() as u64;
+                let progress = media.progress ^ arrived.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+                if self.row_progress.insert(crate::views::rows::message_key(message).to_owned(), progress).is_some_and(|was| was != progress) {
+                    changed.push(ix);
+                }
+                embeds.extend(media.embeds);
+                shares.extend(media.shares);
+                pictures.extend(media.pictures.into_iter().filter(|p| !self.prefetched.contains(p)));
+            }
+        }
+        for ix in changed {
+            self.list.remeasure_items(ix..ix + 1);
+        }
+        for picture in pictures {
+            self.prefetched.insert(picture.clone());
+            let resource = gpui::Resource::Uri(gpui::SharedUri::from(picture.clone()));
+            let (task, _) = cx.fetch_asset::<gpui::ImgResourceLoader>(&resource);
+            cx.spawn(async move |this, cx| {
+                task.await.ok();
+                this.update(cx, |this, cx| {
+                    this.arrived.insert(picture);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        if !embeds.is_empty() || !shares.is_empty() {
+            let client = self.client.clone();
+            cx.defer(move |cx| {
+                client.update(cx, |client, cx| {
+                    for url in &embeds {
+                        client.request_embed(&channel, url, cx);
+                    }
+                    for url in &shares {
+                        client.request_gif_share(url, cx);
+                    }
+                })
+            });
+        }
     }
 
     /// Scrolls to the newest message with an ease-out glide, then follows the tail again. From
@@ -1571,6 +1641,8 @@ impl Render for ChatView {
         } else {
             None
         };
+
+        self.prefetch(cx);
 
         // Wheel glides move the list without its scroll handler, so older messages are also
         // asked for here once the top comes near.

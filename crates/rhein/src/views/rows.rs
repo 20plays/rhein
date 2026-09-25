@@ -929,3 +929,54 @@ pub fn format_size(bytes: i64) -> String {
 pub fn message_key(message: &Message) -> &str {
     message.nonce.as_deref().unwrap_or(&message.id)
 }
+
+/// What a row's height still waits on: previews and GIF share pages not asked for yet, the
+/// pictures whose size is only known once loaded, and a fingerprint of how far the previews
+/// have got (it changes whenever one arrives and the row grows).
+#[derive(Default)]
+pub struct RowMedia {
+    pub embeds: Vec<String>,
+    pub shares: Vec<String>,
+    pub pictures: Vec<String>,
+    pub progress: u64,
+}
+
+pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMedia {
+    use std::hash::{Hash, Hasher};
+    let mut media = RowMedia::default();
+    let mut progress = std::collections::hash_map::DefaultHasher::new();
+    for a in message.attachments.iter().filter(|a| a.is_image()) {
+        if let (Some(url), (_, None)) = (&a.url, fit(a.width, a.height)) {
+            media.pictures.push(url.clone());
+        }
+    }
+    let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
+    let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
+    for url in links.iter().filter(|u| !is_invite(u) && !gif_links::is_gif(u)) {
+        match client.embed(channel_id, url) {
+            Some(EmbedState::Ready(embed)) => {
+                1u8.hash(&mut progress);
+                media.pictures.extend(embed.image.clone());
+            }
+            Some(EmbedState::Loading) => 2u8.hash(&mut progress),
+            Some(EmbedState::Empty { .. }) => 3u8.hash(&mut progress),
+            None => media.embeds.push(url.clone()),
+        }
+    }
+    for url in gif_links::gifs_in(&message.content) {
+        if gif_links::share(&url).is_none() {
+            media.pictures.push(url);
+            continue;
+        }
+        match client.gif_share(&url) {
+            Some(GifShare::Ready(picture)) => {
+                1u8.hash(&mut progress);
+                media.pictures.push(picture);
+            }
+            Some(state) => (state == GifShare::Loading).hash(&mut progress),
+            None => media.shares.push(url),
+        }
+    }
+    media.progress = progress.finish();
+    media
+}
