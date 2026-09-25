@@ -18,6 +18,7 @@ use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, text};
 use rhein_ui::{ActiveTheme as _, Icon, Theme, icon};
 
 use crate::views::chat::ChatView;
+use crate::views::select;
 
 /// What a click on a range does.
 #[derive(Clone)]
@@ -36,6 +37,8 @@ pub struct Context<'a> {
     pub me: Option<&'a str>,
     pub revealed: &'a HashSet<(String, usize)>,
     pub pending: bool,
+    /// What is selected in this message: the block and the byte range.
+    pub selected: Option<(usize, Range<usize>)>,
 }
 
 struct Flat {
@@ -73,6 +76,10 @@ pub fn render(doc: &Document, ctx: &Context, cx: &App) -> AnyElement {
                 );
             }
             Block::CodeBlock(code) => {
+                let code: SharedString = code.trim_end_matches('\n').to_owned().into();
+                let marks = selection_marks(ctx, i, Vec::new(), &t);
+                let styled = StyledText::new(code.clone()).with_highlights(marks);
+                let layout = styled.layout().clone();
                 col = col.child(
                     div()
                         .px_3()
@@ -84,7 +91,7 @@ pub fn render(doc: &Document, ctx: &Context, cx: &App) -> AnyElement {
                         .font_family(FONT_MONO)
                         .text_size(text::SM)
                         .text_color(t.text)
-                        .child(code.trim_end_matches('\n').to_owned()),
+                        .child(select::selectable(ctx.message_id, i, code, layout, ctx.view.clone(), styled.into_any_element())),
                 );
             }
         }
@@ -106,9 +113,13 @@ fn inline(
     let used = flat.spoilers;
     // Font overrides must be sorted and must not overlap (code spans hold no emoji ranges).
     flat.mono.sort_by_key(|(r, _)| r.start);
-    let styled = StyledText::new(flat.text).with_highlights(flat.highlights).with_font_family_overrides(flat.mono);
+    let text: SharedString = flat.text.into();
+    let highlights = selection_marks(ctx, id.1, flat.highlights, t);
+    let styled = StyledText::new(text.clone()).with_highlights(highlights).with_font_family_overrides(flat.mono);
+    let layout = styled.layout().clone();
+    let wrap = |el: AnyElement| select::selectable(id.0, id.1, text.clone(), layout.clone(), ctx.view.clone(), el).into_any_element();
     if flat.clicks.is_empty() {
-        return (styled.into_any_element(), used);
+        return (wrap(styled.into_any_element()), used);
     }
     let ranges: Vec<Range<usize>> = flat.clicks.iter().map(|(r, _)| r.clone()).collect();
     let actions: Vec<Action> = flat.clicks.into_iter().map(|(_, a)| a).collect();
@@ -129,7 +140,19 @@ fn inline(
             }
         }
     });
-    (interactive.into_any_element(), used)
+    (wrap(interactive.into_any_element()), used)
+}
+
+/// The block's highlights with the selection, if it is in this block, laid over them.
+fn selection_marks(ctx: &Context, block: usize, highlights: Vec<(Range<usize>, HighlightStyle)>, t: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
+    match &ctx.selected {
+        Some((b, range)) if *b == block => {
+            let mut sorted = highlights;
+            sorted.sort_by_key(|(r, _)| r.start);
+            select::overlay(sorted, range.clone(), HighlightStyle { background_color: Some(t.selection.into()), ..Default::default() })
+        }
+        _ => highlights,
+    }
 }
 
 fn merge(base: HighlightStyle, over: HighlightStyle) -> HighlightStyle {

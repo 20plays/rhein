@@ -64,9 +64,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
 
     let view_state = ctx.view.upgrade().map(|v| {
         let v = v.read(cx);
-        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)))
+        let selected = v.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range()));
+        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)), selected)
     });
-    let (revealed, highlighted, fresh) = view_state.unwrap_or_default();
+    let (revealed, highlighted, fresh, selected) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
     let doc = markdown::parse(&message.content);
@@ -178,6 +179,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         guild_id: guild_id.as_deref(),
         me: me.as_deref(),
         revealed: &revealed,
+        selected,
         pending: pending && !failed,
     };
     let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(&doc, &text_ctx, cx));

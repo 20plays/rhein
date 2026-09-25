@@ -63,6 +63,11 @@ pub struct ChatView {
     modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
     pub(crate) revealed: HashSet<(String, usize)>,
+    /// Text selected in one message's block (`views::select`).
+    pub(crate) selection: Option<crate::views::select::TextSelection>,
+    /// Takes the keyboard while text is selected, so Ctrl+C reaches the selection and not the
+    /// composer.
+    pub(crate) select_focus: FocusHandle,
     /// Messages that arrived while the channel was open, animating in (see `rows::message_key`).
     pub(crate) fresh: HashSet<String>,
     /// A message briefly highlighted after a jump.
@@ -209,6 +214,8 @@ impl ChatView {
             lightbox_focus: cx.focus_handle(),
             glide: None,
             voice_chat: None,
+            selection: None,
+            select_focus: cx.focus_handle(),
             prefetched: HashSet::new(),
             arrived: HashSet::new(),
             row_progress: HashMap::new(),
@@ -572,6 +579,37 @@ impl ChatView {
 
     pub(crate) fn member_menu(&mut self, user_id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
         cx.emit(ChatEvent::MemberMenu { user_id, at });
+    }
+
+    pub(crate) fn set_selection(&mut self, selection: Option<crate::views::select::TextSelection>, cx: &mut Context<Self>) {
+        if self.selection != selection {
+            self.selection = selection;
+            cx.notify();
+        }
+    }
+
+    /// The pointer moved with the button held: the selection it started follows it.
+    pub(crate) fn drag_selection(&mut self, message: &str, block: usize, index: usize, cx: &mut Context<Self>) {
+        if let Some(s) = self.selection.as_mut().filter(|s| s.dragging && s.message == message && s.block == block) {
+            let index = index.min(s.text.len());
+            if s.head != index {
+                s.head = index;
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn end_selection(&mut self, _cx: &mut Context<Self>) {
+        if let Some(s) = self.selection.as_mut() {
+            s.dragging = false;
+        }
+    }
+
+    /// Copies the selected text; false when nothing is selected.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.selection.as_ref().and_then(|s| s.selected()).map(str::to_owned) else { return false };
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        true
     }
 
     pub(crate) fn reveal_spoiler(&mut self, key: (String, usize), cx: &mut Context<Self>) {
@@ -969,6 +1007,13 @@ impl ChatView {
         }
         entries.push(MenuEntry::Separator);
         {
+            // What is selected in this message, first.
+            if let Some(part) = self.selection.as_ref().filter(|s| s.message == message.id).and_then(|s| s.selected()).map(str::to_owned) {
+                entries.push(
+                    MenuEntry::item("Copy selected text", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(part.clone())))
+                        .with_icon(Icon::Copy),
+                );
+            }
             let content = message.content.clone();
             entries.push(
                 MenuEntry::item("Copy text", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(content.clone())))
@@ -1861,6 +1906,20 @@ impl Render for ChatView {
 
         div()
             .id("chat")
+            .track_focus(&self.select_focus)
+            // A press anywhere ends the old selection first; a press on message text then
+            // starts a new one.
+            .capture_any_mouse_down(cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                if e.button == gpui::MouseButton::Left {
+                    this.set_selection(None, cx);
+                }
+            }))
+            .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                let k = &e.keystroke;
+                if k.key == "c" && (k.modifiers.control || k.modifiers.platform) && !k.modifiers.shift && this.copy_selection(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .relative()
             .flex_1()
             .min_w_0()

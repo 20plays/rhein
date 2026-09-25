@@ -9,6 +9,7 @@ pub mod message_text;
 pub mod panels;
 pub mod profile;
 pub mod rows;
+pub mod select;
 pub mod settings;
 pub mod shell;
 pub mod status;
