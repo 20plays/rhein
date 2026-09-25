@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod chat;
 pub mod emoji_picker;
+pub mod gif_picker;
 pub mod home;
 pub mod login;
 pub mod message_text;

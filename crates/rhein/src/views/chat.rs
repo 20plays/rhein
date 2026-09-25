@@ -24,6 +24,7 @@ use rhein_ui::{motion,
 };
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
+use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::rows::{RowCtx, format_size, message_key, render_row};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
@@ -48,6 +49,8 @@ pub struct ChatView {
     /// A thread shown in the side panel: this view is pinned to that channel.
     fixed: Option<String>,
     picker: Option<OpenPicker>,
+    /// The GIF favourites menu, where it is anchored, its subscriptions.
+    gif_picker: Option<(Entity<GifPicker>, Point<Pixels>, Vec<Subscription>)>,
     suggest: Option<Suggest>,
     menu: MenuHost,
     confirm_delete: Option<Message>,
@@ -178,6 +181,7 @@ impl ChatView {
             active_panel: None,
             fixed,
             picker: None,
+            gif_picker: None,
             suggest: None,
             menu: MenuHost::default(),
             confirm_delete: None,
@@ -548,6 +552,38 @@ impl ChatView {
         });
         self.picker = Some((picker, at, target, vec![sub, dismiss]));
         cx.notify();
+    }
+
+    pub(crate) fn open_gif_picker(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let picker = cx.new(|cx| GifPicker::new(self.client.clone(), window, cx));
+        let pick = cx.subscribe_in(&picker, window, |this, _, picked: &PickedGif, window, cx| {
+            this.gif_picker = None;
+            if let Some(channel) = this.current() {
+                let reply = this.replying.take();
+                let url = picked.0.clone();
+                this.client.update(cx, |c, cx| c.send_message(channel, url, reply, cx));
+            }
+            let focus = this.composer_focus(cx);
+            window.focus(&focus, cx);
+            cx.notify();
+        });
+        let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
+            this.gif_picker = None;
+            let focus = this.composer_focus(cx);
+            window.focus(&focus, cx);
+            cx.notify();
+        });
+        self.gif_picker = Some((picker, at, vec![pick, dismiss]));
+        cx.notify();
+    }
+
+    fn render_gif_picker(&self) -> Option<AnyElement> {
+        let (picker, at, _) = self.gif_picker.as_ref()?;
+        Some(
+            deferred(anchored().position(*at).anchor(Anchor::BottomRight).snap_to_window_with_margin(px(8.)).child(motion::pop_in(div().relative().child(picker.clone()), "gif-picker-in")))
+                .with_priority(2)
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn react_picker(&mut self, at: Point<Pixels>, message_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1300,6 +1336,25 @@ impl ChatView {
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
                     .child(
+                        div()
+                            .id("composer-gif")
+                            .h(px(28.))
+                            .px_1p5()
+                            .flex()
+                            .items_center()
+                            .rounded(radius::MD)
+                            .border_1()
+                            .border_color(t.text_faint)
+                            .text_color(t.text_muted)
+                            .text_size(text::XS)
+                            .font_weight(FontWeight::BOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(t.text).border_color(t.text_muted))
+                            .tooltip(rhein_ui::tooltip("Favourite GIFs"))
+                            .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.open_gif_picker(e.position(), window, cx)))
+                            .child("GIF"),
+                    )
+                    .child(
                         IconButton::new("composer-emoji", Icon::Smile)
                             .large()
                             .tooltip("Emoji")
@@ -1571,6 +1626,7 @@ impl Render for ChatView {
         let suggestions = self.render_suggestions(cx);
         let delete_confirm = self.render_delete_confirm(cx);
         let picker = self.render_picker();
+        let gif_picker = self.render_gif_picker();
         let drop_channel = channel_id.clone();
 
         div()
@@ -1610,6 +1666,7 @@ impl Render for ChatView {
             .children(lightbox)
             .children(delete_confirm)
             .children(picker)
+            .children(gif_picker)
             .children(self.menu.element())
             .into_any_element()
     }

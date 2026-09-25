@@ -223,6 +223,33 @@ impl Shell {
                     })
                     .detach();
                 }
+                // Favourites the demo's GIF once the keys are open, then opens the GIF menu
+                // (with RHEIN_DEV_UNLOCK for a restored session).
+                "gifs" => {
+                    cx.spawn_in(window, async move |this, cx| {
+                        for _ in 0..60 {
+                            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            let done = this
+                                .update_in(cx, |v, window, cx| {
+                                    if !v.client.read(cx).gif_favorites_ready() {
+                                        return false;
+                                    }
+                                    let gif = "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif";
+                                    if !v.client.read(cx).is_gif_favorite(gif) {
+                                        v.client.update(cx, |c, cx| c.toggle_gif_favorite(gif, cx));
+                                    }
+                                    let at = gpui::point(window.viewport_size().width - px(120.), window.viewport_size().height - px(70.));
+                                    v.chat.update(cx, |chat, cx| chat.open_gif_picker(at, window, cx));
+                                    true
+                                })
+                                .unwrap_or(true);
+                            if done {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 // Plays the first sound file in the open channel (run with RHEIN_AUDIO=null).
                 "play" => {
                     cx.spawn(async move |this, cx| {

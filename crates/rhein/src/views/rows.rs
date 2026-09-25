@@ -81,7 +81,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             continue;
         }
         match client.embed(channel_id, url) {
-            Some(EmbedState::Ready(embed)) => cards.push(embed_card(ctx, ix, cards.len(), embed, &t)),
+            Some(EmbedState::Ready(embed)) => cards.push(embed_card(ctx, ix, cards.len(), embed, &t, cx)),
             Some(EmbedState::Loading) => {}
             Some(EmbedState::Empty { retry_at }) if std::time::Instant::now() < *retry_at => {}
             _ => missing.push(url.clone()),
@@ -197,7 +197,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         })
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
         .when(message.edited_at.is_some(), |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("(edited)")))
-        .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t)))
+        .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t, cx)))
         .children(files.into_iter().map(|(i, a)| {
             if rhein_voice::playback::playable(&a.filename, &a.mime) {
                 sound_chip(ctx, ix, i, &message.id, a, &t, cx)
@@ -423,9 +423,39 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
     }
 }
 
-fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme) -> AnyElement {
+/// Whether a link is a GIF (a .gif, or a GIF provider's).
+fn is_gif_link(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
+    path.ends_with(".gif") || ["tenor.com/", "giphy.com/", "klipy.com/"].iter().any(|host| lower.contains(host))
+}
+
+/// The star over a GIF (shown while the pointer is on it): adds it to the favourites or takes it
+/// out.
+fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Theme, cx: &App) -> AnyElement {
+    let starred = ctx.client.read(cx).is_gif_favorite(&url);
+    let client = ctx.client.clone();
+    div()
+        .absolute()
+        .top_1p5()
+        .right_1p5()
+        .rounded(radius::MD)
+        .bg(t.bg_base)
+        .when(!starred, |d| d.invisible().group_hover(group, |s| s.visible()))
+        .child(
+            IconButton::new(SharedString::from(id), if starred { Icon::StarFilled } else { Icon::Star })
+                .active(starred)
+                .tooltip(if starred { "Remove from favourite GIFs" } else { "Add to favourite GIFs" })
+                .on_click(move |_, _, cx| client.update(cx, |c, cx| c.toggle_gif_favorite(&url, cx))),
+        )
+        .into_any_element()
+}
+
+fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
     let (w, aspect) = fit(a.width, a.height);
+    let group = SharedString::from(format!("img-group-{ix}-{i}"));
+    let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), group.clone(), url.clone(), t, cx));
     let view = ctx.view.clone();
     let (open, name) = (url.clone(), a.filename.clone());
     let fallback_name = a.filename.clone();
@@ -433,6 +463,8 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let raised = t.bg_raised;
     div()
         .id(SharedString::from(format!("img-{ix}-{i}")))
+        .group(group)
+        .relative()
         .max_w_full()
         // Known size: its natural width, keeping its shape when the column is narrower. Unknown:
         // the picture lays itself out once it has loaded.
@@ -468,6 +500,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
                         .into_any_element()
                 }),
         )
+        .children(star)
         .into_any_element()
 }
 
@@ -581,14 +614,19 @@ fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment
         .child(div().text_size(text::XS).text_color(t.text_faint).child(format_size(a.size)))
 }
 
-fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyElement {
+fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App) -> AnyElement {
     let view = ctx.view.clone();
     // Just a picture: show it like an attachment.
     if e.kind == EmbedKind::Image && e.title.is_none() && e.description.is_none() {
         let Some(image) = e.image.clone() else { return div().into_any_element() };
         let (open, name) = (image.clone(), e.url.clone());
+        // A GIF is kept by its picture's own link, which draws anywhere.
+        let group = SharedString::from(format!("embed-group-{ix}-{n}"));
+        let star = (is_gif_link(&image) || is_gif_link(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), group.clone(), image.clone(), t, cx));
         return div()
             .id(SharedString::from(format!("embed-{ix}-{n}")))
+            .group(group)
+            .relative()
             .max_w_full()
             .max_h(px(PICTURE_MAX_H))
             .rounded(radius::LG)
@@ -599,6 +637,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
                 view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
             })
             .child(img(image).max_w_full().max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
+            .children(star)
             .into_any_element();
     }
     let link = e.url.clone();

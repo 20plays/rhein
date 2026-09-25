@@ -21,6 +21,7 @@ use crate::io::{Io, join};
 
 mod call;
 mod dm_view;
+mod gifs;
 mod sound;
 pub use sound::{SoundSource, SoundView};
 pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
@@ -261,6 +262,9 @@ pub struct Client {
     artwork: HashMap<String, EmbedState>,
     /// The voice call we are in.
     call: Option<call::ActiveCall>,
+    /// The account's favourite GIFs (from the sealed sync store), newest first.
+    gif_favorites: Vec<String>,
+    sync: Option<std::sync::Arc<tokio::sync::Mutex<crate::sync_store::SyncStore>>>,
     /// The sound file loaded from a message.
     sound: Option<sound::Sound>,
     /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
@@ -346,6 +350,8 @@ impl Client {
             voice: HashMap::new(),
             call: None,
             sound: None,
+            gif_favorites: Vec::new(),
+            sync: None,
             null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             speaking_task: None,
             signin: None,
@@ -592,6 +598,7 @@ impl Client {
                         log::info!("DM keys: vault {}, cross-signed {}", status.vault_mode, status.cross_signed);
                         this.dm_error = None;
                         this.open_dm_engine(&status, cx);
+                        this.load_gif_favorites(cx);
                         this.dm = Some(status);
                     }
                     Err(err) => {
@@ -611,6 +618,8 @@ impl Client {
         self.signin = None;
         self.call = None;
         self.sound = None;
+        self.gif_favorites.clear();
+        self.sync = None;
         self.speaking_task = None;
         self.rpc = None;
         self.dm = None;
