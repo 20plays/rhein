@@ -51,8 +51,8 @@ impl Slot {
     }
 }
 
-/// What a mesh call tells its owner.
-pub enum MeshEvent {
+/// What a call (mesh or SFU) tells its owner.
+pub enum CallEvent {
     /// A relay payload for one peer, to go out through `/voice/signal`.
     Signal { target: String, payload: Value },
     /// A peer's media connection came up or went down.
@@ -85,11 +85,11 @@ pub struct Mesh {
     relay: bool,
     sources: [Option<MediaStreamTrack>; 4],
     peers: HashMap<String, Peer>,
-    events: mpsc::UnboundedSender<MeshEvent>,
+    events: mpsc::UnboundedSender<CallEvent>,
 }
 
 impl Mesh {
-    pub fn new(me: &str, factory: PeerConnectionFactory, ice: Vec<IceServer>, relay: bool) -> (Mesh, mpsc::UnboundedReceiver<MeshEvent>) {
+    pub fn new(me: &str, factory: PeerConnectionFactory, ice: Vec<IceServer>, relay: bool) -> (Mesh, mpsc::UnboundedReceiver<CallEvent>) {
         let (events, rx) = mpsc::unbounded_channel();
         let mesh = Mesh { me: me.to_owned(), factory, ice, relay, sources: Default::default(), peers: HashMap::new(), events };
         (mesh, rx)
@@ -133,7 +133,7 @@ impl Mesh {
     pub fn set_source(&mut self, slot: Slot, track: Option<MediaStreamTrack>) {
         for (user, peer) in &self.peers {
             if let Err(err) = put_source(&peer.transceivers[slot as usize], track.clone()) {
-                let _ = self.events.send(MeshEvent::Error(format!("{user}: {err}")));
+                let _ = self.events.send(CallEvent::Error(format!("{user}: {err}")));
             }
         }
         self.sources[slot as usize] = track;
@@ -172,7 +172,7 @@ impl Mesh {
                     self.peers.insert(user.to_owned(), peer);
                 }
                 Err(err) => {
-                    let _ = self.events.send(MeshEvent::Error(format!("{user}: {err}")));
+                    let _ = self.events.send(CallEvent::Error(format!("{user}: {err}")));
                     return None;
                 }
             }
@@ -213,7 +213,7 @@ impl Mesh {
                 "sdpMid": candidate.sdp_mid(),
                 "sdpMLineIndex": candidate.sdp_mline_index(),
             }});
-            let _ = events.send(MeshEvent::Signal { target: target.clone(), payload });
+            let _ = events.send(CallEvent::Signal { target: target.clone(), payload });
         })));
 
         let actor = Actor {
@@ -271,7 +271,7 @@ struct Actor {
     user: String,
     polite: bool,
     pc: PeerConnection,
-    events: mpsc::UnboundedSender<MeshEvent>,
+    events: mpsc::UnboundedSender<CallEvent>,
     pending: Vec<Value>,
     has_remote: bool,
     /// The remote description of the last completed negotiation.
@@ -294,22 +294,22 @@ impl Actor {
                 }
             };
             if let Err(err) = result {
-                let _ = self.events.send(MeshEvent::Error(format!("{}: {err}", self.user)));
+                let _ = self.events.send(CallEvent::Error(format!("{}: {err}", self.user)));
             }
             self.announce_tracks();
         }
         for slot in Slot::ALL {
             if self.receiving[slot as usize] {
-                let _ = self.events.send(MeshEvent::TrackEnded { from: self.user.clone(), slot });
+                let _ = self.events.send(CallEvent::TrackEnded { from: self.user.clone(), slot });
             }
         }
         if self.connected {
-            let _ = self.events.send(MeshEvent::Link { user: self.user.clone(), up: false });
+            let _ = self.events.send(CallEvent::Link { user: self.user.clone(), up: false });
         }
     }
 
     fn send(&self, payload: Value) {
-        let _ = self.events.send(MeshEvent::Signal { target: self.user.clone(), payload });
+        let _ = self.events.send(CallEvent::Signal { target: self.user.clone(), payload });
     }
 
     async fn offer(&mut self) -> anyhow::Result<()> {
@@ -382,7 +382,7 @@ impl Actor {
         let up = state == PeerConnectionState::Connected;
         if up != self.connected {
             self.connected = up;
-            let _ = self.events.send(MeshEvent::Link { user: self.user.clone(), up });
+            let _ = self.events.send(CallEvent::Link { user: self.user.clone(), up });
         }
         if state == PeerConnectionState::Failed {
             // The first failure is usually one lost candidate; the second is two networks with
@@ -391,7 +391,7 @@ impl Actor {
                 self.restarted = true;
                 self.pc.restart_ice();
             } else {
-                let _ = self.events.send(MeshEvent::Error(format!("no media path to {}; this call may need a TURN server", self.user)));
+                let _ = self.events.send(CallEvent::Error(format!("no media path to {}; this call may need a TURN server", self.user)));
             }
         }
     }
@@ -420,9 +420,9 @@ impl Actor {
                 let Some(track) = transceivers.iter().find(|t| t.mid().as_deref() == Some(mid.as_str())).and_then(|t| t.receiver().track()) else {
                     continue;
                 };
-                let _ = self.events.send(MeshEvent::Track { from, slot, track });
+                let _ = self.events.send(CallEvent::Track { from, slot, track });
             } else {
-                let _ = self.events.send(MeshEvent::TrackEnded { from, slot });
+                let _ = self.events.send(CallEvent::TrackEnded { from, slot });
             }
             self.receiving[slot as usize] = now;
         }

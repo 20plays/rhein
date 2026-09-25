@@ -4,6 +4,7 @@
 #
 #   scripts/dev-server.sh a     server_name "localhost",   http://localhost:8448
 #   scripts/dev-server.sh b     server_name "b.localhost", http://localhost:8449
+#   RHEIN_SFU=1 scripts/dev-server.sh a     the same with the dev SFU as its voice region
 #
 # Both instances federate with each other over plain HTTP through `federation.peers`, so the
 # second one can host guilds for accounts whose home is the first. Sign-in rate limits are raised
@@ -29,6 +30,15 @@ if [[ ! -x "$bin" ]]; then
   (cd "$clone/server" && cargo build)
 fi
 
+# With RHEIN_SFU=1 the voice region "local" is the SFU of scripts/dev-sfu.sh; without it there
+# is no region and calls are meshes. (A region that is down is still handed out when it is the
+# only one, so it is not left configured when no SFU runs.)
+if [[ "${RHEIN_SFU:-}" == 1 ]]; then
+  regions='[{ name = "local", sfu = "http://127.0.0.1:7890" }]'
+else
+  regions='[]'
+fi
+
 dir="$root/.dev/servers/$name"
 mkdir -p "$dir"
 cd "$dir"
@@ -41,6 +51,7 @@ sed -i \
   -e "s|^bind = .*|bind = \"127.0.0.1:$port\"|" \
   -e "/^\[federation\]/,/^\[/{s|^allow_http = .*|allow_http = true|}" \
   -e "/^\[rate_limit\]/,/^\[/{s|^auth_burst = .*|auth_burst = 1000|;s|^auth_per_sec = .*|auth_per_sec = 100.0|}" \
+  -e "/^\[voice\]/,/^\[/{s|^regions = .*|regions = $regions|}" \
   telium.toml
 # Where each logical server actually answers; a domain is an identity, not a hostname.
 python3 - telium.toml <<'EOF'

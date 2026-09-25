@@ -12,7 +12,7 @@ use livekit::webrtc::media_stream_track::MediaStreamTrack;
 use livekit::webrtc::peer_connection_factory::PeerConnectionFactory;
 use livekit::webrtc::peer_connection_factory::native::PeerConnectionFactoryExt as _;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions};
-use rhein_voice::mesh::{Mesh, MeshEvent, Slot};
+use rhein_voice::mesh::{Mesh, CallEvent, Slot};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 fn tone(factory: &PeerConnectionFactory, hz: f32) -> (MediaStreamTrack, tokio::task::JoinHandle<()>) {
@@ -65,13 +65,13 @@ async fn hears(track: MediaStreamTrack, hz: f64) -> bool {
 }
 
 /// Relays signals between the two while `work` runs.
-async fn pumping<T>(a: &mut Mesh, ea: &mut UnboundedReceiver<MeshEvent>, b: &mut Mesh, eb: &mut UnboundedReceiver<MeshEvent>, work: impl std::future::Future<Output = T>) -> T {
+async fn pumping<T>(a: &mut Mesh, ea: &mut UnboundedReceiver<CallEvent>, b: &mut Mesh, eb: &mut UnboundedReceiver<CallEvent>, work: impl std::future::Future<Output = T>) -> T {
     tokio::pin!(work);
     loop {
         tokio::select! {
             out = &mut work => return out,
-            Some(MeshEvent::Signal { payload, .. }) = ea.recv() => b.accept("@a:test", payload),
-            Some(MeshEvent::Signal { payload, .. }) = eb.recv() => a.accept("@b:test", payload),
+            Some(CallEvent::Signal { payload, .. }) = ea.recv() => b.accept("@a:test", payload),
+            Some(CallEvent::Signal { payload, .. }) = eb.recv() => a.accept("@b:test", payload),
         }
     }
 }
@@ -80,11 +80,11 @@ async fn pumping<T>(a: &mut Mesh, ea: &mut UnboundedReceiver<MeshEvent>, b: &mut
 /// true, else by `b`), returning that event.
 async fn pump(
     a: &mut Mesh,
-    ea: &mut UnboundedReceiver<MeshEvent>,
+    ea: &mut UnboundedReceiver<CallEvent>,
     b: &mut Mesh,
-    eb: &mut UnboundedReceiver<MeshEvent>,
-    mut stop: impl FnMut(bool, &MeshEvent) -> bool,
-) -> MeshEvent {
+    eb: &mut UnboundedReceiver<CallEvent>,
+    mut stop: impl FnMut(bool, &CallEvent) -> bool,
+) -> CallEvent {
     let wait = async {
         loop {
             let (at_a, event) = tokio::select! {
@@ -92,10 +92,10 @@ async fn pump(
                 Some(e) = eb.recv() => (false, e),
             };
             match event {
-                MeshEvent::Signal { payload, .. } => {
+                CallEvent::Signal { payload, .. } => {
                     if at_a { b.accept("@a:test", payload) } else { a.accept("@b:test", payload) }
                 }
-                MeshEvent::Error(err) => eprintln!("{} error: {err}", if at_a { "a" } else { "b" }),
+                CallEvent::Error(err) => eprintln!("{} error: {err}", if at_a { "a" } else { "b" }),
                 event if stop(at_a, &event) => return event,
                 _ => {}
             }
@@ -117,23 +117,23 @@ async fn two_peers_negotiate_and_hear_each_other() {
     // Both learn of each other at once, so both offer: glare, which the polite side yields.
     a.sync(["@a:test", "@b:test"]);
     b.sync(["@a:test", "@b:test"]);
-    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, MeshEvent::Track { slot: Slot::Mic, .. })).await;
-    let MeshEvent::Track { from, track, .. } = got else { unreachable!() };
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, CallEvent::Track { slot: Slot::Mic, .. })).await;
+    let CallEvent::Track { from, track, .. } = got else { unreachable!() };
     assert_eq!(from, "@a:test");
     assert!(pumping(&mut a, &mut ea, &mut b, &mut eb, hears(track, 440.)).await, "b hears a's tone");
 
     // b opens its microphone late: the m-line exists already, it is turned around.
     let (tone_b, feed_b) = tone(b.factory(), 660.);
     b.set_source(Slot::Mic, Some(tone_b));
-    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| at_a && matches!(e, MeshEvent::Track { slot: Slot::Mic, .. })).await;
-    let MeshEvent::Track { from, track, .. } = got else { unreachable!() };
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| at_a && matches!(e, CallEvent::Track { slot: Slot::Mic, .. })).await;
+    let CallEvent::Track { from, track, .. } = got else { unreachable!() };
     assert_eq!(from, "@b:test");
     assert!(pumping(&mut a, &mut ea, &mut b, &mut eb, hears(track, 660.)).await, "a hears b's tone");
 
     // And closes it again: the track ends on a's side.
     b.set_source(Slot::Mic, None);
-    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| at_a && matches!(e, MeshEvent::TrackEnded { .. })).await;
-    assert!(matches!(got, MeshEvent::TrackEnded { slot: Slot::Mic, .. }));
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| at_a && matches!(e, CallEvent::TrackEnded { .. })).await;
+    assert!(matches!(got, CallEvent::TrackEnded { slot: Slot::Mic, .. }));
 
     feed_a.abort();
     feed_b.abort();
@@ -172,8 +172,8 @@ async fn engines_carry_a_voice_through_the_mesh() {
         (thread, engine_a)
     };
 
-    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, MeshEvent::Track { slot: Slot::Mic, .. })).await;
-    let MeshEvent::Track { track: MediaStreamTrack::Audio(track), .. } = got else { panic!("audio track") };
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, CallEvent::Track { slot: Slot::Mic, .. })).await;
+    let CallEvent::Track { track: MediaStreamTrack::Audio(track), .. } = got else { panic!("audio track") };
     engine_b.add_voice("@a:test", track);
     let tap = engine_b.tap();
     let heard = pumping(&mut a, &mut ea, &mut b, &mut eb, async {

@@ -8,6 +8,7 @@ description = "Voice and video for Rhein: Telium's mesh calls and its LiveKit-ba
 [dependencies]
 rhein-proto.workspace = true
 cpal = "0.17"
+reqwest.workspace = true
 rtrb = "0.3"
 anyhow.workspace = true
 log.workspace = true
@@ -21,5 +22,4 @@ livekit-api = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e5
 env_logger.workspace = true
 rhein-net.workspace = true
 rhein-auth.workspace = true
-reqwest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

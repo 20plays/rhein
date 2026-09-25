@@ -17,7 +17,7 @@ use rhein_auth::{DeviceKey, SerenityKsf};
 use rhein_net::gateway::{self, GatewayConfig, GatewayHandle};
 use rhein_net::{Api, GatewayEvent, auth, discover};
 use rhein_proto::{Event, PresenceState, USER_INTENTS, VoiceServer};
-use rhein_voice::mesh::{self, Mesh, MeshEvent, Slot};
+use rhein_voice::mesh::{self, Mesh, CallEvent, Slot};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 async fn register(home: &Api, localpart: &str) -> auth::SignedIn {
@@ -37,7 +37,7 @@ struct Member {
     api: Api,
     _gateway: GatewayHandle,
     events: UnboundedReceiver<GatewayEvent>,
-    mesh: Option<(Mesh, UnboundedReceiver<MeshEvent>)>,
+    mesh: Option<(Mesh, UnboundedReceiver<CallEvent>)>,
     roster: HashSet<String>,
 }
 
@@ -139,15 +139,15 @@ async fn step(members: &mut [Member; 2]) -> Option<Seen> {
             _ => {}
         },
         Ok(_) => {}
-        Err(MeshEvent::Signal { target, payload }) => {
+        Err(CallEvent::Signal { target, payload }) => {
             let channel = CHANNEL.with(|c| c.borrow().clone());
             if let Err(err) = me.api.voice_signal(&channel, &target, &payload).await {
                 eprintln!("signal to {target}: {err}");
             }
         }
-        Err(MeshEvent::Track { from, slot: Slot::Mic, track }) => return Some(Seen::Track { at, from, track }),
-        Err(MeshEvent::TrackEnded { from, slot: Slot::Mic }) => return Some(Seen::Ended { at, from }),
-        Err(MeshEvent::Error(err)) => eprintln!("{} mesh: {err}", me.user),
+        Err(CallEvent::Track { from, slot: Slot::Mic, track }) => return Some(Seen::Track { at, from, track }),
+        Err(CallEvent::TrackEnded { from, slot: Slot::Mic }) => return Some(Seen::Ended { at, from }),
+        Err(CallEvent::Error(err)) => eprintln!("{} mesh: {err}", me.user),
         Err(_) => {}
     }
     None
@@ -157,17 +157,18 @@ thread_local! {
     static CHANNEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
-#[tokio::test]
-async fn two_members_talk_over_a_server_mesh() {
+/// Two fresh accounts in a new guild with a voice channel, gateways up; `None` without
+/// `RHEIN_LIVE`.
+async fn two_in_a_guild(prefix: &str) -> Option<([Member; 2], String, reqwest::Client)> {
     let Ok(server) = std::env::var("RHEIN_LIVE") else {
         eprintln!("RHEIN_LIVE not set; skipping");
-        return;
+        return None;
     };
     let http = reqwest::Client::new();
     let doc = discover(&http, &server).await.expect("discovery");
     let tag = std::process::id();
     let (home_a, home_b) = (Api::new(http.clone(), &doc.api, None), Api::new(http.clone(), &doc.api, None));
-    let (sa, sb) = (register(&home_a, &format!("va{tag}")).await, register(&home_b, &format!("vb{tag}")).await);
+    let (sa, sb) = (register(&home_a, &format!("{prefix}a{tag}")).await, register(&home_b, &format!("{prefix}b{tag}")).await);
 
     let a = member(&http, &doc, &sa, &home_a).await;
     let guild = a.api.create_guild("Rhein voice").await.expect("guild");
@@ -182,16 +183,26 @@ async fn two_members_talk_over_a_server_mesh() {
     for m in members.iter_mut() {
         m.ready().await;
     }
-    CHANNEL.with(|c| *c.borrow_mut() = voice.id.clone());
+    Some((members, voice.id, http))
+}
 
-    // Both join. The dev server has no SFU region, so the answer is a mesh.
+#[tokio::test]
+async fn two_members_talk_over_a_server_mesh() {
+    let Some((mut members, voice_id, _)) = two_in_a_guild("vm").await else { return };
+    CHANNEL.with(|c| *c.borrow_mut() = voice_id.clone());
+    // Both join. Without an SFU region (scripts/dev-server.sh without RHEIN_SFU) the answer is a
+    // mesh.
     let factory = PeerConnectionFactory::default();
     let (mic, feeder) = tone(&factory, 440.);
     for (i, m) in members.iter_mut().enumerate() {
-        let joined = m.api.voice_join(&voice.id, false, false, false, None).await.expect("join voice");
-        assert_eq!(joined.voice_state.channel_id.as_deref(), Some(voice.id.as_str()));
+        let joined = m.api.voice_join(&voice_id, false, false, false, None).await.expect("join voice");
+        assert_eq!(joined.voice_state.channel_id.as_deref(), Some(voice_id.as_str()));
         assert!(joined.voice_state.session_id.is_some());
-        let VoiceServer::Mesh { ice_servers, .. } = joined.voice_server else { panic!("expected a mesh") };
+        let VoiceServer::Mesh { ice_servers, .. } = joined.voice_server else {
+            eprintln!("the server has an SFU region; skipping the mesh test");
+            feeder.abort();
+            return;
+        };
         let (mut call, events) = Mesh::new(&m.user, factory.clone(), mesh::ice_servers(&ice_servers), false);
         if i == 0 {
             call.set_source(Slot::Mic, Some(mic.clone()));
@@ -201,7 +212,7 @@ async fn two_members_talk_over_a_server_mesh() {
     }
     // The first to join learned of the second from VOICE_STATE_UPDATE; the second also reads
     // the channel's roster, as a client does on joining.
-    let here = members[1].api.voice_channel(&voice.id).await.unwrap();
+    let here = members[1].api.voice_channel(&voice_id).await.unwrap();
     for state in here["voice_states"].as_array().unwrap() {
         members[1].roster.insert(state["user_id"].as_str().unwrap().to_owned());
     }
@@ -236,7 +247,7 @@ async fn two_members_talk_over_a_server_mesh() {
     assert!(heard, "b hears a's tone through the mesh");
 
     // a leaves: b's roster drops a, and with it the connection and the track.
-    let leave = format!("/channels/{}/voice/leave", voice.id);
+    let leave = format!("/channels/{voice_id}/voice/leave");
     let _: serde_json::Value = members[0].api.post_patiently(&leave, &serde_json::json!({})).await.expect("leave");
     members[0].mesh = None;
     let ended = tokio::time::timeout(Duration::from_secs(10), async {
@@ -250,5 +261,90 @@ async fn two_members_talk_over_a_server_mesh() {
     .expect("a's track ends for b");
     assert_eq!(ended, a_user);
     feeder.abort();
-    members[1].api.voice_leave(&voice.id).await.ok();
+    members[1].api.voice_leave(&voice_id).await.ok();
+}
+
+/// The same through the dev SFU (`scripts/dev-sfu.sh`, `RHEIN_SFU=1 scripts/dev-server.sh a`):
+/// the join token is spent at the SFU, both sit in its LiveKit room, and a's microphone (the
+/// audio engine's source, fed a tone) is heard in b's mix.
+#[tokio::test]
+async fn two_members_talk_through_the_sfu() {
+    use rhein_voice::audio::AudioEngine;
+    use rhein_voice::sfu::{self, SfuCall};
+    use rhein_voice::CallEvent;
+    let Some((members, voice_id, http)) = two_in_a_guild("vs").await else { return };
+    let engines = [std::sync::Arc::new(AudioEngine::headless().unwrap()), std::sync::Arc::new(AudioEngine::headless().unwrap())];
+    let mut calls = Vec::new();
+    for (m, engine) in members.iter().zip(&engines) {
+        let joined = m.api.voice_join(&voice_id, false, false, false, None).await.expect("join voice");
+        let VoiceServer::Sfu { endpoint, token, .. } = joined.voice_server else {
+            eprintln!("the server answered with a mesh (no SFU region); skipping the SFU test");
+            return;
+        };
+        let session = sfu::session(&http, &endpoint, &token).await.expect("SFU session");
+        assert!(session.max_bitrate.unwrap_or(0) > 0);
+        calls.push(SfuCall::connect(session, engine.microphone(), None).await.expect("join the room"));
+    }
+
+    // a speaks, in real time.
+    let speaking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let feeder = {
+        let (speaking, engine) = (speaking.clone(), engines[0].clone());
+        std::thread::spawn(move || {
+            let tone: Vec<i16> = (0..480 * 100).map(|i| ((i as f32 * 2. * std::f32::consts::PI * 440. / 48_000.).sin() * 8000.) as i16).collect();
+            let mut chunks = tone.chunks(480).cycle();
+            while speaking.load(std::sync::atomic::Ordering::Relaxed) {
+                engine.feed(chunks.next().unwrap());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+
+    let (_, b_events) = &mut calls[1];
+    let a_user = members[0].user.clone();
+    let track = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = b_events.recv().await {
+            if let CallEvent::Track { from, slot: Slot::Mic, track: MediaStreamTrack::Audio(track) } = event {
+                assert_eq!(from, a_user);
+                return track;
+            }
+        }
+        panic!("the call ended");
+    })
+    .await
+    .expect("b is sent a's microphone");
+    engines[1].add_voice(&a_user, track);
+    let tap = engines[1].tap();
+    let heard = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            match tap.try_recv() {
+                Ok(frame) if is_tone(&frame, 440.) => return true,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(heard, "b hears a's tone through the SFU");
+
+    // a hangs up: b loses the track.
+    let (a_call, _) = calls.remove(0);
+    a_call.close().await;
+    let _ = members[0].api.post_patiently::<_, serde_json::Value>(&format!("/channels/{voice_id}/voice/leave"), &serde_json::json!({})).await;
+    let (_, b_events) = &mut calls[0];
+    let gone = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = b_events.recv().await {
+            match event {
+                CallEvent::TrackEnded { from, .. } | CallEvent::Link { user: from, up: false } if from == members[0].user => return true,
+                _ => {}
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(gone, "a's track ends for b");
+    speaking.store(false, std::sync::atomic::Ordering::Relaxed);
+    feeder.join().unwrap();
 }
