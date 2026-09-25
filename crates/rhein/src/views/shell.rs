@@ -28,8 +28,8 @@ actions!(rhein_shell, [OpenSwitcher, OpenSettings, PrevChannel, NextChannel, Pre
 
 const SHELL_CONTEXT: &str = "Shell";
 
-/// The status line (40) + the composer's bottom padding (12) + the composer box (42).
-const PROFILE_STRIP_H: Pixels = px(88.);
+/// Who you are, at the foot of the sidebar; an activity you share gets a box as tall below it.
+const PROFILE_ROW_H: Pixels = px(54.);
 
 pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(SHELL_CONTEXT);
@@ -941,7 +941,8 @@ impl Shell {
         }
 
         // Opens upward from the strip's top edge, flush with the sidebar's left.
-        let at = gpui::point(px(8.), window.viewport_size().height - PROFILE_STRIP_H - px(4.));
+        let strip = if self.client.read(cx).shared_activities().is_empty() { PROFILE_ROW_H } else { PROFILE_ROW_H * 2. };
+        let at = gpui::point(px(8.), window.viewport_size().height - strip - px(4.));
         self.menu.show_anchored(at, gpui::Anchor::BottomLeft, px(280.), entries, |v: &mut Shell| &mut v.menu, window, cx);
     }
 
@@ -1639,70 +1640,68 @@ impl Shell {
             );
 
         // Your own activity: its picture may load directly, since it came from this machine.
-        let shared = match activity {
-            Some(a) => {
-                let glyph = match a.kind {
-                    2 => Icon::Music,
-                    1 | 3 => Icon::Monitor,
-                    _ => Icon::Gamepad,
-                };
-                let art = a.assets.as_ref().and_then(|x| x.large_image.clone());
-                let what = match a.kind {
-                    2 | 3 => a.details.clone().unwrap_or_else(|| a.name.clone()),
-                    _ => a.name.clone(),
-                };
-                let detail = match a.kind {
-                    2 | 3 => a.state.clone(),
-                    _ => a.details.clone(),
-                };
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(28.))
-                            .flex_none()
-                            .rounded(radius::SM)
-                            .bg(t.bg_selected)
-                            .overflow_hidden()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(match art {
-                                Some(url) => gpui::img(url).size(px(28.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
-                                None => icon_sized(glyph, px(14.)).text_color(t.text_faint).into_any_element(),
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .font_family(FONT_MONO)
-                                    .text_size(text::XS)
-                                    .line_height(px(14.))
-                                    .text_color(t.text_faint)
-                                    .truncate()
-                                    .child(format!("{} {}", a.verb().to_lowercase(), if matches!(a.kind, 2 | 3) { a.name.clone() } else { String::new() })),
-                            )
-                            .child(div().text_size(text::SM).line_height(px(16.)).text_color(t.text_muted).truncate().child(match detail {
-                                Some(d) => format!("{what} · {d}"),
-                                None => what,
-                            })),
-                    )
-                    .into_any_element()
-            }
-            None => div().px_1().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("no activity").into_any_element(),
-        };
+        let shared = activity.map(|a| {
+            let glyph = match a.kind {
+                2 => Icon::Music,
+                1 | 3 => Icon::Monitor,
+                _ => Icon::Gamepad,
+            };
+            let art = a.assets.as_ref().and_then(|x| x.large_image.clone());
+            let what = match a.kind {
+                2 | 3 => a.details.clone().unwrap_or_else(|| a.name.clone()),
+                _ => a.name.clone(),
+            };
+            let detail = match a.kind {
+                2 | 3 => a.state.clone(),
+                _ => a.details.clone(),
+            };
+            div()
+                .h(PROFILE_ROW_H)
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2p5()
+                .border_t_1()
+                .border_color(t.border)
+                .child(
+                    div()
+                        .size(px(40.))
+                        .flex_none()
+                        .rounded(radius::MD)
+                        .bg(t.bg_selected)
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(match art {
+                            Some(url) => gpui::img(url).size(px(40.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                            None => icon_sized(glyph, px(18.)).text_color(t.text_faint).into_any_element(),
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .font_family(FONT_MONO)
+                                .text_size(text::XS)
+                                .line_height(px(15.))
+                                .text_color(t.text_faint)
+                                .truncate()
+                                .child(format!("{} {}", a.verb().to_lowercase(), if matches!(a.kind, 2 | 3) { a.name.clone() } else { String::new() })),
+                        )
+                        .child(div().text_size(text::SM).line_height(px(17.)).font_weight(FontWeight::MEDIUM).truncate().child(what))
+                        .children(detail.map(|d| div().text_size(text::XS).line_height(px(15.)).text_color(t.text_muted).truncate().child(d))),
+                )
+        });
 
-        // As tall as the composer box plus the status line below it, so its top edge runs level
-        // with the composer's.
+        // Who you are sits in the bottom corner; an activity pushes it up and takes a box of the
+        // same height beneath it.
         div()
-            .h(PROFILE_STRIP_H)
             .flex_none()
             .flex()
             .flex_col()
@@ -1710,7 +1709,8 @@ impl Shell {
             .border_color(t.border)
             .child(
                 div()
-                    .flex_1()
+                    .h(PROFILE_ROW_H)
+                    .flex_none()
                     .px_2()
                     .flex()
                     .items_center()
@@ -1736,9 +1736,7 @@ impl Shell {
                             .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
                     ),
             )
-            // The activity row is as tall as the status line beside it, so the line between who
-            // you are and what you are doing continues the status line's.
-            .child(div().h(size::STATUS).flex_none().px_3().flex().items_center().border_t_1().border_color(t.border).child(div().flex_1().min_w_0().child(shared)))
+            .children(shared)
             .into_any_element()
     }
 
