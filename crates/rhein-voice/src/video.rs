@@ -98,8 +98,15 @@ pub struct VideoOut {
 }
 
 impl VideoOut {
+    /// Must be called inside a tokio runtime: the source keeps a task of its own there.
     pub fn new(width: u32, height: u32, screencast: bool) -> VideoOut {
         VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast) }
+    }
+
+    /// The same from any thread, with the runtime to run the source's task on.
+    pub fn new_in(runtime: &tokio::runtime::Handle, width: u32, height: u32, screencast: bool) -> VideoOut {
+        let _inside = runtime.enter();
+        Self::new(width, height, screencast)
     }
 
     pub fn source(&self) -> NativeVideoSource {
@@ -154,5 +161,25 @@ impl TestPattern {
 impl Drop for TestPattern {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A screen share makes its source on the capture thread, which has no runtime of its own
+    /// (it crashed the client when it tried without one).
+    #[test]
+    fn a_source_can_be_made_on_a_thread_without_a_runtime() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let handle = runtime.handle().clone();
+        std::thread::spawn(move || {
+            let out = VideoOut::new_in(&handle, 64, 36, true);
+            let picture = vec![128u8; 64 * 36 * 4];
+            out.send(&picture, 64 * 4, 64, 36);
+        })
+        .join()
+        .expect("no panic on the capture thread");
     }
 }

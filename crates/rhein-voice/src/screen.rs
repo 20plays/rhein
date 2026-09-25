@@ -87,6 +87,9 @@ impl ScreenShare {
     }
 
     fn capture(fps: u32, cursor: bool) -> Result<ScreenShare> {
+        // The video source runs a task of its own on tokio, and it is made in the capture
+        // callback, on the capture thread: that thread works inside the caller's runtime.
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| ShareError::Other("screen sharing has to start inside the call's runtime".into()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let ended = Arc::new(AtomicBool::new(false));
         // Sized once the first picture says how big the share is.
@@ -95,6 +98,7 @@ impl ScreenShare {
         std::thread::Builder::new()
             .name("rhein-screen".into())
             .spawn(move || {
+                let _runtime = runtime.enter();
                 let kind = if cfg!(target_os = "linux") { DesktopCaptureSourceType::Generic } else { DesktopCaptureSourceType::Screen };
                 let mut options = DesktopCapturerOptions::new(kind);
                 options.set_include_cursor(cursor);
@@ -104,22 +108,31 @@ impl ScreenShare {
                 };
                 let out: Arc<std::sync::Mutex<Option<VideoOut>>> = Arc::default();
                 let (sink, failed, first) = (out.clone(), over.clone(), first_tx.clone());
-                capturer.start_capture(None, move |result| match result {
-                    Ok(frame) => {
-                        let (w, h) = (frame.width() as u32, frame.height() as u32);
-                        let mut sink = sink.lock().unwrap();
-                        let video = sink.get_or_insert_with(|| {
-                            let video = VideoOut::new(w, h, true);
-                            let _ = first.send(Ok(video.clone()));
-                            video
-                        });
-                        video.send(frame.data(), frame.stride(), w, h);
-                    }
-                    Err(CaptureError::Temporary) => {}
-                    Err(CaptureError::Permanent) => {
+                let handle = runtime.clone();
+                capturer.start_capture(None, move |result| {
+                    // This runs inside C++: a panic here would abort the whole client, so it ends
+                    // the share instead.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match result {
+                        Ok(frame) => {
+                            let (w, h) = (frame.width() as u32, frame.height() as u32);
+                            let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+                            let video = sink.get_or_insert_with(|| {
+                                let video = VideoOut::new_in(&handle, w, h, true);
+                                let _ = first.send(Ok(video.clone()));
+                                video
+                            });
+                            video.send(frame.data(), frame.stride(), w, h);
+                        }
+                        Err(CaptureError::Temporary) => {}
+                        Err(CaptureError::Permanent) => {
+                            failed.store(true, Ordering::Relaxed);
+                            // The portal was there (checked above): this is the picker closed.
+                            let _ = first.send(Err(ShareError::Cancelled.into()));
+                        }
+                    }));
+                    if outcome.is_err() {
                         failed.store(true, Ordering::Relaxed);
-                        // The portal was there (checked above): this is the picker closed.
-                        let _ = first.send(Err(ShareError::Cancelled.into()));
+                        let _ = first.send(Err(ShareError::Other("the screen capture failed".into()).into()));
                     }
                 });
                 let every = Duration::from_millis(1000 / fps.clamp(1, 60) as u64);

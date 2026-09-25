@@ -912,7 +912,7 @@ async fn drive(
         Some(privacy.effective(&me, roster))
     };
     loop {
-        let next = match server {
+        let next = match server.clone() {
             VoiceServer::Mesh { ice_servers, relay, .. } => {
                 let factory = PeerConnectionFactory::default();
                 let microphone: MediaStreamTrack = factory.create_audio_track("microphone", engine.microphone()).into();
@@ -964,6 +964,8 @@ async fn drive(
                                 let effective = greet(&mut privacy, &roster);
                                 call.set_relay(pinned(&privacy, effective));
                             }
+                            // The server repeats the join's answer over the gateway: not a move.
+                            Some(Command::Server(new)) if same_place(&server, &new) => {}
                             Some(Command::Server(new)) => break Some(new),
                             // A mesh guild call is DTLS peer to peer; its group matters on an SFU.
                             Some(Command::Watch { .. } | Command::GuildE2ee(_) | Command::GuildRoster(_)) => {}
@@ -1033,6 +1035,7 @@ async fn drive(
                                         }
                                         greet(&mut privacy, &roster);
                                     }
+                                    Some(Command::Server(new)) if same_place(&server, &new) => {}
                                     Some(Command::Server(new)) => break Some(new),
                                     Some(Command::Signal { from, payload }) => {
                                         if let Some(sealed) = payload.get("hello")
@@ -1112,6 +1115,15 @@ async fn drive(
             Some(new) => server = new,
             None => return,
         }
+    }
+}
+
+/// Whether a server update points where the call already is (same mode, same SFU).
+fn same_place(now: &VoiceServer, new: &VoiceServer) -> bool {
+    match (now, new) {
+        (VoiceServer::Mesh { .. }, VoiceServer::Mesh { .. }) => true,
+        (VoiceServer::Sfu { endpoint: a, .. }, VoiceServer::Sfu { endpoint: b, .. }) => a == b,
+        _ => false,
     }
 }
 
