@@ -227,9 +227,20 @@ impl RenderOnce for ListRow {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().truncate().child(self.label))
+                    // Two lines sit close together around the row's middle, not a full line
+                    // height apart.
+                    .when(two_lines, |d| d.gap(px(1.)))
+                    .child(div().truncate().when(two_lines, |d| d.line_height(px(17.))).child(self.label))
                     .when_some(subtitle, |d, sub| {
-                        d.child(div().truncate().text_size(text::XS).font_weight(FontWeight::NORMAL).text_color(t.text_faint).child(sub))
+                        d.child(
+                            div()
+                                .truncate()
+                                .text_size(text::XS)
+                                .line_height(px(14.))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(t.text_faint)
+                                .child(sub),
+                        )
                     }),
             )
             .children(self.trailing)
