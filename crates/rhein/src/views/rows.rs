@@ -93,6 +93,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         }
     }
 
+    let seen = client.dm_seen(channel_id) == Some(message.id.as_str());
+
     // GIF links: the picture itself (a share page once its provider has named it).
     let mut shares_missing = Vec::new();
     let mut gifs = Vec::new();
@@ -228,6 +230,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         }))
         .when(!gifs.is_empty(), |d| d.child(div().flex().flex_wrap().gap_2().children(gifs)))
         .children(cards)
+        // Your newest message the other side has read (read receipts on).
+        .when(seen, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("seen")))
         .when(failed, |d| {
             let (c1, c2) = (ctx.client.clone(), ctx.client.clone());
             let (ch1, id1, ch2, id2) = (ctx.channel_id.clone(), message.id.clone(), ctx.channel_id.clone(), message.id.clone());

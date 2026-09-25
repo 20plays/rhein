@@ -73,9 +73,12 @@ impl Client {
         log.loading = true;
         let io = self.io.clone();
         let conv = id.clone();
+        let signals = self.signals_for(&id);
+        let log = self.logs.entry(id.clone()).or_default();
         log.task = Some(cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move {
                 let mut engine = engine.lock().await;
+                engine.signals = signals;
                 engine.sync(&api, &conv).await?;
                 Ok(engine.conversation(&conv).cloned().unwrap_or_default())
             }))
@@ -101,6 +104,10 @@ impl Client {
     /// Mirrors a conversation's decrypted state into its log.
     fn apply_dm(&mut self, id: &str, state: ConversationState, cx: &mut Context<Self>) {
         let me = self.user_id().unwrap_or_default().to_owned();
+        match state.seen_upto(&me).filter(|_| self.signal("read", Some(id), false)) {
+            Some(seen) => self.dm_seen.insert(id.to_owned(), seen),
+            None => self.dm_seen.remove(id),
+        };
         let messages: Vec<Message> = state
             .messages
             .iter()
@@ -163,6 +170,7 @@ impl Client {
         } else {
             cx.emit(ClientEvent::MessagesReset { channel_id: id.to_owned() });
         }
+        self.note_dm_read(id, cx);
         cx.notify();
     }
 

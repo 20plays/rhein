@@ -62,6 +62,33 @@ pub struct ConversationState {
     pub call_sfu: Option<String>,
     /// Why the walk stopped, if it did.
     pub error: Option<String>,
+    /// How far each other member has read (their read receipts, kept only while ours are on).
+    pub read_by: BTreeMap<String, String>,
+    /// The last message our own read receipt named.
+    pub sent_read: Option<String>,
+}
+
+impl ConversationState {
+    /// Our newest message that someone else has read, for the "Seen" under it.
+    pub fn seen_upto(&self, me: &str) -> Option<String> {
+        let furthest = self.read_by.iter().filter(|(user, _)| *user != me).filter_map(|(_, id)| self.messages.iter().position(|m| m.id == *id)).max()?;
+        self.messages[..=furthest].iter().rev().find(|m| m.sender == me && !m.deleted).map(|m| m.id.clone())
+    }
+}
+
+/// What this account says about its reading in a conversation (the web client's
+/// `store/signals.js`): read receipts are off unless turned on, delivery acknowledgements on
+/// unless turned off. Each is reciprocal: turned off, the others' are not kept either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signals {
+    pub read: bool,
+    pub delivered: bool,
+}
+
+impl Default for Signals {
+    fn default() -> Self {
+        Signals { read: false, delivered: true }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -114,6 +141,8 @@ pub struct Engine {
     mirror_out: Vec<(String, String, Value)>,
     provider_path: PathBuf,
     state_path: PathBuf,
+    /// The account's receipt choices for the conversation being worked on (set before each use).
+    pub signals: Signals,
 }
 
 /// Who could not be added when building or growing a group.
@@ -156,6 +185,7 @@ impl Engine {
             mirror_out: Vec::new(),
             provider_path,
             state_path,
+            signals: Signals::default(),
         })
     }
 
@@ -647,7 +677,7 @@ impl Engine {
             });
             self.publish_group_info(api, conversation).await;
             // A delivery acknowledgement, as the web client sends one: this device has it.
-            if let Some((id, seq)) = delivered {
+            if let Some((id, seq)) = delivered.filter(|_| self.signals.delivered) {
                 let ack = json!({ "device": self.device_id, "seq": seq, "id": id });
                 if let Err(err) = self.send(api, conversation, Payload::Delivered(ack)).await {
                     log::info!("delivery acknowledgement: {err:#}");
@@ -659,9 +689,27 @@ impl Engine {
         Ok(synced)
     }
 
+    /// Tells the conversation we have read everything in it so far (a read receipt, as the web
+    /// client sends one), when receipts are on and there is something newer than the last one.
+    pub async fn mark_read(&mut self, api: &Api, conversation: &str) -> Result<()> {
+        if !self.signals.read || self.group(conversation).is_none() {
+            return Ok(());
+        }
+        let Some(state) = self.stored.conversations.get(conversation) else { return Ok(()) };
+        let Some(last) = state.messages.iter().rev().find(|m| !m.deleted).map(|m| m.id.clone()) else { return Ok(()) };
+        if state.sent_read.as_deref() == Some(last.as_str()) {
+            return Ok(());
+        }
+        self.send(api, conversation, Payload::Receipt(json!({ "read": last }))).await?;
+        self.stored.conversations.entry(conversation.to_owned()).or_default().sent_read = Some(last);
+        self.save()?;
+        Ok(())
+    }
+
     /// Folds one decrypted payload into the conversation. Returns whether it was a message.
     fn absorb(&mut self, conversation: &str, frame: &Value, sender: &str, device: &str, payload: Payload) -> bool {
         let id = frame["id"].as_str().unwrap_or_default().to_owned();
+        let (signals, me) = (self.signals, self.user_id.clone());
         let state = self.stored.conversations.entry(conversation.to_owned()).or_default();
         let author_of = |state: &ConversationState, target: &str| state.messages.iter().find(|m| m.id == target).map(|m| m.sender.clone());
         match payload {
@@ -716,6 +764,19 @@ impl Engine {
             }
             Payload::CallSfu { endpoint } => {
                 state.call_sfu = endpoint.filter(|e| (e.starts_with("https://") || e.starts_with("http://")) && e.len() <= 512);
+            }
+            // How far someone has read, kept only while we send our own, and only forward.
+            Payload::Receipt(receipt) if signals.read && sender != me => {
+                if let Some(read) = receipt["read"].as_str() {
+                    let at = |id: &str| state.messages.iter().position(|m| m.id == id);
+                    let ahead = match state.read_by.get(sender) {
+                        Some(held) => at(read) > at(held),
+                        None => true,
+                    };
+                    if ahead && at(read).is_some() {
+                        state.read_by.insert(sender.to_owned(), read.to_owned());
+                    }
+                }
             }
             _ => {}
         }

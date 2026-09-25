@@ -18,6 +18,12 @@ pub struct Profile {
     pub accent_color: Option<u32>,
     /// 0xRRGGBB top and bottom of the card's border and background gradient.
     pub theme_colors: Option<[u32; 2]>,
+    /// The public profile page (`/u/{user}`) is served; on unless turned off.
+    pub public_page_enabled: Option<bool>,
+    /// It shows the presence and custom status; off unless turned on.
+    pub public_status_enabled: Option<bool>,
+    /// It shows the activity; off unless turned on.
+    pub public_activity_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

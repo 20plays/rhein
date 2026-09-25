@@ -22,6 +22,7 @@ enum Section {
     Servers,
     Appearance,
     Notifications,
+    Privacy,
     Activity,
     Encryption,
     Voice,
@@ -30,12 +31,13 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 10] = [
+    const ALL: [Section; 11] = [
         Section::Account,
         Section::Devices,
         Section::Servers,
         Section::Appearance,
         Section::Notifications,
+        Section::Privacy,
         Section::Activity,
         Section::Encryption,
         Section::Voice,
@@ -50,6 +52,7 @@ impl Section {
             Section::Servers => "Servers",
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
+            Section::Privacy => "Messages & privacy",
             Section::Activity => "Activity",
             Section::Encryption => "Encryption",
             Section::Voice => "Voice",
@@ -65,6 +68,7 @@ impl Section {
             Section::Servers => Icon::Server,
             Section::Appearance => Icon::Palette,
             Section::Notifications => Icon::Bell,
+            Section::Privacy => Icon::Shield,
             Section::Activity => Icon::Gamepad,
             Section::Encryption => Icon::Lock,
             Section::Voice => Icon::Mic,
@@ -1059,6 +1063,67 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// What conversations are told about your reading, and what your public profile page shows.
+    fn privacy(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let me = self.client.read(cx).user_id().unwrap_or_default().to_owned();
+        let profile = self.client.update(cx, |c, cx| c.profile(&me, cx));
+        let public = |field: &'static str, id: &'static str, on: bool| {
+            let client = self.client.clone();
+            Switch::new(id, on)
+                .on_toggle(move |on, _, cx| {
+                    client.update(cx, |c, cx| c.save_profile(serde_json::json!({ field: on }), |result, _| {
+                        if let Err(e) = result {
+                            log::warn!("profile privacy: {e}");
+                        }
+                    }, cx))
+                })
+                .into_any_element()
+        };
+        let page = profile.as_ref().and_then(|p| p.public_page_enabled).unwrap_or(true);
+        let status = profile.as_ref().and_then(|p| p.public_status_enabled).unwrap_or(false);
+        let activity = profile.as_ref().and_then(|p| p.public_activity_enabled).unwrap_or(false);
+        let link = format!("https://app.telium.chat/u/{me}");
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("In conversations", t))
+            .child(setting_row(
+                t,
+                "Send and receive read receipts",
+                "Tell a conversation when you have read it, and see when others have. Off, you see no one's either.",
+                account_switch(&self.client, "signal-read", &["signals", "read"], false, cx),
+            ))
+            .child(setting_row(
+                t,
+                "Acknowledge delivery",
+                "Let senders know this device has their message. Off, you don't see theirs either.",
+                account_switch(&self.client, "signal-delivered", &["signals", "delivered"], true, cx),
+            ))
+            .child(setting_row(t, "Show when I am typing", "Others in a conversation see that you are writing.", account_switch(&self.client, "signal-typing", &["signals", "typing"], true, cx)))
+            .child(heading("Public profile link", t))
+            .child(setting_row(t, "Enable public profile link", "Anyone with your profile URL can see your public profile without signing in.", public("public_page_enabled", "public-page", page)))
+            .child(div().when(!page, |d| d.opacity(0.5)).child(setting_row(
+                t,
+                "Show status",
+                "Publish your presence and custom status. Anyone with the link can refresh it to see when you are at your computer.",
+                public("public_status_enabled", "public-status", status),
+            )))
+            .child(div().when(!page, |d| d.opacity(0.5)).child(setting_row(
+                t,
+                "Show activity",
+                "Publish what you are doing to anyone with the link, including whatever the reporting app sends.",
+                public("public_activity_enabled", "public-activity", activity),
+            )))
+            .child(
+                div().pt_1().flex().child(Button::new("copy-public-link", "Copy public profile link").icon(Icon::Copy).on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+                })),
+            )
+            .child(div().pt_2().text_size(text::SM).text_color(t.text_faint).child("Public profile pages are never indexed by search engines. The conversation choices follow your account to your other devices."))
+            .into_any_element()
+    }
+
     /// Rich presence: what is shared, from which sources, and what is being shared right now.
     fn activity_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
@@ -1379,6 +1444,7 @@ impl Render for SettingsView {
             Section::Servers => self.servers_section(&t, cx),
             Section::Appearance => self.appearance(&t, cx),
             Section::Notifications => self.notifications(&t, cx),
+            Section::Privacy => self.privacy(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
             Section::Encryption => self.encryption_section(&t, cx),
             Section::Voice => self.voice_section(&t, cx),

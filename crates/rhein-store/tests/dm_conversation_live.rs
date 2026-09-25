@@ -86,6 +86,23 @@ async fn two_accounts_and_a_new_device() {
     assert_eq!(texts(&eb, &id)[0], "hello, B");
     assert_eq!(texts(&ea, &id)[0], "hello, B");
 
+    // Read receipts are kept only while one's own are on: A (off) keeps none of B's...
+    eb.signals.read = true;
+    eb.mark_read(&b_home, &id).await.unwrap();
+    ea.sync(&a_home, &id).await.unwrap();
+    assert_eq!(ea.conversation(&id).unwrap().seen_upto(&a_user), None);
+    // ...and with them on sees how far B has read.
+    ea.signals.read = true;
+    let asked = ea.send(&a_home, &id, Payload::Message("are you there?".into())).await.unwrap();
+    eb.sync(&b_home, &id).await.unwrap();
+    eb.mark_read(&b_home, &id).await.unwrap();
+    ea.sync(&a_home, &id).await.unwrap();
+    assert_eq!(ea.conversation(&id).unwrap().seen_upto(&a_user).as_deref(), Some(asked.as_str()));
+    // Nothing new read: no second receipt.
+    let before = eb.conversation(&id).unwrap().sent_read.clone();
+    eb.mark_read(&b_home, &id).await.unwrap();
+    assert_eq!(eb.conversation(&id).unwrap().sent_read, before);
+
     // An encrypted attachment: sealed, uploaded, opened on the other side.
     ea.send_message(&a_home, &id, "a file", vec![("note.txt".into(), "text/plain".into(), b"secret bytes".to_vec())], None).await.unwrap();
     eb.sync(&b_home, &id).await.unwrap();
@@ -108,7 +125,7 @@ async fn two_accounts_and_a_new_device() {
     assert!(ea2.has_group(&id), "the new device let itself in");
     // History from before this device joined comes back from the account's sealed mirror, with
     // A's edit applied and B's reaction.
-    assert_eq!(texts(&ea2, &id), ["hello, B", "hi A", "a file"]);
+    assert_eq!(texts(&ea2, &id), ["hello, B", "hi A", "are you there?", "a file"]);
     assert_eq!(ea2.conversation(&id).unwrap().reactions[&hello]["👍"], std::slice::from_ref(&b_user));
     eb.sync(&b_home, &id).await.expect("b sees the external commit");
     eb.send(&b_home, &id, Payload::Message("welcome back".into())).await.unwrap();

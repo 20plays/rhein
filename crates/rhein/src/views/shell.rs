@@ -152,12 +152,12 @@ impl Shell {
             })
         };
         let active = window.is_window_active();
-        client.update(cx, |c, _| c.set_window_active(active));
+        client.update(cx, |c, cx| c.set_window_active(active, cx));
         let subs = vec![
             // Alerts come only while the window is in the background.
             cx.observe_window_activation(window, |this, window, cx| {
                 let active = window.is_window_active();
-                this.client.update(cx, |c, _| c.set_window_active(active));
+                this.client.update(cx, |c, cx| c.set_window_active(active, cx));
             }),
             {
                 let (last, client) = (last_input.clone(), client.clone());

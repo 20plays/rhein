@@ -24,6 +24,7 @@ mod dm_view;
 mod account_prefs;
 mod gifs;
 mod notify;
+mod signals;
 mod sound;
 pub use gifs::GifShare;
 pub use sound::{SoundSource, SoundView};
@@ -271,6 +272,10 @@ pub struct Client {
     window_active: bool,
     /// Sounds, the ringing call and their pacing.
     alerts: notify::Alerts,
+    /// Per conversation, our newest message someone else has read.
+    dm_seen: HashMap<String, String>,
+    /// The read receipt waiting to go out.
+    read_flush: Option<Task<()>>,
     /// No input to the window for a while: shown as idle (see `effective_status`).
     auto_idle: bool,
     /// The account's favourite GIFs (from the sealed sync store), newest first.
@@ -366,6 +371,8 @@ impl Client {
             auto_idle: false,
             window_active: true,
             alerts: notify::Alerts::default(),
+            dm_seen: HashMap::new(),
+            read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
@@ -639,6 +646,8 @@ impl Client {
         self.gif_favorites.clear();
         self.gif_shares.clear();
         self.alerts = notify::Alerts::default();
+        self.dm_seen.clear();
+        self.read_flush = None;
         self.account_prefs = serde_json::Value::Object(Default::default());
         self.sync = None;
         self.speaking_task = None;
@@ -2829,6 +2838,9 @@ impl Client {
 
     pub fn send_typing(&mut self, channel_id: &str) {
         if self.is_dm(channel_id) {
+            if !self.signal("typing", Some(channel_id), true) {
+                return;
+            }
             // Through the home server's gateway, which relays it to the conversation.
             let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
             if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {
