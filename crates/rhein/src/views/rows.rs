@@ -20,8 +20,14 @@ const QUICK_REACTIONS: [&str; 1] = ["👍"];
 /// Room kept free on the right of every message for the hover action bar, so the bar never
 /// covers text: one quick reaction, add reaction, reply and "more", at 28 px each, plus padding.
 const ACTION_BAR_W: f32 = 4. * 28. + 14.;
+/// Link previews and embed cards.
 const IMAGE_MAX_W: f32 = 400.;
 const IMAGE_MAX_H: f32 = 300.;
+/// Pictures sent as themselves are shown whole, as wide as the column allows and at most this
+/// high.
+const PICTURE_MAX_H: f32 = 420.;
+/// A picture of unknown size, until it loads.
+const PICTURE_UNKNOWN: (f32, f32) = (400., 300.);
 
 pub struct RowCtx {
     pub client: Entity<Client>,
@@ -399,21 +405,21 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, t: &Theme) -> AnyElemen
         .into_any_element()
 }
 
-/// Fits the picture into the preview box, keeping its aspect ratio when the size is known.
-fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Pixels) {
+/// The natural size of a picture, scaled down to the height limit; its aspect ratio when known.
+fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
     match (width, height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => {
             let (w, h) = (w as f32, h as f32);
-            let scale = (IMAGE_MAX_W / w).min(IMAGE_MAX_H / h).min(1.0);
-            (px((w * scale).max(16.)), px((h * scale).max(16.)))
+            let scale = (PICTURE_MAX_H / h).min(1.0);
+            (px((w * scale).max(16.)), Some(w / h))
         }
-        _ => (px(IMAGE_MAX_W), px(IMAGE_MAX_H * 0.75)),
+        _ => (px(PICTURE_UNKNOWN.0), None),
     }
 }
 
 fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme) -> AnyElement {
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
-    let (w, h) = fit(a.width, a.height);
+    let (w, aspect) = fit(a.width, a.height);
     let view = ctx.view.clone();
     let (open, name) = (url.clone(), a.filename.clone());
     let fallback_name = a.filename.clone();
@@ -421,9 +427,13 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let raised = t.bg_raised;
     div()
         .id(SharedString::from(format!("img-{ix}-{i}")))
-        .w(w)
         .max_w_full()
-        .h(h)
+        // Known size: its natural width, keeping its shape when the column is narrower. Unknown:
+        // the picture lays itself out once it has loaded.
+        .map(|d| match aspect {
+            Some(ratio) => d.w(w).aspect_ratio(ratio),
+            None => d,
+        })
         .rounded(radius::LG)
         .overflow_hidden()
         .bg(t.bg_raised)
@@ -434,9 +444,12 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
         })
         .child(
             img(url)
-                .size_full()
-                .object_fit(ObjectFit::Cover)
-                .with_loading(move || div().size_full().bg(raised).into_any_element())
+                .map(|i| if aspect.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || {
+                    let placeholder = div().bg(raised);
+                    if aspect.is_some() { placeholder.size_full() } else { placeholder.w(px(PICTURE_UNKNOWN.0)).h(px(PICTURE_UNKNOWN.1)) }.into_any_element()
+                })
                 .with_fallback(move || {
                     div()
                         .size_full()
@@ -487,9 +500,8 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
         let (open, name) = (image.clone(), e.url.clone());
         return div()
             .id(SharedString::from(format!("embed-{ix}-{n}")))
-            .max_w(px(IMAGE_MAX_W))
-            .w_full()
-            .max_h(px(IMAGE_MAX_H))
+            .max_w_full()
+            .max_h(px(PICTURE_MAX_H))
             .rounded(radius::LG)
             .overflow_hidden()
             .cursor_pointer()
@@ -497,7 +509,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme) -> AnyEle
                 let (open, name) = (open.clone(), name.clone());
                 view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
             })
-            .child(img(image).max_w_full().max_h(px(IMAGE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(image).max_w_full().max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
             .into_any_element();
     }
     let link = e.url.clone();
