@@ -189,6 +189,10 @@ impl Shell {
                             }
                         })
                         .ok();
+                        // RHEIN_DEV_SHARE=1: then presses the screen share button.
+                        if std::env::var("RHEIN_DEV_SHARE").is_ok() {
+                            this.update(cx, |v, cx| v.client.update(cx, |c, cx| c.start_screen_share(cx))).ok();
+                        }
                         // Then watches whoever shares a screen.
                         cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
                         this.update(cx, |v, cx| {
@@ -1967,9 +1971,10 @@ impl Shell {
 
     fn toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let client = self.client.read(cx);
-        let (text, kind) = match (&client.error, &client.notice) {
-            (Some(e), _) => (e.clone(), ToastKind::Error),
-            (None, Some(n)) => (n.clone(), ToastKind::Info),
+        let (text, kind) = match (&client.error, &client.warning, &client.notice) {
+            (Some(e), _, _) => (e.clone(), ToastKind::Error),
+            (None, Some(w), _) => (w.clone(), ToastKind::Warning),
+            (None, None, Some(n)) => (n.clone(), ToastKind::Info),
             _ => return None,
         };
         let client = self.client.clone();

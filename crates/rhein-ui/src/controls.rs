@@ -247,6 +247,8 @@ pub fn section_label(label: impl Into<SharedString>, cx: &App) -> gpui::Div {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
+    /// Something is missing that the person can fix themselves.
+    Warning,
     Error,
 }
 
@@ -274,6 +276,7 @@ impl RenderOnce for Toast {
         let t = cx.theme();
         let (glyph, color) = match self.kind {
             ToastKind::Info => (Icon::Info, t.accent),
+            ToastKind::Warning => (Icon::CircleAlert, t.warning),
             ToastKind::Error => (Icon::CircleAlert, t.danger),
         };
         let toast = div()
@@ -292,8 +295,9 @@ impl RenderOnce for Toast {
             .gap_2()
             .text_size(text::MD)
             .text_color(t.text)
-            .child(icon(glyph).text_color(color))
-            .child(div().flex_1().child(self.text.clone()))
+            .when(matches!(self.kind, ToastKind::Warning), |d| d.border_color(color))
+            .child(icon(glyph).flex_none().text_color(color))
+            .child(div().flex_1().min_w_0().child(self.text.clone()))
             .when_some(self.on_dismiss, |d, h| {
                 d.child(
                     div()

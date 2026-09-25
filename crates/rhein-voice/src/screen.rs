@@ -25,11 +25,10 @@ pub enum ShareError {
 impl std::fmt::Display for ShareError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ShareError::NoPortal => f.write_str(
-                "Screen sharing needs a desktop portal that can capture the screen, and none is running. \
-                 On sway and other wlroots compositors install xdg-desktop-portal-wlr, then restart xdg-desktop-portal \
-                 (or log in again); elsewhere, the portal package of your desktop.",
-            ),
+            ShareError::NoPortal => match portal_package() {
+                Some(package) => write!(f, "To share your screen, install {package} and restart xdg-desktop-portal (or log in again)."),
+                None => f.write_str("To share your screen, install your desktop's xdg-desktop-portal backend and restart xdg-desktop-portal (or log in again)."),
+            },
             ShareError::Cancelled => f.write_str("The screen share was cancelled."),
             ShareError::Other(err) => f.write_str(err),
         }
@@ -37,6 +36,23 @@ impl std::fmt::Display for ShareError {
 }
 
 impl std::error::Error for ShareError {}
+
+/// The portal package that captures screens on this desktop, when it is a known one.
+fn portal_package() -> Option<&'static str> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+    let has = |name: &str| desktop.split(':').any(|d| d == name);
+    if has("hyprland") {
+        Some("xdg-desktop-portal-hyprland")
+    } else if has("kde") {
+        Some("xdg-desktop-portal-kde")
+    } else if has("gnome") || has("niri") {
+        Some("xdg-desktop-portal-gnome")
+    } else if has("sway") || has("wlroots") || has("river") || has("labwc") || has("wayfire") {
+        Some("xdg-desktop-portal-wlr")
+    } else {
+        None
+    }
+}
 
 /// Whether the session's desktop portal offers screen capture at all (asking it for the
 /// ScreenCast interface's version; a portal without a backend for it has no such interface).

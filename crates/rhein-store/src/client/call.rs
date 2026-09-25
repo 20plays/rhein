@@ -626,6 +626,11 @@ impl Client {
                     }
                     // A closed picker is the person's answer; anything else is worth saying.
                     Err(ShareError::Cancelled) => log::info!("screen share cancelled"),
+                    // A missing portal is a package away: a warning, not an error.
+                    Err(err @ ShareError::NoPortal) => {
+                        log::warn!("screen share not started: {err}");
+                        this.warning = Some(err.to_string().into());
+                    }
                     Err(err) => {
                         log::warn!("screen share not started: {err}");
                         this.error = Some(err.to_string().into());

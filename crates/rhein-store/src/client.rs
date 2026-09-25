@@ -228,6 +228,8 @@ pub struct Client {
     pub phase: Phase,
     pub error: Option<SharedString>,
     pub notice: Option<SharedString>,
+    /// Something missing that the person can fix themselves (a package to install).
+    pub warning: Option<SharedString>,
     pub home: Option<Home>,
     pub servers: Vec<Server>,
     pub guilds: Vec<GuildEntry>,
@@ -300,6 +302,7 @@ impl Client {
             phase: Phase::Restoring,
             error: None,
             notice: None,
+            warning: None,
             home: None,
             servers: Vec::new(),
             guilds: Vec::new(),
@@ -2859,6 +2862,7 @@ impl Client {
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.notice = None;
+        self.warning = None;
         cx.notify();
     }
 
