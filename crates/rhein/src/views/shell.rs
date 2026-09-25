@@ -223,6 +223,33 @@ impl Shell {
                     })
                     .detach();
                 }
+                // Plays the first sound file in the open channel (run with RHEIN_AUDIO=null).
+                "play" => {
+                    cx.spawn(async move |this, cx| {
+                        for _ in 0..40 {
+                            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            let started = this
+                                .update(cx, |v, cx| {
+                                    let client = v.client.read(cx);
+                                    let Some(channel) = client.selected_channel().map(str::to_owned) else { return false };
+                                    let found = client.logs.get(&channel).and_then(|log| {
+                                        log.messages.iter().find_map(|m| {
+                                            m.attachments.iter().enumerate().find(|(_, a)| rhein_voice::playback::playable(&a.filename, &a.mime)).map(|(i, a)| (m.id.clone(), i, a.clone()))
+                                        })
+                                    });
+                                    let Some((message, i, a)) = found else { return false };
+                                    let Some(url) = a.url.clone() else { return false };
+                                    v.client.update(cx, |c, cx| c.toggle_sound(format!("{message}#{i}"), rhein_store::SoundSource::Url(url), a.filename.clone(), cx));
+                                    true
+                                })
+                                .unwrap_or(true);
+                            if started {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
                 // The first private conversation, and its call (run with RHEIN_AUDIO=null).
                 "dmcall" => {
                     cx.spawn(async move |this, cx| {

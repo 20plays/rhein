@@ -8,6 +8,7 @@ description = "Voice and video for Rhein: Telium's mesh calls and its LiveKit-ba
 [dependencies]
 rhein-proto.workspace = true
 cpal = "0.17"
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "vorbis", "flac", "wav", "pcm", "ogg", "isomp4", "aac"] }
 zbus = "5"
 aes-gcm = "0.10"
 base64.workspace = true

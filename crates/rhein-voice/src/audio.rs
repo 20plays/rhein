@@ -92,7 +92,7 @@ fn worth_offering(id: &str) -> bool {
     matches!(name, "default" | "pipewire") || name.starts_with("sysdefault:") || name.starts_with("front:")
 }
 
-fn find_device(input: bool, id: Option<&str>) -> Option<cpal::Device> {
+pub(crate) fn find_device(input: bool, id: Option<&str>) -> Option<cpal::Device> {
     let host = cpal::default_host();
     if let Some(id) = id
         && let Ok(id) = id.parse()
@@ -599,7 +599,7 @@ fn db(peak: i16) -> f32 {
 }
 
 /// The device's config, at 48 kHz when it can do that.
-fn pick_config(device: &cpal::Device, input: bool) -> Result<cpal::SupportedStreamConfig> {
+pub(crate) fn pick_config(device: &cpal::Device, input: bool) -> Result<cpal::SupportedStreamConfig> {
     let ranges: Vec<_> = if input {
         device.supported_input_configs().map(|c| c.collect()).unwrap_or_default()
     } else {

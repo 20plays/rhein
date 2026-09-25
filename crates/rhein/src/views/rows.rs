@@ -198,7 +198,13 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
         .when(message.edited_at.is_some(), |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("(edited)")))
         .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t)))
-        .children(files.into_iter().map(|(i, a)| file_chip(ctx, ix, i, &message.id, a, &t)))
+        .children(files.into_iter().map(|(i, a)| {
+            if rhein_voice::playback::playable(&a.filename, &a.mime) {
+                sound_chip(ctx, ix, i, &message.id, a, &t, cx)
+            } else {
+                file_chip(ctx, ix, i, &message.id, a, &t).into_any_element()
+            }
+        }))
         .children(cards)
         .when(failed, |d| {
             let (c1, c2) = (ctx.client.clone(), ctx.client.clone());
@@ -461,6 +467,89 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
                         .child(format!("Couldn't load {fallback_name}"))
                         .into_any_element()
                 }),
+        )
+        .into_any_element()
+}
+
+/// A sound file: play and pause, where it is (click the bar to jump), how long it is.
+fn sound_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
+    let key = format!("{message_id}#{i}");
+    let state = ctx.client.read(cx).sound(&key);
+    let (playing, loading) = state.as_ref().map_or((false, false), |s| (s.playing, s.loading));
+    let (position, duration) = state.as_ref().map_or((0., None), |s| (s.position, s.duration));
+    let fraction = duration.filter(|d| *d > 0.).map_or(0., |d| (position / d).clamp(0., 1.)) as f32;
+    let clock = |secs: f64| format!("{}:{:02}", (secs / 60.) as u64, secs as u64 % 60);
+    let times = match (state.as_ref(), duration) {
+        (Some(s), _) if s.error.is_some() => s.error.clone().unwrap_or_default(),
+        (Some(_), Some(d)) => format!("{} / {}", clock(position), clock(d)),
+        (Some(s), None) if s.loading => "Loading…".to_owned(),
+        _ => format_size(a.size),
+    };
+    let source = match &a.url {
+        Some(url) => rhein_store::SoundSource::Url(url.clone()),
+        None => rhein_store::SoundSource::Dm { conversation: ctx.channel_id.clone(), message: message_id.to_owned(), index: i },
+    };
+    let (client, toggle_key, name) = (ctx.client.clone(), key.clone(), a.filename.clone());
+    let (seek_client, seek_key) = (ctx.client.clone(), key);
+    // Where the bar is on screen, for turning a click into a position.
+    let bar = std::rc::Rc::new(std::cell::Cell::new(None::<gpui::Bounds<Pixels>>));
+    let measured = bar.clone();
+    div()
+        .id(SharedString::from(format!("sound-{ix}-{i}")))
+        .w(px(420.))
+        .max_w_full()
+        .px_3()
+        .py_2()
+        .rounded(radius::MD)
+        .bg(t.bg_raised)
+        .border_1()
+        .border_color(t.border)
+        .flex()
+        .gap_3()
+        .items_center()
+        .child(
+            IconButton::new(SharedString::from(format!("sound-play-{ix}-{i}")), if playing { Icon::Pause } else { Icon::Play })
+                .tooltip(if playing { "Pause" } else { "Play" })
+                .on_click(move |_, _, cx| {
+                    let (key, source, name) = (toggle_key.clone(), source.clone(), name.clone());
+                    client.update(cx, |c, cx| c.toggle_sound(key, source, name, cx));
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().truncate().text_size(text::SM).text_color(t.text).child(a.filename.clone()))
+                        .child(div().flex_none().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(times)),
+                )
+                .child(
+                    div()
+                        .id(SharedString::from(format!("sound-bar-{ix}-{i}")))
+                        .relative()
+                        .h(px(6.))
+                        .w_full()
+                        .rounded_full()
+                        .bg(t.bg_selected)
+                        .when(state.is_some() && !loading, |d| d.cursor_pointer())
+                        .child(div().absolute().left_0().top_0().h_full().rounded_full().bg(t.accent).w(gpui::relative(fraction)))
+                        .child(
+                            gpui::canvas(move |bounds, _, _| measured.set(Some(bounds)), |_, _, _, _| {})
+                                .absolute()
+                                .inset_0(),
+                        )
+                        .on_mouse_down(gpui::MouseButton::Left, move |e, _, cx| {
+                            let Some(bounds) = bar.get() else { return };
+                            let fraction = ((e.position.x - bounds.left()) / bounds.size.width) as f64;
+                            seek_client.update(cx, |c, cx| c.seek_sound(&seek_key, fraction, cx));
+                        }),
+                ),
         )
         .into_any_element()
 }

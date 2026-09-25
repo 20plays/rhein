@@ -21,6 +21,8 @@ use crate::io::{Io, join};
 
 mod call;
 mod dm_view;
+mod sound;
+pub use sound::{SoundSource, SoundView};
 pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
 pub use rhein_voice::Slot;
 use crate::persist::{self, Saved};
@@ -259,6 +261,8 @@ pub struct Client {
     artwork: HashMap<String, EmbedState>,
     /// The voice call we are in.
     call: Option<call::ActiveCall>,
+    /// The sound file loaded from a message.
+    sound: Option<sound::Sound>,
     /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
     null_audio: bool,
     speaking_task: Option<Task<()>>,
@@ -341,6 +345,7 @@ impl Client {
             artwork: HashMap::new(),
             voice: HashMap::new(),
             call: None,
+            sound: None,
             null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             speaking_task: None,
             signin: None,
@@ -605,6 +610,7 @@ impl Client {
     fn reset(&mut self) {
         self.signin = None;
         self.call = None;
+        self.sound = None;
         self.speaking_task = None;
         self.rpc = None;
         self.dm = None;
