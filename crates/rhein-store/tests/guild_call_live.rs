@@ -273,30 +273,58 @@ async fn a_guild_call_on_the_sfu_is_encrypted_end_to_end() {
     call.a_api.voice_leave(&call.voice).await.ok();
 }
 
-/// A screen share in an encrypted guild call: not forwarded until b watches, then pictures.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_screen_share_waits_for_watch() {
+/// What b saw of a's screen: the widest picture, and whether any showed the pattern (bright,
+/// with its white bar) rather than black.
+struct Seen {
+    widest: (u32, u32),
+    patterned: bool,
+    black: usize,
+    pictures: usize,
+    /// Pictures after the SFU's own check of what everyone sends (every 10 s): a track over
+    /// its ceiling is muted there, and the viewer is left with black.
+    late: usize,
+}
+
+fn looks_like_the_pattern(picture: &rhein_voice::video::Picture) -> (bool, bool) {
+    let (pixels, _) = picture.bgra.as_chunks::<4>();
+    let n = (picture.bgra.len() / 4).max(1);
+    let (mut sum, mut white) = (0u64, 0usize);
+    for p in pixels {
+        let luma = (p[0] as u64 + p[1] as u64 + p[2] as u64) / 3;
+        sum += luma;
+        if p[0] > 220 && p[1] > 220 && p[2] > 220 {
+            white += 1;
+        }
+    }
+    let mean = sum / n as u64;
+    (mean < 8, mean > 40 && white * 100 / n >= 2)
+}
+
+/// a shares a `width`×`height` test pattern in an encrypted guild call; b watches, for a while.
+async fn share_and_look(tag: &str, width: u32, height: u32, check_early: bool) -> Option<Seen> {
     use rhein_voice::video::{TestPattern, VideoFeed, VideoOut};
-    let Some(call) = encrypted_call("gw").await else { return };
+    let call = encrypted_call(tag).await?;
     let engines = [AudioEngine::headless().unwrap(), AudioEngine::headless().unwrap()];
     let (mut a_call, _a_media) = SfuCall::connect(call.a_room.clone(), engines[0].microphone(), Some(e2ee::key_provider(&call.key.0, call.key.1))).await.unwrap();
     let (mut b_call, mut b_media) = SfuCall::connect(call.b_room.clone(), engines[1].microphone(), Some(e2ee::key_provider(&call.b_key.0, call.b_key.1))).await.unwrap();
-    let out = VideoOut::new(640, 360, true);
-    let _pattern = TestPattern::start(out.clone(), 640, 360);
-    call.a_api.voice_stream(&call.voice, true, Some("detail 360p@15")).await.expect("stream state");
+    let out = VideoOut::new(width, height, true);
+    let _pattern = TestPattern::start(out.clone(), width, height);
+    call.a_api.voice_stream(&call.voice, true, Some("detail")).await.expect("stream state");
     a_call.publish_video(Slot::Screen, out.source()).await.expect("publish the screen");
 
-    let early = tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(event) = b_media.recv().await {
-            if matches!(event, CallEvent::Track { slot: Slot::Screen, .. }) {
-                return true;
+    if check_early {
+        let early = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = b_media.recv().await {
+                if matches!(event, CallEvent::Track { slot: Slot::Screen, .. }) {
+                    return true;
+                }
             }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-    assert!(!early, "a screen share is not forwarded before Watch");
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(!early, "a screen share is not forwarded before Watch");
+    }
 
     call.b_api.voice_watch(&call.voice, &call.a.user, true, None).await.expect("watch");
     b_call.watch(&call.a.user, true);
@@ -310,19 +338,48 @@ async fn a_screen_share_waits_for_watch() {
     })
     .await
     .expect("the screen arrives once watched");
-    let feed = VideoFeed::start(track, 1920, 30);
-    let picture = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some((_, picture)) = feed.latest() {
-                return picture;
+    let feed = VideoFeed::start(track, 4096, 30);
+    let mut seen = Seen { widest: (0, 0), patterned: false, black: 0, pictures: 0, late: 0 };
+    let mut last = 0;
+    let began = tokio::time::Instant::now();
+    let until = began + Duration::from_secs(20);
+    while tokio::time::Instant::now() < until {
+        if let Some((n, picture)) = feed.latest()
+            && n != last
+        {
+            last = n;
+            seen.pictures += 1;
+            if began.elapsed() > Duration::from_secs(14) {
+                seen.late += 1;
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            if picture.width > seen.widest.0 {
+                seen.widest = (picture.width, picture.height);
+            }
+            let (black, patterned) = looks_like_the_pattern(&picture);
+            seen.black += black as usize;
+            seen.patterned |= patterned;
         }
-    })
-    .await
-    .expect("a picture of the screen, decrypted");
-    assert!(picture.width > 0 && picture.height > 0);
-    let _ = (&call.b, &call.b_key);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let _ = &call.b;
+    eprintln!("{width}x{height}: {} pictures ({} late), widest {:?}, {} black, pattern seen: {}", seen.pictures, seen.late, seen.widest, seen.black, seen.patterned);
     a_call.close().await;
     b_call.close().await;
+    Some(seen)
+}
+
+/// A screen share in an encrypted guild call: not forwarded until b watches, then the picture.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screen_share_waits_for_watch() {
+    let Some(seen) = share_and_look("gw", 640, 360, true).await else { return };
+    assert!(seen.patterned, "the shared screen shows");
+}
+
+/// A whole monitor's worth: full size, and the picture, not black.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_hd_screen_share_shows() {
+    let Some(seen) = share_and_look("hd", 1920, 1080, true).await else { return };
+    assert!(seen.patterned, "the shared screen shows, not black");
+    assert_eq!(seen.widest, (1920, 1080), "the viewer gets the full picture");
+    assert!(seen.late > 5, "still showing after the SFU checked the ceiling ({} late pictures)", seen.late);
 }

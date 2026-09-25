@@ -136,12 +136,14 @@ fn to_picture(buffer: &dyn VideoBuffer, max_width: u32) -> Picture {
 pub struct VideoOut {
     source: NativeVideoSource,
     preview: Option<PreviewSink>,
+    /// When it started: frames carry the time since, for the encoder's pacing.
+    started: std::time::Instant,
 }
 
 impl VideoOut {
     /// Must be called inside a tokio runtime: the source keeps a task of its own there.
     pub fn new(width: u32, height: u32, screencast: bool) -> VideoOut {
-        VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast), preview: None }
+        VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast), preview: None, started: std::time::Instant::now() }
     }
 
     /// Also shows what goes out, through `sink`.
@@ -170,7 +172,8 @@ impl VideoOut {
         if let Some(preview) = &self.preview {
             preview.offer(&i420);
         }
-        let frame = VideoFrame { rotation: VideoRotation::VideoRotation0, timestamp_us: 0, frame_metadata: None, buffer: i420 };
+        let timestamp_us = self.started.elapsed().as_micros() as i64;
+        let frame = VideoFrame { rotation: VideoRotation::VideoRotation0, timestamp_us, frame_metadata: None, buffer: i420 };
         self.source.capture_frame(&frame);
     }
 }

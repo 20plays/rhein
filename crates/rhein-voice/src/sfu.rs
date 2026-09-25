@@ -52,6 +52,9 @@ fn is_screen(source: TrackSource) -> bool {
 }
 
 /// One participant's side of an SFU call.
+/// The participant attribute the SFU stamps with its clamp of the guild's ceiling.
+const MAX_BITRATE_ATTRIBUTE: &str = "telium.max_bitrate";
+
 pub struct SfuCall {
     room: Room,
     session: SfuSession,
@@ -120,7 +123,16 @@ impl SfuCall {
         }
     }
 
-    /// Publishes a camera or a screen (simulcast, so each viewer gets the layer it can take).
+    /// The smallest publish ceiling in view: the one the SFU stamped on our participant (its clamp
+    /// of the guild's), and the one the session came with.
+    fn ceiling(&self) -> Option<u64> {
+        let stamped = self.room.local_participant().attributes().get(MAX_BITRATE_ATTRIBUTE).and_then(|v| v.parse::<u64>().ok());
+        [stamped, self.session.max_bitrate].into_iter().flatten().filter(|c| *c > 0).min()
+    }
+
+    /// Publishes a camera or a screen (simulcast, so each viewer gets the layer it can take),
+    /// within this participant's share of the ceiling: the SFU mutes a track whose layers
+    /// declare more (a full-HD screen with LiveKit's own presets did, and went out black).
     pub async fn publish_video(&mut self, slot: Slot, source: NativeVideoSource) -> Result<()> {
         self.unpublish(slot).await;
         let source_kind = match slot {
@@ -128,11 +140,22 @@ impl SfuCall {
             Slot::Screen => TrackSource::Screenshare,
             _ => return Err(anyhow!("{slot:?} is not a video slot")),
         };
+        let size = source.video_resolution();
+        let mut options = TrackPublishOptions { source: source_kind, simulcast: true, ..Default::default() };
+        if let Some(budget) = self.ceiling().and_then(crate::budget::budget) {
+            let screen = slot == Slot::Screen;
+            let (slice, fps) = if screen { (budget.screen, 15.) } else { (budget.camera, 30.) };
+            let ladder = crate::budget::ladder(size.width, size.height, fps, slice, screen);
+            log::info!("publishing {slot:?} {}x{} in {} of {} bit/s", size.width, size.height, ladder.declared, budget.total);
+            options.simulcast = !ladder.layers.is_empty();
+            options.video_encoding = Some(ladder.top);
+            options.simulcast_layers = Some(ladder.layers).filter(|l| !l.is_empty());
+        }
         let track = LocalVideoTrack::create_video_track(if slot == Slot::Screen { "screen" } else { "camera" }, RtcVideoSource::Native(source));
         let publication = self
             .room
             .local_participant()
-            .publish_track(LocalTrack::Video(track), TrackPublishOptions { source: source_kind, simulcast: true, ..Default::default() })
+            .publish_track(LocalTrack::Video(track), options)
             .await
             .context("publishing video")?;
         self.published.insert(slot, publication.sid());
