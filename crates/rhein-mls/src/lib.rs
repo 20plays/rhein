@@ -11,6 +11,7 @@
 //!
 //! Frames are whole `MLSMessage`s; callers base64 them for the wire.
 
+pub mod call_group;
 pub mod payload;
 pub mod policy;
 pub mod trust;
@@ -112,7 +113,7 @@ pub enum Processed {
 /// holds key packages and group states.
 pub struct Device {
     pub provider: OpenMlsRustCrypto,
-    signer: SignatureKeyPair,
+    pub(crate) signer: SignatureKeyPair,
     credential: CredentialWithKey,
 }
 
