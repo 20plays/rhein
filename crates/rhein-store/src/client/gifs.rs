@@ -31,6 +31,7 @@ impl Client {
         let (api, io) = (home.api.clone(), self.io.clone());
         let store = Arc::new(Mutex::new(SyncStore::new(&home.user_id, &ring)));
         self.sync = Some(store.clone());
+        self.load_account_prefs(cx);
         cx.spawn(async move |this, cx| {
             let loaded = join(io.spawn(async move { store.lock().await.load(&api, GIF_FAVORITES).await })).await;
             this.update(cx, |this, cx| match loaded {

@@ -8,7 +8,7 @@ use rhein_auth::{DeviceKey, SerenityKsf};
 use rhein_mls::vault;
 use rhein_net::{Api, auth, discover};
 use rhein_store::dm::{Secrets, bring_up};
-use rhein_store::sync_store::{GIF_FAVORITES, Loaded, SyncStore};
+use rhein_store::sync_store::{GIF_FAVORITES, Loaded, PREFS, SyncStore, update_prefs};
 use serde_json::json;
 
 #[tokio::test]
@@ -59,6 +59,17 @@ async fn gif_favourites_are_sealed_and_follow_the_account() {
     match other.load(&home2, GIF_FAVORITES).await.unwrap() {
         Loaded::Value(v) => assert_eq!(v, favorites),
         _ => panic!("the favourites should open on the second device"),
+    }
+
+    // Preferences another client wrote (the web's own fields) survive a change made here.
+    store.save(&home, PREFS, &json!({"theme": "light", "muted": {"c1": true}, "signals": {"typing": false}})).await.unwrap();
+    let path = ["signals".to_owned(), "read".to_owned()];
+    let saved = update_prefs(&mut other, &home2, json!({}), &path, Some(json!(true))).await.unwrap();
+    let expected = json!({"theme": "light", "muted": {"c1": true}, "signals": {"typing": false, "read": true}});
+    assert_eq!(saved, expected);
+    match store.load(&home, PREFS).await.unwrap() {
+        Loaded::Value(v) => assert_eq!(v, expected),
+        _ => panic!("the merged preferences should open on the first device"),
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

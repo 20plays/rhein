@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const GIF_FAVORITES: &str = "gif.favorites.v1";
+/// The account's shared preferences (an object; see `client::account_prefs`).
+pub const PREFS: &str = "prefs.v1";
 /// What the web client keeps at most.
 pub const MAX_GIF_FAVORITES: usize = 500;
 
@@ -92,6 +94,46 @@ impl SyncStore {
     }
 }
 
+/// Changes one field of the shared preferences on the account: reads the newest copy (falling
+/// back to `local` when the server has none, or an older one than this device has seen), writes
+/// `value` at `path` into it, leaving every other field alone, and saves it. Returns what was
+/// saved.
+pub async fn update_prefs(store: &mut SyncStore, api: &Api, local: Value, path: &[String], value: Option<Value>) -> Result<Value> {
+    let mut prefs = match store.load(api, PREFS).await? {
+        Loaded::Value(v) if v.is_object() => v,
+        _ => local,
+    };
+    set_path(&mut prefs, path, value);
+    store.save(api, PREFS, &prefs).await?;
+    Ok(prefs)
+}
+
+/// Writes `value` at `path` inside `prefs` (removes it for `None`), making objects on the way.
+pub fn set_path(prefs: &mut Value, path: &[String], value: Option<Value>) {
+    let Some((last, parents)) = path.split_last() else { return };
+    if !prefs.is_object() {
+        *prefs = Value::Object(Default::default());
+    }
+    let mut at = prefs;
+    for key in parents {
+        let map = at.as_object_mut().expect("made an object");
+        let next = map.entry(key.clone()).or_insert_with(|| Value::Object(Default::default()));
+        if !next.is_object() {
+            *next = Value::Object(Default::default());
+        }
+        at = next;
+    }
+    let map = at.as_object_mut().expect("made an object");
+    match value {
+        Some(v) => {
+            map.insert(last.clone(), v);
+        }
+        None => {
+            map.remove(last);
+        }
+    }
+}
+
 /// GIF favourites as the web client keeps them: https URLs, no duplicates, at most 500.
 pub fn clean_favorites(value: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -110,6 +152,20 @@ pub fn clean_favorites(value: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn a_change_keeps_every_other_field() {
+        let mut prefs = json!({"theme": "dark", "muted": {"c1": true}, "signals": {"typing": false}});
+        let path = |p: &[&str]| p.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        super::set_path(&mut prefs, &path(&["signals", "read"]), Some(json!(true)));
+        super::set_path(&mut prefs, &path(&["notifyDms"]), Some(json!(false)));
+        assert_eq!(prefs, json!({"theme": "dark", "muted": {"c1": true}, "signals": {"typing": false, "read": true}, "notifyDms": false}));
+        super::set_path(&mut prefs, &path(&["signals", "typing"]), None);
+        assert_eq!(prefs["signals"], json!({"read": true}));
+        let mut odd = json!({"network": 3});
+        super::set_path(&mut odd, &path(&["network", "mode"]), Some(json!("protected")));
+        assert_eq!(odd, json!({"network": {"mode": "protected"}}));
+    }
 
     #[test]
     fn favorites_are_https_urls_without_duplicates() {

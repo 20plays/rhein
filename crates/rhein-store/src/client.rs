@@ -21,6 +21,7 @@ use crate::io::{Io, join};
 
 mod call;
 mod dm_view;
+mod account_prefs;
 mod gifs;
 mod sound;
 pub use gifs::GifShare;
@@ -263,6 +264,8 @@ pub struct Client {
     artwork: HashMap<String, EmbedState>,
     /// The voice call we are in.
     call: Option<call::ActiveCall>,
+    /// The account's shared preferences (`prefs.v1`), as last read or written.
+    account_prefs: serde_json::Value,
     /// No input to the window for a while: shown as idle (see `effective_status`).
     auto_idle: bool,
     /// The account's favourite GIFs (from the sealed sync store), newest first.
@@ -356,6 +359,7 @@ impl Client {
             call: None,
             sound: None,
             auto_idle: false,
+            account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
             sync: None,
@@ -627,6 +631,7 @@ impl Client {
         self.sound = None;
         self.gif_favorites.clear();
         self.gif_shares.clear();
+        self.account_prefs = serde_json::Value::Object(Default::default());
         self.sync = None;
         self.speaking_task = None;
         self.rpc = None;
