@@ -37,6 +37,8 @@ enum Command {
     Reconnect(String),
     /// Remember a presence for the next IDENTIFY and send it now.
     Presence(PresenceState),
+    /// The calls to claim in every later IDENTIFY.
+    Voice(Vec<rhein_proto::VoiceClaim>),
     Close,
 }
 
@@ -53,6 +55,11 @@ impl GatewayHandle {
     /// Sets this connection's presence now and for every later IDENTIFY.
     pub fn set_presence(&self, presence: PresenceState) {
         let _ = self.commands.send(Command::Presence(presence));
+    }
+
+    /// Names the calls this device is in, for every later IDENTIFY (nothing is sent now).
+    pub fn set_voice_claims(&self, claims: Vec<rhein_proto::VoiceClaim>) {
+        let _ = self.commands.send(Command::Voice(claims));
     }
 
     /// Reconnects now with a fresh token (after a renewed session).
@@ -72,6 +79,7 @@ pub struct GatewayConfig {
     pub token: String,
     pub intents: u64,
     pub presence: PresenceState,
+    pub voice: Vec<rhein_proto::VoiceClaim>,
 }
 
 /// Starts the connection task on the current tokio runtime. Events arrive on the returned
@@ -125,6 +133,7 @@ async fn run(
                         }
                         Some(Command::Send(_)) => {}
                         Some(Command::Presence(presence)) => config.presence = presence,
+                        Some(Command::Voice(claims)) => config.voice = claims,
                         Some(Command::Close) | None => return,
                     }
                 }
@@ -140,6 +149,7 @@ async fn run(
                     Some(Command::Reconnect(token)) => { config.token = token; break; }
                     Some(Command::Send(_)) => {}
                     Some(Command::Presence(presence)) => config.presence = presence,
+                    Some(Command::Voice(claims)) => config.voice = claims,
                     Some(Command::Close) | None => return,
                 },
             }
@@ -190,6 +200,7 @@ async fn session(
                 next_beat = Some(Instant::now() + heartbeat_every);
             }
             cmd = commands.recv() => match cmd {
+                Some(Command::Voice(claims)) => config.voice = claims,
                 Some(Command::Presence(presence)) => {
                     let frame = rhein_proto::presence(&presence);
                     config.presence = presence;
@@ -234,7 +245,7 @@ async fn session(
                                 if hello.heartbeat_interval_ms > 0 {
                                     heartbeat_every = Duration::from_millis(hello.heartbeat_interval_ms);
                                 }
-                                let identify = rhein_proto::identify(&config.token, config.intents, &config.presence);
+                                let identify = rhein_proto::identify(&config.token, config.intents, &config.presence, &config.voice);
                                 if sink.send(WsMessage::text(identify.to_string())).await.is_err() {
                                     return Outcome::Retry { quick: false };
                                 }

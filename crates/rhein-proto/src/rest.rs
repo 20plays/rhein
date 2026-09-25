@@ -52,6 +52,9 @@ pub struct ErrorBody {
     pub error: String,
     pub code: Option<String>,
     pub message: Option<String>,
+    /// Seconds until a rate-limited request may be repeated.
+    #[serde(default)]
+    pub retry_after: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

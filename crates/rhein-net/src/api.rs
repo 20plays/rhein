@@ -27,6 +27,14 @@ impl ApiError {
             ApiError::Http(_) => None,
         }
     }
+
+    /// For a rate-limited request, how long to wait before repeating it.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            ApiError::Status { status: 429, body } => Some(std::time::Duration::from_secs_f64(body.retry_after.unwrap_or(1.).clamp(0.1, 10.))),
+            _ => None,
+        }
+    }
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
@@ -82,7 +90,7 @@ impl Api {
             let text = if bytes.is_empty() { &b"null"[..] } else { &bytes[..] };
             return serde_json::from_slice(text).map_err(|e| ApiError::Status {
                 status: status.as_u16(),
-                body: ErrorBody { error: "decode".into(), code: None, message: Some(e.to_string()) },
+                body: ErrorBody { error: "decode".into(), code: None, message: Some(e.to_string()), retry_after: None },
             });
         }
         let body = resp.json::<ErrorBody>().await.unwrap_or_else(|_| ErrorBody {
@@ -217,6 +225,72 @@ impl Api {
     }
 
     // ---- home server ----
+
+    // --- guild voice (`server/src/routes/voice.rs`) ---
+
+    pub async fn voice_join(&self, channel_id: &str, self_mute: bool, self_deaf: bool, self_video: bool, region: Option<&str>) -> ApiResult<VoiceJoin> {
+        let mut body = serde_json::json!({ "self_mute": self_mute, "self_deaf": self_deaf, "self_video": self_video });
+        if let Some(region) = region {
+            body["region"] = region.into();
+        }
+        self.post(&format!("/channels/{}/voice/join", urlencoding::encode(channel_id)), &body).await
+    }
+
+    pub async fn voice_leave(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/channels/{}/voice/leave", urlencoding::encode(channel_id)), &serde_json::json!({})).await
+    }
+
+    /// Changes this user's self flags; `None` leaves one as it is.
+    pub async fn voice_state(&self, channel_id: &str, self_mute: Option<bool>, self_deaf: Option<bool>, self_video: Option<bool>) -> ApiResult<VoiceState> {
+        let mut body = serde_json::json!({});
+        for (key, value) in [("self_mute", self_mute), ("self_deaf", self_deaf), ("self_video", self_video)] {
+            if let Some(value) = value {
+                body[key] = value.into();
+            }
+        }
+        self.post(&format!("/channels/{}/voice/state", urlencoding::encode(channel_id)), &body).await
+    }
+
+    /// A fresh `voice_server` for a call that is still up (the SFU token lasts minutes).
+    pub async fn voice_token(&self, channel_id: &str) -> ApiResult<VoiceServer> {
+        self.post(&format!("/channels/{}/voice/token", urlencoding::encode(channel_id)), &serde_json::json!({})).await
+    }
+
+    /// One mesh relay payload for another participant. A burst of ICE candidates runs into the
+    /// write rate limit, and a dropped candidate can cost the connection, so a rate-limited
+    /// signal waits and goes again.
+    pub async fn voice_signal(&self, channel_id: &str, target: &str, payload: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "target": target, "payload": payload });
+        let path = format!("/channels/{}/voice/signal", urlencoding::encode(channel_id));
+        self.post_patiently(&path, &body).await
+    }
+
+    /// `post`, repeated while the server says to wait (a few times at most).
+    pub async fn post_patiently<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+        let mut tries = 0;
+        loop {
+            match self.post(path, body).await {
+                Err(err) if tries < 8 => match err.retry_after() {
+                    Some(wait) => {
+                        tries += 1;
+                        tokio::time::sleep(wait).await;
+                    }
+                    None => return Err(err),
+                },
+                other => return other,
+            }
+        }
+    }
+
+    /// Who is in a voice channel: `{channel_id, voice_states, watchers}`.
+    pub async fn voice_channel(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/channels/{}/voice", urlencoding::encode(channel_id))).await
+    }
+
+    /// The server's SFU regions: `{default, regions: [{name, sfu, healthy, ...}], ...}`.
+    pub async fn voice_regions(&self) -> ApiResult<serde_json::Value> {
+        self.get("/voice/regions").await
+    }
 
     pub async fn capabilities(&self) -> ApiResult<Capabilities> {
         self.get("/capabilities").await

@@ -102,6 +102,19 @@ pub struct VoiceState {
     pub server_mute: bool,
     pub server_deaf: bool,
     pub streaming: bool,
+    pub session_id: Option<String>,
+    pub region: Option<String>,
+    pub stream_preset: Option<String>,
+    pub joined_at: Option<i64>,
+}
+
+/// One row of a channel's screen-watch table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceWatcher {
+    pub viewer: String,
+    pub streamer: String,
+    pub quality: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -234,4 +247,78 @@ mod tests {
         assert_eq!(m.content, "hi");
         assert_eq!(m.reactions[0].count, 1);
     }
+}
+
+/// How to dial a call: the `voice_server` of a join answer, a token refresh or a
+/// `VOICE_SERVER_UPDATE`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum VoiceServer {
+    /// Peer to peer, signalled through `/voice/signal`.
+    Mesh {
+        #[serde(default)]
+        channel_id: Option<String>,
+        #[serde(default)]
+        max_participants: Option<u32>,
+        #[serde(default)]
+        max_bitrate: Option<u64>,
+        /// Whether `ice_servers` carries a TURN relay.
+        #[serde(default)]
+        relay: bool,
+        #[serde(default)]
+        ice_servers: Vec<IceServer>,
+    },
+    /// Through a Telium SFU: `token` is spent at `{endpoint}/session`.
+    Sfu {
+        #[serde(default)]
+        channel_id: Option<String>,
+        #[serde(default)]
+        region: Option<String>,
+        endpoint: String,
+        token: String,
+        #[serde(default)]
+        token_ttl: Option<u64>,
+        #[serde(default)]
+        max_bitrate: Option<u64>,
+        #[serde(default)]
+        ice_servers: Vec<IceServer>,
+    },
+}
+
+/// One entry of an ICE server list, as WebRTC's `RTCIceServer`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IceServer {
+    /// A string or a list of strings.
+    pub urls: Value,
+    pub username: Option<String>,
+    pub credential: Option<String>,
+}
+
+impl IceServer {
+    pub fn urls(&self) -> Vec<String> {
+        match &self.urls {
+            Value::String(url) => vec![url.clone()],
+            Value::Array(urls) => urls.iter().filter_map(|u| u.as_str().map(str::to_owned)).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// The answer to `POST /channels/{id}/voice/join`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceJoin {
+    pub voice_state: VoiceState,
+    pub voice_server: VoiceServer,
+}
+
+/// What `POST {sfu}/session` answers with: where the LiveKit room is and how to get in.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SfuSession {
+    pub url: String,
+    pub token: String,
+    #[serde(default)]
+    pub room: Option<String>,
+    #[serde(default)]
+    pub max_bitrate: Option<u64>,
 }

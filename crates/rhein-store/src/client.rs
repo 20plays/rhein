@@ -1147,6 +1147,7 @@ impl Client {
                     token: session.session_token,
                     intents: USER_INTENTS,
                     presence,
+                    voice: Vec::new(),
                 });
                 Ok((doc, api, handle, events))
             }))
@@ -1487,6 +1488,8 @@ impl Client {
                 }
                 self.load_conversations(cx);
             }
+            // Calls come with M4.1(d).
+            Event::VoiceServerUpdate(_) | Event::VoiceSignal { .. } | Event::VoiceWatchersUpdate { .. } => {}
             Event::MemberListUpdate(_) | Event::Other { .. } => {}
         }
     }

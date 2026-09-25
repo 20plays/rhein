@@ -18,6 +18,19 @@ use livekit::webrtc::MediaType;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+/// A server's ICE list (`voice_server.ice_servers`) as libwebrtc takes it.
+pub fn ice_servers(servers: &[rhein_proto::IceServer]) -> Vec<IceServer> {
+    servers
+        .iter()
+        .map(|s| IceServer {
+            urls: s.urls(),
+            username: s.username.clone().unwrap_or_default(),
+            password: s.credential.clone().unwrap_or_default(),
+        })
+        .filter(|s| !s.urls.is_empty())
+        .collect()
+}
+
 /// The four m-lines, in the order both sides lay them down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Slot {

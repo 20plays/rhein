@@ -90,16 +90,26 @@ impl PresenceState {
     }
 }
 
-pub fn identify(token: &str, intents: u64, presence: &PresenceState) -> Value {
-    json!({
-        "op": "IDENTIFY",
-        "d": {
-            "token": token,
-            "intents": intents,
-            "presence": presence.to_json(),
-            "protocol": { "version": PROTOCOL_VERSION },
-        }
-    })
+/// A call this device believes it is still in, named in IDENTIFY so a restarted server keeps
+/// its seat (`docs/guild-calls.md`, "Surviving a restart").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceClaim {
+    /// The guild for a guild call, the conversation for a DM call.
+    pub room_id: String,
+    pub session_id: String,
+}
+
+pub fn identify(token: &str, intents: u64, presence: &PresenceState, voice: &[VoiceClaim]) -> Value {
+    let mut d = json!({
+        "token": token,
+        "intents": intents,
+        "presence": presence.to_json(),
+        "protocol": { "version": PROTOCOL_VERSION },
+    });
+    if !voice.is_empty() {
+        d["voice"] = voice.iter().map(|c| json!({ "room_id": c.room_id, "session_id": c.session_id })).collect();
+    }
+    json!({ "op": "IDENTIFY", "d": d })
 }
 
 pub fn presence(presence: &PresenceState) -> Value {
@@ -143,6 +153,12 @@ pub enum Event {
     /// `presence` is the whole object: status, custom status and activities.
     PresenceUpdate { user_id: String, presence: Value },
     VoiceStateUpdate(crate::model::VoiceState),
+    /// Where to dial a call: the join answer again, pushed on region failover.
+    VoiceServerUpdate(Value),
+    /// A mesh relay payload from another participant.
+    VoiceSignal { channel_id: String, from: String, payload: Value },
+    /// A channel's whole screen-watch table.
+    VoiceWatchersUpdate { channel_id: String, watchers: Vec<crate::model::VoiceWatcher> },
     PinsUpdate { channel_id: String, message_id: String, pinned: bool },
     ThreadUpsert(crate::rest::Thread),
     ThreadDelete { id: String, parent_id: Option<String> },
@@ -250,6 +266,16 @@ impl Event {
                 Ok(v) => Event::VoiceStateUpdate(v),
                 Err(_) => Event::Other { t: t.into(), d },
             },
+            "VOICE_SERVER_UPDATE" => Event::VoiceServerUpdate(d),
+            "VOICE_SIGNAL" => Event::VoiceSignal {
+                channel_id: str_of(&d, "channel_id"),
+                from: str_of(&d, "from"),
+                payload: d.get("payload").cloned().unwrap_or(Value::Null),
+            },
+            "VOICE_WATCHERS_UPDATE" => Event::VoiceWatchersUpdate {
+                channel_id: str_of(&d, "channel_id"),
+                watchers: d.get("watchers").and_then(|w| decode(w).ok()).unwrap_or_default(),
+            },
             _ => Event::Other { t: t.into(), d },
         }
     }
@@ -270,11 +296,15 @@ mod tests {
 
     #[test]
     fn identify_shape() {
-        let v = identify("tok", USER_INTENTS, &PresenceState { status: "online".into(), ..Default::default() });
+        let v = identify("tok", USER_INTENTS, &PresenceState { status: "online".into(), ..Default::default() }, &[]);
         assert_eq!(v["op"], "IDENTIFY");
         assert_eq!(v["d"]["intents"], 255);
         // Without activities of our own, the field is left out so another session's stay.
         assert!(v["d"]["presence"].get("activity").is_none());
+        assert!(v["d"].get("voice").is_none());
+        let claim = VoiceClaim { room_id: "g1".into(), session_id: "s1".into() };
+        let v = identify("tok", USER_INTENTS, &PresenceState::default(), &[claim]);
+        assert_eq!(v["d"]["voice"], json!([{ "room_id": "g1", "session_id": "s1" }]));
     }
 
     #[test]

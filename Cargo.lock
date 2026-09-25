@@ -6906,6 +6906,10 @@ dependencies = [
  "livekit",
  "livekit-api",
  "log",
+ "reqwest",
+ "rhein-auth",
+ "rhein-net",
+ "rhein-proto",
  "serde_json",
  "tokio",
 ]

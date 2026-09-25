@@ -6,6 +6,7 @@ license.workspace = true
 description = "Voice and video for Rhein: Telium's mesh calls and its LiveKit-based SFU"
 
 [dependencies]
+rhein-proto.workspace = true
 anyhow.workspace = true
 log.workspace = true
 serde_json.workspace = true
@@ -16,4 +17,7 @@ livekit = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb9
 [dev-dependencies]
 livekit-api = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false, features = ["access-token", "rustls-tls-webpki-roots"] }
 env_logger.workspace = true
+rhein-net.workspace = true
+rhein-auth.workspace = true
+reqwest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
