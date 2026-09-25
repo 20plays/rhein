@@ -21,7 +21,7 @@ use rhein_voice::e2ee;
 use crate::guild_keys::{GuildKeys, Verifier};
 use rhein_voice::mesh::{self, Mesh};
 use rhein_voice::posture::{self, Hello, Posture};
-use rhein_voice::screen::ScreenShare;
+use rhein_voice::screen::{ScreenShare, ShareError};
 use rhein_voice::sfu::{self, SfuCall};
 use rhein_voice::video::{VideoFeed, VideoOut};
 use rhein_voice::{CallEvent, Slot};
@@ -606,7 +606,11 @@ impl Client {
         }
         let io = self.io.clone();
         cx.spawn(async move |this, cx| {
-            let started = join(io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await? })).await;
+            let started = io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await }).await;
+            let started = match started {
+                Ok(Ok(result)) => result,
+                _ => Err(ShareError::Other("the screen capture stopped unexpectedly".into())),
+            };
             this.update(cx, |this, cx| {
                 let Some(call) = this.call.as_mut() else { return };
                 match started {
@@ -620,7 +624,12 @@ impl Client {
                             this.io.spawn(async move { route.stream(true).await });
                         }
                     }
-                    Err(err) => log::info!("screen share not started: {err:#}"),
+                    // A closed picker is the person's answer; anything else is worth saying.
+                    Err(ShareError::Cancelled) => log::info!("screen share cancelled"),
+                    Err(err) => {
+                        log::warn!("screen share not started: {err}");
+                        this.error = Some(err.to_string().into());
+                    }
                 }
                 cx.notify();
             })

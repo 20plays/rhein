@@ -12,6 +12,44 @@ use libwebrtc::desktop_capturer::{CaptureError, DesktopCaptureSourceType, Deskto
 
 use crate::video::VideoOut;
 
+/// Why a share did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareError {
+    /// The desktop has no screen capture portal: worth telling the person how to get one.
+    NoPortal,
+    /// The person closed the picker (or the desktop said no).
+    Cancelled,
+    Other(String),
+}
+
+impl std::fmt::Display for ShareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShareError::NoPortal => f.write_str(
+                "Screen sharing needs a desktop portal that can capture the screen, and none is running. \
+                 On sway and other wlroots compositors install xdg-desktop-portal-wlr, then restart xdg-desktop-portal \
+                 (or log in again); elsewhere, the portal package of your desktop.",
+            ),
+            ShareError::Cancelled => f.write_str("The screen share was cancelled."),
+            ShareError::Other(err) => f.write_str(err),
+        }
+    }
+}
+
+impl std::error::Error for ShareError {}
+
+/// Whether the session's desktop portal offers screen capture at all (asking it for the
+/// ScreenCast interface's version; a portal without a backend for it has no such interface).
+pub fn portal_ready() -> Result<(), ShareError> {
+    if !cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    let connection = zbus::blocking::Connection::session().map_err(|_| ShareError::NoPortal)?;
+    let proxy = zbus::blocking::Proxy::new(&connection, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast")
+        .map_err(|_| ShareError::NoPortal)?;
+    proxy.get_property::<u32>("version").map(|_| ()).map_err(|_| ShareError::NoPortal)
+}
+
 /// A running share; dropping it stops the capture.
 pub struct ScreenShare {
     stop: Arc<AtomicBool>,
@@ -24,7 +62,15 @@ impl ScreenShare {
     /// Asks the desktop for a screen or window and starts sending it at `fps`. Returns once the
     /// first picture arrived, or with an error when the person cancelled the picker or capture
     /// is unavailable.
-    pub fn start(fps: u32, cursor: bool) -> Result<ScreenShare> {
+    pub fn start(fps: u32, cursor: bool) -> Result<ScreenShare, ShareError> {
+        portal_ready()?;
+        Self::capture(fps, cursor).map_err(|err| match err.downcast_ref::<ShareError>() {
+            Some(share) => share.clone(),
+            None => ShareError::Other(format!("{err:#}")),
+        })
+    }
+
+    fn capture(fps: u32, cursor: bool) -> Result<ScreenShare> {
         let stop = Arc::new(AtomicBool::new(false));
         let ended = Arc::new(AtomicBool::new(false));
         // Sized once the first picture says how big the share is.
@@ -56,7 +102,8 @@ impl ScreenShare {
                     Err(CaptureError::Temporary) => {}
                     Err(CaptureError::Permanent) => {
                         failed.store(true, Ordering::Relaxed);
-                        let _ = first.send(Err(anyhow!("the screen share was cancelled or ended")));
+                        // The portal was there (checked above): this is the picker closed.
+                        let _ = first.send(Err(ShareError::Cancelled.into()));
                     }
                 });
                 let every = Duration::from_millis(1000 / fps.clamp(1, 60) as u64);
@@ -66,7 +113,7 @@ impl ScreenShare {
                 }
             })?;
         // The picker waits for the person; give them time.
-        let out = first_rx.recv_timeout(Duration::from_secs(120)).map_err(|_| anyhow!("no screen was chosen"))??;
+        let out = first_rx.recv_timeout(Duration::from_secs(120)).map_err(|_| ShareError::Cancelled)??;
         Ok(ScreenShare { stop, ended, out })
     }
 
