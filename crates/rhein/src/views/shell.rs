@@ -1978,7 +1978,8 @@ impl Shell {
             row = row.on_secondary(cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| {
                 this.channel_menu(menu_id.clone(), e.position, window, cx)
             }));
-            rows.push(row.into_any_element());
+            // A little air above each channel; the people in a voice channel stay close to it.
+            rows.push(div().pt(px(CHANNEL_GAP)).child(row).into_any_element());
             if ch.is_voice() {
                 let members = client.voice_members(gid, &ch.id);
                 let occupied = !members.is_empty();
@@ -2289,6 +2290,9 @@ impl Shell {
         )
     }
 }
+
+/// The space between two channels in the sidebar.
+const CHANNEL_GAP: f32 = 3.;
 
 fn presence_of(status: &str) -> Presence {
     match status {
