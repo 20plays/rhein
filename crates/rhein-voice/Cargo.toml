@@ -7,6 +7,8 @@ description = "Voice and video for Rhein: Telium's mesh calls and its LiveKit-ba
 
 [dependencies]
 rhein-proto.workspace = true
+cpal = "0.17"
+rtrb = "0.3"
 anyhow.workspace = true
 log.workspace = true
 serde_json.workspace = true

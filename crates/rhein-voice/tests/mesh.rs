@@ -140,3 +140,66 @@ async fn two_peers_negotiate_and_hear_each_other() {
     a.close();
     b.close();
 }
+
+/// The audio engines on both ends: a's microphone (fed a tone, as if captured) goes out through
+/// the mesh, b plays it into its mix and sees a speaking.
+#[tokio::test(flavor = "multi_thread")]
+async fn engines_carry_a_voice_through_the_mesh() {
+    use rhein_voice::audio::AudioEngine;
+    let (fa, fb) = (PeerConnectionFactory::default(), PeerConnectionFactory::default());
+    let (engine_a, engine_b) = (AudioEngine::headless().unwrap(), AudioEngine::headless().unwrap());
+    let mic: MediaStreamTrack = fa.create_audio_track("mic", engine_a.microphone()).into();
+    let (mut a, mut ea) = Mesh::new("@a:test", fa, vec![], false);
+    let (mut b, mut eb) = Mesh::new("@b:test", fb, vec![], false);
+    a.set_source(Slot::Mic, Some(mic));
+    a.sync(["@a:test", "@b:test"]);
+    b.sync(["@a:test", "@b:test"]);
+
+    // a "speaks" in real time.
+    let speaking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let feeder = {
+        let speaking = speaking.clone();
+        let tone: Vec<i16> = (0..480 * 100).map(|i| ((i as f32 * 2. * std::f32::consts::PI * 440. / 48_000.).sin() * 8000.) as i16).collect();
+        let engine_a = std::sync::Arc::new(engine_a);
+        let feeding = engine_a.clone();
+        let thread = std::thread::spawn(move || {
+            let mut chunks = tone.chunks(480).cycle();
+            while speaking.load(std::sync::atomic::Ordering::Relaxed) {
+                feeding.feed(chunks.next().unwrap());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        (thread, engine_a)
+    };
+
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, MeshEvent::Track { slot: Slot::Mic, .. })).await;
+    let MeshEvent::Track { track: MediaStreamTrack::Audio(track), .. } = got else { panic!("audio track") };
+    engine_b.add_voice("@a:test", track);
+    let tap = engine_b.tap();
+    let heard = pumping(&mut a, &mut ea, &mut b, &mut eb, async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match tap.try_recv() {
+                Ok(frame) if tone_share(&frame, 440.) > 0.9 && frame.iter().map(|s| s.saturating_abs()).max().unwrap_or(0) > 2000 => return true,
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+        false
+    })
+    .await;
+    assert!(heard, "b's mix carries a's tone");
+    assert!(engine_b.speaking().iter().any(|k| k == "@a:test"), "a shows as speaking at b");
+
+    // Deafened, b plays nothing.
+    engine_b.set_deafened(true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while tap.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(tap.try_iter().all(|f| f.iter().all(|&s| s == 0)), "deafened is silent");
+
+    speaking.store(false, std::sync::atomic::Ordering::Relaxed);
+    feeder.0.join().unwrap();
+    a.close();
+    b.close();
+}
