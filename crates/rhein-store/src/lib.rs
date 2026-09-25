@@ -16,5 +16,5 @@ pub mod persist;
 pub mod prefs;
 pub mod social;
 
-pub use client::{Client, ClientEvent, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
+pub use client::{ActiveCall, CallMode, CallStatus, Client, ClientEvent, VoicePrefs, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
 pub use io::Io;

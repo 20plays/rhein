@@ -78,6 +78,9 @@ fn devices(input: bool) -> Vec<AudioDevice> {
         return all;
     }
     usable.sort_by_key(|d| !d.id.ends_with(":default"));
+    // A card appears as `sysdefault:` and `front:` under one name; one entry is enough.
+    let mut seen = std::collections::HashSet::new();
+    usable.retain(|d| seen.insert(d.name.clone()));
     usable
 }
 

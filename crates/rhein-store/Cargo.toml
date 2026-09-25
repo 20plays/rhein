@@ -10,6 +10,7 @@ rhein-net.workspace = true
 rhein-auth.workspace = true
 rhein-rpc.workspace = true
 rhein-mls.workspace = true
+rhein-voice.workspace = true
 sha2.workspace = true
 openmls = "0.9"
 openmls_rust_crypto = "0.6"

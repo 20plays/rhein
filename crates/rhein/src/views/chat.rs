@@ -915,13 +915,26 @@ impl ChatView {
         cx.emit(ChatEvent::OpenThread(thread_id));
     }
 
-    /// A voice channel: who is in it and in what state. Joining arrives with milestone M4.
+    /// A voice channel: who is in it, who is speaking, and joining or leaving it.
     fn render_voice_stage(&self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let name = client.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
         let members = guild_id.as_deref().map(|g| client.voice_members(g, channel_id)).unwrap_or_default();
+        let call = client.call().filter(|c| c.channel_id == channel_id);
+        let in_call = call.is_some();
+        let note = call.map(|call| match &call.status {
+            rhein_store::CallStatus::Connecting => ("Connecting…".to_owned(), t.text_faint),
+            rhein_store::CallStatus::Failed(err) => (err.clone(), t.danger),
+            rhein_store::CallStatus::Connected => (
+                match &call.mode {
+                    Some(rhein_store::CallMode::Sfu { .. }) => "Connected through the server's SFU.".to_owned(),
+                    _ => format!("Connected peer to peer with {} of {}.", call.linked.len(), members.len().saturating_sub(1)),
+                },
+                t.text_faint,
+            ),
+        });
         let tiles = members.iter().map(|state| {
             let who = client.display_name(guild_id.as_deref(), &state.user_id);
             let avatar = client.avatar_url(guild_id.as_deref(), &state.user_id);
@@ -935,11 +948,14 @@ impl ChatView {
                     .justify_center()
                     .child(rhein_ui::icon_sized(glyph, px(14.)).text_color(if danger { t.danger } else { t.text_muted }))
             };
+            let speaking = client.is_speaking(&state.user_id);
             div()
                 .w(px(200.))
                 .h(px(150.))
                 .rounded(radius::LG)
                 .bg(t.bg_panel)
+                .border_2()
+                .border_color(if speaking { t.success } else { gpui::transparent_black().into() })
                 .flex()
                 .flex_col()
                 .items_center()
@@ -998,8 +1014,20 @@ impl ChatView {
                             .flex_col()
                             .items_center()
                             .gap_2()
-                            .child(Button::new("voice-join", "Join voice").primary().icon(Icon::Phone).disabled(true))
-                            .child(div().text_size(text::SM).text_color(t.text_faint).child("Voice and video arrive with milestone M4.")),
+                            .child(if in_call {
+                                let c = self.client.clone();
+                                Button::new("voice-leave", "Leave")
+                                    .danger()
+                                    .icon(Icon::PhoneOff)
+                                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.leave_voice(cx)))
+                            } else {
+                                let (c, id) = (self.client.clone(), channel_id.to_owned());
+                                Button::new("voice-join", "Join voice")
+                                    .primary()
+                                    .icon(Icon::Phone)
+                                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.join_voice(id.clone(), cx)))
+                            })
+                            .children(note.map(|(line, color)| div().text_size(text::SM).text_color(color).child(line))),
                     ),
             )
             .into_any_element()

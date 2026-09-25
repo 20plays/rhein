@@ -24,6 +24,31 @@ pub struct Prefs {
     pub share_videos: bool,
     /// Activities never shared, by application name.
     pub hidden_activities: Vec<String>,
+    pub voice: VoicePrefs,
+}
+
+/// Calls: devices, processing, push-to-talk, the gate, and what stays between calls.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoicePrefs {
+    /// cpal device ids; `None` for the system default.
+    pub input: Option<String>,
+    pub output: Option<String>,
+    pub push_to_talk: bool,
+    /// The noise gate's threshold in dBFS, `None` for no gate.
+    pub gate: Option<f32>,
+    /// Input gain in percent (100 when unset).
+    pub input_gain: Option<u32>,
+    /// Plain capture: no echo cancellation, noise suppression or gain control.
+    pub raw_input: bool,
+    pub muted: bool,
+    pub deafened: bool,
+    /// Local playback volume per user, 0..200.
+    pub volumes: std::collections::HashMap<String, u32>,
+    /// Open ALSA's null devices instead of real ones (`RHEIN_AUDIO=null`, for screenshots and
+    /// demos that must not touch the speakers). Never saved.
+    #[serde(skip)]
+    pub null_devices: bool,
 }
 
 impl Default for Prefs {
@@ -43,6 +68,7 @@ impl Default for Prefs {
             // What someone watches in a browser is more private than a game; opt in.
             share_videos: false,
             hidden_activities: Vec::new(),
+            voice: VoicePrefs::default(),
         }
     }
 }

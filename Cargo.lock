@@ -6939,6 +6939,7 @@ dependencies = [
  "rhein-proto",
  "rhein-store",
  "rhein-ui",
+ "rhein-voice",
  "serde_json",
  "tokio",
 ]
@@ -7040,6 +7041,7 @@ dependencies = [
  "rhein-net",
  "rhein-proto",
  "rhein-rpc",
+ "rhein-voice",
  "serde",
  "serde_json",
  "sha2 0.10.9",

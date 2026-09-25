@@ -22,18 +22,20 @@ enum Section {
     Appearance,
     Activity,
     Encryption,
+    Voice,
     Shortcuts,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::Account,
         Section::Devices,
         Section::Servers,
         Section::Appearance,
         Section::Activity,
         Section::Encryption,
+        Section::Voice,
         Section::Shortcuts,
         Section::About,
     ];
@@ -46,6 +48,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Activity => "Activity",
             Section::Encryption => "Encryption",
+            Section::Voice => "Voice",
             Section::Shortcuts => "Keyboard shortcuts",
             Section::About => "About Rhein",
         }
@@ -59,6 +62,7 @@ impl Section {
             Section::Appearance => Icon::Palette,
             Section::Activity => Icon::Gamepad,
             Section::Encryption => Icon::Lock,
+            Section::Voice => Icon::Mic,
             Section::Shortcuts => Icon::Keyboard,
             Section::About => Icon::Info,
         }
@@ -109,6 +113,10 @@ pub struct SettingsView {
     saving: bool,
     status: Option<(bool, String)>,
     devices: Option<Result<Vec<Device>, String>>,
+    /// Microphones and speakers, once listed.
+    audio_devices: Option<(Vec<rhein_voice::audio::AudioDevice>, Vec<rhein_voice::audio::AudioDevice>)>,
+    /// Redraws the level meter while the voice section is open.
+    meter: Option<gpui::Task<()>>,
     add_server: Entity<TextInput>,
     unlock_password: Entity<TextInput>,
     focus: FocusHandle,
@@ -178,6 +186,8 @@ impl SettingsView {
             saving: false,
             status: None,
             devices: None,
+            audio_devices: None,
+            meter: None,
             add_server,
             unlock_password,
             focus,
@@ -222,7 +232,166 @@ impl SettingsView {
         if section == Section::Devices {
             self.reload_devices(cx);
         }
+        self.meter = None;
+        if section == Section::Voice {
+            self.load_audio_devices(cx);
+            // The level meter moves while a call is up.
+            self.meter = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
+                    if this.update(cx, |v, cx| if v.client.read(cx).call().is_some() { cx.notify() }).is_err() {
+                        return;
+                    }
+                }
+            }));
+        }
         cx.notify();
+    }
+
+    fn load_audio_devices(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async { (rhein_voice::audio::input_devices(), rhein_voice::audio::output_devices()) })
+                .await;
+            this.update(cx, |v, cx| {
+                v.audio_devices = Some(found);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Calls: which microphone and speakers, how sensitive, push-to-talk, processing.
+    fn voice_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let voice = client.voice_prefs();
+        let level = client.input_level();
+        let row = |title: &'static str, detail: &'static str, control: AnyElement| {
+            div()
+                .p_3()
+                .rounded(radius::MD)
+                .border_1()
+                .border_color(t.border)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                                .child(div().text_size(text::SM).text_color(t.text_faint).child(detail)),
+                        ),
+                )
+                .child(control)
+        };
+        let pill = |id: SharedString, label: String, active: bool, on_click: Box<dyn Fn(&mut gpui::App)>| {
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded(radius::MD)
+                .border_1()
+                .border_color(if active { t.accent } else { t.border_strong })
+                .text_size(text::SM)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| on_click(cx))
+                .child(label)
+        };
+        let device_pills = |input: bool| -> AnyElement {
+            let current = if input { voice.input.clone() } else { voice.output.clone() };
+            let Some((inputs, outputs)) = &self.audio_devices else {
+                return div().text_size(text::SM).text_color(t.text_faint).child("Looking for devices…").into_any_element();
+            };
+            let list = if input { inputs } else { outputs };
+            let mut choices = vec![(None, "System default".to_owned())];
+            choices.extend(list.iter().filter(|d| !d.id.ends_with(":default")).map(|d| (Some(d.id.clone()), d.name.clone())));
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_1()
+                .children(choices.into_iter().enumerate().map(|(i, (id, name))| {
+                    let client = self.client.clone();
+                    let active = id == current;
+                    pill(
+                        SharedString::from(format!("{}-{i}", if input { "in" } else { "out" })),
+                        name,
+                        active,
+                        Box::new(move |cx| {
+                            let id = id.clone();
+                            client.update(cx, |c, cx| {
+                                c.update_voice_prefs(cx, |v| if input { v.input = id } else { v.output = id })
+                            })
+                        }),
+                    )
+                }))
+                .into_any_element()
+        };
+        let gates: [(Option<f32>, &str); 5] = [(None, "Off"), (Some(-60.), "-60 dB"), (Some(-50.), "-50 dB"), (Some(-40.), "-40 dB"), (Some(-30.), "-30 dB")];
+        let gate_pills = div().flex().gap_1().children(gates.into_iter().enumerate().map(|(i, (gate, label))| {
+            let client = self.client.clone();
+            pill(
+                SharedString::from(format!("gate-{i}")),
+                label.to_owned(),
+                voice.gate == gate,
+                Box::new(move |cx| client.update(cx, |c, cx| c.update_voice_prefs(cx, |v| v.gate = gate))),
+            )
+        }));
+        // The meter: how loud the microphone is, and where the gate cuts in (-70..0 dBFS).
+        let meter = level.map(|level| {
+            let db = 20. * level.max(1e-4).log10();
+            let at = |db: f32| ((db + 70.) / 70.).clamp(0., 1.);
+            let open = voice.gate.is_none_or(|g| db >= g);
+            div()
+                .relative()
+                .h(px(8.))
+                .w_full()
+                .rounded_full()
+                .bg(t.bg_selected)
+                .child(div().absolute().left_0().top_0().h_full().rounded_full().w(gpui::relative(at(db))).bg(if open { t.success } else { t.text_faint }))
+                .children(voice.gate.map(|g| div().absolute().top_0().h_full().w(px(2.)).left(gpui::relative(at(g))).bg(t.text)))
+        });
+        let sensitivity = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(gate_pills)
+            .child(match meter {
+                Some(meter) => meter.into_any_element(),
+                None => div().text_size(text::SM).text_color(t.text_faint).child("Join a call to see your microphone's level here.").into_any_element(),
+            });
+        let (c1, c2) = (self.client.clone(), self.client.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(row("Microphone", "Where your voice comes from.", device_pills(true)))
+            .child(row("Speakers", "Where calls are played.", device_pills(false)))
+            .child(row("Input sensitivity", "Below this level the microphone sends silence, so keyboards and fans stay out of the call.", sensitivity.into_any_element()))
+            .child(row(
+                "Push to talk",
+                "Only send your voice while holding the backtick key (`) in Rhein.",
+                Switch::new("ptt", voice.push_to_talk)
+                    .on_toggle(move |on, _, cx| c1.update(cx, |c, cx| c.update_voice_prefs(cx, |v| v.push_to_talk = on)))
+                    .into_any_element(),
+            ))
+            .child(row(
+                "Voice processing",
+                "Echo cancellation, noise suppression and automatic gain. Turn off for a studio microphone or music.",
+                Switch::new("processing", !voice.raw_input)
+                    .on_toggle(move |on, _, cx| c2.update(cx, |c, cx| c.update_voice_prefs(cx, |v| v.raw_input = !on)))
+                    .into_any_element(),
+            ))
+            .into_any_element()
     }
 
     fn reload_devices(&mut self, cx: &mut Context<Self>) {
@@ -1025,6 +1194,7 @@ impl Render for SettingsView {
             Section::Appearance => self.appearance(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
             Section::Encryption => self.encryption_section(&t, cx),
+            Section::Voice => self.voice_section(&t, cx),
             Section::Shortcuts => self.shortcuts(&t),
             Section::About => self.about(&t),
         };

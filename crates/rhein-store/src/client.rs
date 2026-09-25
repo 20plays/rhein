@@ -19,7 +19,9 @@ use rhein_proto::{
 
 use crate::io::{Io, join};
 
+mod call;
 mod dm_view;
+pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
 use crate::persist::{self, Saved};
 
 const PAGE: u32 = 50;
@@ -252,6 +254,11 @@ pub struct Client {
     pub rpc_status: rhein_rpc::Status,
     /// Activity artwork re-hosted by one of our servers' camo caches, by original URL.
     artwork: HashMap<String, EmbedState>,
+    /// The voice call we are in.
+    call: Option<call::ActiveCall>,
+    /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
+    null_audio: bool,
+    speaking_task: Option<Task<()>>,
     /// guild id → user id → their voice state (only users in a channel).
     voice: HashMap<String, HashMap<String, rhein_proto::VoiceState>>,
     selected_channel: HashMap<String, String>,
@@ -329,6 +336,9 @@ impl Client {
             rpc_status: rhein_rpc::Status::default(),
             artwork: HashMap::new(),
             voice: HashMap::new(),
+            call: None,
+            null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
+            speaking_task: None,
             signin: None,
         };
         this.restore(cx);
@@ -590,6 +600,8 @@ impl Client {
     /// what we share. Saved accounts on disk are not touched.
     fn reset(&mut self) {
         self.signin = None;
+        self.call = None;
+        self.speaking_task = None;
         self.rpc = None;
         self.dm = None;
         self.dm_error = None;
@@ -1449,10 +1461,11 @@ impl Client {
                 let Some(guild) = state.guild_id.clone() else { return };
                 let roster = self.voice.entry(guild).or_default();
                 if state.channel_id.is_some() {
-                    roster.insert(state.user_id.clone(), state);
+                    roster.insert(state.user_id.clone(), state.clone());
                 } else {
                     roster.remove(&state.user_id);
                 }
+                self.on_voice_roster(&state, cx);
             }
             Event::PinsUpdate { channel_id, .. } => {
                 if self.pins.contains_key(&channel_id) {
@@ -1488,8 +1501,10 @@ impl Client {
                 }
                 self.load_conversations(cx);
             }
-            // Calls come with M4.1(d).
-            Event::VoiceServerUpdate(_) | Event::VoiceSignal { .. } | Event::VoiceWatchersUpdate { .. } => {}
+            Event::VoiceSignal { channel_id, from, payload } => self.on_voice_signal(&channel_id, from, payload),
+            Event::VoiceServerUpdate(data) => self.on_voice_server(data),
+            // Screen watchers matter with M4.2.
+            Event::VoiceWatchersUpdate { .. } => {}
             Event::MemberListUpdate(_) | Event::Other { .. } => {}
         }
     }

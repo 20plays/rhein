@@ -9,7 +9,7 @@ use gpui::{
     Focusable as _, FontWeight, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels, Point, Render,
     SharedString, Styled as _, Subscription, Window, actions, anchored, deferred, div, prelude::*, px,
 };
-use rhein_store::{Client, ServerStatus, perms};
+use rhein_store::{CallMode, CallStatus, Client, ServerStatus, perms};
 use rhein_ui::theme::{FONT_MONO, radius, size, text};
 use rhein_ui::{
     ActiveTheme as _, motion, Avatar, Button, CountBadge, Icon, IconButton, InputEvent, ListRow, MenuEntry, MenuHost, Modal,
@@ -140,7 +140,7 @@ impl Shell {
         let focus = chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
         // Debug builds can start on a given screen, for screenshots without input:
-        // RHEIN_DEV_OPEN=home|settings|settings=Section|join|switcher|signout|account|switch=@user|profile=@user.
+        // RHEIN_DEV_OPEN=home|settings|settings=Section|join|switcher|signout|account|switch=@user|profile=@user|voice.
         // RHEIN_DEV_UNLOCK=<password> unlocks encrypted DMs of a restored session at start.
         #[cfg(debug_assertions)]
         if let Ok(password) = std::env::var("RHEIN_DEV_UNLOCK") {
@@ -173,6 +173,25 @@ impl Shell {
                 }
                 // profile=@user:server opens that card once members are in; settings=Activity
                 // opens a settings section.
+                // Joins the selected guild's first voice channel (run with RHEIN_AUDIO=null).
+                "voice" => {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                        this.update(cx, |v, cx| {
+                            let client = v.client.read(cx);
+                            let guild = client.selected_guild.clone().and_then(|g| client.guild(&g).map(|g| g.guild.clone()));
+                            let voice = guild.and_then(|g| g.channels.iter().find(|c| c.is_voice()).map(|c| c.id.clone()));
+                            if let Some(id) = voice {
+                                v.client.update(cx, |c, cx| {
+                                    c.select_channel(id.clone(), cx);
+                                    c.join_voice(id, cx);
+                                });
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 // The first private conversation, once the list is in.
                 "dm" => {
                     cx.spawn(async move |this, cx| {
@@ -1336,8 +1355,69 @@ impl Shell {
             .border_color(t.border)
             .child(top)
             .child(tree)
+            .children(self.call_bar(cx))
             .child(self.profile_strip(cx))
             .into_any_element()
+    }
+
+    fn push_to_talk_live(&self, cx: &Context<Self>) -> bool {
+        let client = self.client.read(cx);
+        client.call().is_some() && client.voice_prefs().push_to_talk
+    }
+
+    /// While in a call: how it is going, where it is, and the way out.
+    fn call_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let call = client.call()?;
+        let (label, color) = match &call.status {
+            CallStatus::Connecting => ("Connecting…".to_owned(), t.warning),
+            CallStatus::Connected => ("Voice connected".to_owned(), t.success),
+            CallStatus::Failed(_) => ("Call failed".to_owned(), t.danger),
+        };
+        let channel = client.channel(&call.channel_id).map(|c| c.name.clone()).unwrap_or_default();
+        let guild = client.guild(&call.guild_id).map(|g| g.guild.name.clone()).unwrap_or_default();
+        let detail = match (&call.status, &call.mode) {
+            (CallStatus::Failed(err), _) => err.clone(),
+            (_, Some(CallMode::Sfu { region })) => format!("{channel} / {guild} · SFU{}", region.as_ref().map(|r| format!(" {r}")).unwrap_or_default()),
+            (_, Some(CallMode::Mesh)) => format!("{channel} / {guild} · peer to peer"),
+            _ => format!("{channel} / {guild}"),
+        };
+        let open = call.channel_id.clone();
+        let (open_client, leave_client) = (self.client.clone(), self.client.clone());
+        Some(
+            div()
+                .flex_none()
+                .px_2()
+                .py_1p5()
+                .flex()
+                .items_center()
+                .gap_1()
+                .border_t_1()
+                .border_color(t.border)
+                .child(
+                    div()
+                        .id("call-bar")
+                        .flex_1()
+                        .min_w_0()
+                        .px_1()
+                        .rounded(radius::SM)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(t.bg_hover))
+                        .on_click(move |_, _, cx| {
+                            open_client.update(cx, |c, cx| c.select_channel(open.clone(), cx))
+                        })
+                        .child(div().flex().items_center().gap_1p5().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).text_color(color).child(icon_sized(Icon::Volume, px(14.)).text_color(color)).child(label))
+                        .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(detail)),
+                )
+                .child(
+                    IconButton::new("call-leave", Icon::PhoneOff)
+                        .danger(true)
+                        .tooltip("Disconnect")
+                        .on_click(move |_, _, cx| leave_client.update(cx, |c, cx| c.leave_voice(cx))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// You, at the foot of the sidebar: who you are on top (a click opens the account menu), what
@@ -1453,11 +1533,32 @@ impl Shell {
             .border_t_1()
             .border_color(t.border)
             .child(
-                div().flex_1().px_2().flex().items_center().gap_1().child(who).child(
-                    IconButton::new("open-settings", Icon::Settings)
-                        .tooltip("Settings (Ctrl+,)")
-                        .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-                ),
+                div()
+                    .flex_1()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(who)
+                    .child({
+                        let (muted, c) = (self.client.read(cx).voice_muted(), self.client.clone());
+                        IconButton::new("voice-mute", if muted { Icon::MicOff } else { Icon::Mic })
+                            .danger(muted)
+                            .tooltip(if muted { "Unmute" } else { "Mute" })
+                            .on_click(move |_, _, cx| c.update(cx, |c, cx| c.set_voice_muted(!muted, cx)))
+                    })
+                    .child({
+                        let (deafened, c) = (self.client.read(cx).voice_deafened(), self.client.clone());
+                        IconButton::new("voice-deafen", if deafened { Icon::HeadphoneOff } else { Icon::Headphones })
+                            .danger(deafened)
+                            .tooltip(if deafened { "Undeafen" } else { "Deafen" })
+                            .on_click(move |_, _, cx| c.update(cx, |c, cx| c.set_voice_deafened(!deafened, cx)))
+                    })
+                    .child(
+                        IconButton::new("open-settings", Icon::Settings)
+                            .tooltip("Settings (Ctrl+,)")
+                            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                    ),
             )
             // The activity row is as tall as the status line beside it, so the line between who
             // you are and what you are doing continues the status line's.
@@ -1571,11 +1672,17 @@ impl Shell {
                 .muted(mark.muted && !active)
                 .when(mark.mentions > 0, |r| r.trailing(CountBadge(mark.mentions)));
             if ch.is_textual() || ch.is_voice() {
-                let id = ch.id.clone();
+                let (id, voice) = (ch.id.clone(), ch.is_voice());
                 let client = self.client.clone();
+                // A voice channel is joined by clicking it, as in the web client.
                 row = row.on_click(move |_, _, cx| {
                     let id = id.clone();
-                    client.update(cx, |c, cx| c.select_channel(id, cx));
+                    client.update(cx, |c, cx| {
+                        c.select_channel(id.clone(), cx);
+                        if voice {
+                            c.join_voice(id, cx);
+                        }
+                    });
                 });
             }
             let menu_id = ch.id.clone();
@@ -1599,7 +1706,13 @@ impl Shell {
                             .gap_2()
                             .text_size(text::SM)
                             .text_color(t.text_muted)
-                            .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into)))
+                            .child(
+                                div()
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(if client.is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
+                                    .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into))),
+                            )
                             .child(div().flex_1().min_w_0().truncate().child(name))
                             .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(12.)).text_color(t.danger)))
                             .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(12.)).text_color(t.text_faint)))
@@ -1875,6 +1988,20 @@ impl Render for Shell {
             .map(|(view, _)| motion::fade_in(div().absolute().inset_0().child(view.clone()), "settings-in", motion::FAST));
         div()
             .key_context(SHELL_CONTEXT)
+            // Push-to-talk, while this window has focus: backtick held means talking, and is not
+            // typed. (A global shortcut through the desktop portal comes later.)
+            .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
+                if e.keystroke.key == "`" && this.push_to_talk_live(cx) {
+                    this.client.read(cx).set_talking(true);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_key_up(cx.listener(|this, e: &gpui::KeyUpEvent, _, cx| {
+                if e.keystroke.key == "`" && this.push_to_talk_live(cx) {
+                    this.client.read(cx).set_talking(false);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenSwitcher, window, cx| this.open_switcher(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             .on_action(cx.listener(|this, _: &PrevChannel, _, cx| this.client.update(cx, |c, cx| c.step_channel(-1, false, cx))))

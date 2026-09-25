@@ -8,6 +8,7 @@ description = "Native desktop client for Telium"
 [dependencies]
 rhein-proto.workspace = true
 rhein-store.workspace = true
+rhein-voice.workspace = true
 rhein-ui.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true

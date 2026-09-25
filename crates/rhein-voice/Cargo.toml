@@ -22,4 +22,4 @@ livekit-api = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e5
 env_logger.workspace = true
 rhein-net.workspace = true
 rhein-auth.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
