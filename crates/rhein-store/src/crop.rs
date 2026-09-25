@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn output_fits_the_preset() {
-        let noise = image::RgbImage::from_fn(1600, 900, |x, y| image::Rgb([(x * 7 ^ y * 13) as u8, (x * y) as u8, (x + y * 3) as u8]));
+        let noise = image::RgbImage::from_fn(1600, 900, |x, y| image::Rgb([((x * 7) ^ (y * 13)) as u8, (x * y) as u8, (x + y * 3) as u8]));
         let picture = DynamicImage::ImageRgb8(noise);
         let banner = render(&picture, Crop::default(), BANNER).unwrap();
         assert_eq!(banner.mime, "image/jpeg");
