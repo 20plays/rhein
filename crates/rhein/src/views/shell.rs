@@ -2040,12 +2040,16 @@ impl Shell {
             let presence = Presence::parse(m.status());
             let (uid, uid2) = (m.user_id.clone(), m.user_id.clone());
             let (weak, weak2) = (this.clone(), this.clone());
-            // An activity beats a custom status for the second line, as in the web client.
+            // A custom status is what the person chose to say, so it takes the second line;
+            // without one, what they are playing or listening to.
             let subtitle = m
-                .activities()
-                .first()
-                .map(|a| a.summary())
-                .or_else(|| m.presence.as_ref().and_then(|p| p.get("custom_status")).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned));
+                .presence
+                .as_ref()
+                .and_then(|p| p.get("custom_status"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| m.activities().first().map(|a| a.summary()));
             ListRow::new(SharedString::from(format!("member-{}", m.user_id)), name.clone())
                 .subtitle(subtitle)
                 .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).image(client.avatar_url(Some(&gid), &m.user_id).map(Into::into)).presence(Some(presence)))

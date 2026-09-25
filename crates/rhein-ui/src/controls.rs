@@ -229,14 +229,13 @@ impl RenderOnce for ListRow {
                     .flex_col()
                     // Two lines sit close together around the row's middle, not a full line
                     // height apart.
-                    .when(two_lines, |d| d.gap(px(1.)))
-                    .child(div().truncate().when(two_lines, |d| d.line_height(px(17.))).child(self.label))
+                    .child(div().truncate().when(two_lines, |d| d.line_height(px(16.))).child(self.label))
                     .when_some(subtitle, |d, sub| {
                         d.child(
                             div()
                                 .truncate()
                                 .text_size(text::XS)
-                                .line_height(px(14.))
+                                .line_height(px(13.))
                                 .font_weight(FontWeight::NORMAL)
                                 .text_color(t.text_faint)
                                 .child(sub),
