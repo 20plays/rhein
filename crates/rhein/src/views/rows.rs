@@ -7,7 +7,8 @@ use gpui::{
 };
 use rhein_proto::{Attachment, Message};
 use rhein_store::embed::{Embed, EmbedKind};
-use rhein_store::{Client, EmbedState, markdown};
+use rhein_store::client::GifShare;
+use rhein_store::{Client, EmbedState, gif_links, markdown};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
@@ -80,6 +81,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             cards.push(invite_card(ctx, ix, url, &t));
             continue;
         }
+        // GIFs are shown below, straight from their host, and never unfurled.
+        if gif_links::is_gif(url) {
+            continue;
+        }
         match client.embed(channel_id, url) {
             Some(EmbedState::Ready(embed)) => cards.push(embed_card(ctx, ix, cards.len(), embed, &t, cx)),
             Some(EmbedState::Loading) => {}
@@ -87,6 +92,22 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             _ => missing.push(url.clone()),
         }
     }
+
+    // GIF links: the picture itself (a share page once its provider has named it).
+    let mut shares_missing = Vec::new();
+    let mut gifs = Vec::new();
+    for (n, url) in gif_links::gifs_in(&message.content).into_iter().enumerate() {
+        match gif_links::share(&url) {
+            None => gifs.push(gif_tile(ctx, ix, n, url.clone(), url, &t, cx)),
+            Some(share) => match client.gif_share(&url) {
+                Some(GifShare::Ready(media)) => gifs.push(gif_tile(ctx, ix, n, media, url, &t, cx)),
+                Some(GifShare::Loading) => {}
+                Some(GifShare::Failed) => gifs.push(gif_share_link(ix, n, url, share.provider(), &t)),
+                None => shares_missing.push(url),
+            },
+        }
+    }
+    let gif_only = gif_links::is_gif_only(&message.content);
 
     let reply_quote = message.reply_to.as_ref().map(|parent_id| {
         let parent = client.find_message(channel_id, parent_id);
@@ -157,7 +178,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         revealed: &revealed,
         pending: pending && !failed,
     };
-    let body_text = (!message.content.trim().is_empty()).then(|| message_text::render(&doc, &text_ctx, cx));
+    let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(&doc, &text_ctx, cx));
 
     // Indexed by position in the message, which is how an encrypted attachment is found again.
     type Indexed<'a> = Vec<(usize, &'a Attachment)>;
@@ -205,6 +226,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 file_chip(ctx, ix, i, &message.id, a, &t).into_any_element()
             }
         }))
+        .when(!gifs.is_empty(), |d| d.child(div().flex().flex_wrap().gap_2().children(gifs)))
         .children(cards)
         .when(failed, |d| {
             let (c1, c2) = (ctx.client.clone(), ctx.client.clone());
@@ -302,6 +324,16 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         element.child(row).into_any_element()
     };
     // Unknown previews are asked for after this frame, never during it.
+    if !shares_missing.is_empty() {
+        let client = ctx.client.clone();
+        cx.defer(move |cx| {
+            client.update(cx, |c, cx| {
+                for url in &shares_missing {
+                    c.request_gif_share(url, cx);
+                }
+            })
+        });
+    }
     if !missing.is_empty() {
         let client = ctx.client.clone();
         let chan = ctx.channel_id.clone();
@@ -424,10 +456,51 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
 }
 
 /// Whether a link is a GIF (a .gif, or a GIF provider's).
-fn is_gif_link(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    let path = lower.split(['?', '#']).next().unwrap_or(&lower);
-    path.ends_with(".gif") || ["tenor.com/", "giphy.com/", "klipy.com/"].iter().any(|host| lower.contains(host))
+/// A GIF from a link: `media` is the picture, `link` what the message said (a share page, or the
+/// picture again).
+fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, t: &Theme, cx: &App) -> AnyElement {
+    let group = SharedString::from(format!("gif-group-{ix}-{n}"));
+    let star = gif_star(ctx, format!("gif-star-{ix}-{n}"), group.clone(), media.clone(), t, cx);
+    let view = ctx.view.clone();
+    let (open, raised, faint) = (media.clone(), t.bg_raised, t.text_faint);
+    div()
+        .id(SharedString::from(format!("gif-{ix}-{n}")))
+        .group(group)
+        .relative()
+        .max_w_full()
+        .max_h(px(PICTURE_MAX_H))
+        .rounded(radius::LG)
+        .overflow_hidden()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| {
+            let (open, name) = (open.clone(), link.clone());
+            view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
+        })
+        .child(
+            img(media)
+                .max_w_full()
+                .max_h(px(PICTURE_MAX_H))
+                .object_fit(ObjectFit::Contain)
+                .with_loading(move || div().w(px(PICTURE_UNKNOWN.0 / 2.)).h(px(PICTURE_UNKNOWN.1 / 2.)).bg(raised).into_any_element())
+                .with_fallback(move || {
+                    div().p_3().text_size(text::SM).text_color(faint).child("This GIF is no longer available").into_any_element()
+                }),
+        )
+        .child(star)
+        .into_any_element()
+}
+
+/// A share page whose provider had no GIF for it: a link to open it there.
+fn gif_share_link(ix: usize, n: usize, url: String, provider: &str, t: &Theme) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("gif-link-{ix}-{n}")))
+        .text_size(text::SM)
+        .text_color(t.accent)
+        .cursor_pointer()
+        .hover(|s| s.underline())
+        .on_click(move |_, _, cx| cx.open_url(&url))
+        .child(format!("Open GIF on {provider}"))
+        .into_any_element()
 }
 
 /// The star over a GIF (shown while the pointer is on it): adds it to the favourites or takes it
@@ -622,7 +695,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         let (open, name) = (image.clone(), e.url.clone());
         // A GIF is kept by its picture's own link, which draws anywhere.
         let group = SharedString::from(format!("embed-group-{ix}-{n}"));
-        let star = (is_gif_link(&image) || is_gif_link(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), group.clone(), image.clone(), t, cx));
+        let star = (gif_links::is_gif(&image) || gif_links::is_gif(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), group.clone(), image.clone(), t, cx));
         return div()
             .id(SharedString::from(format!("embed-{ix}-{n}")))
             .group(group)

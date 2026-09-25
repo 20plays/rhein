@@ -8,6 +8,7 @@ pub mod guild_keys;
 pub mod dm;
 pub mod embed;
 pub mod emoji;
+pub mod gif_links;
 pub mod io;
 pub mod markdown;
 pub mod media;

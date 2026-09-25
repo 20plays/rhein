@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::*;
+use crate::gif_links;
 use crate::sync_store::{GIF_FAVORITES, Loaded, MAX_GIF_FAVORITES, SyncStore, clean_favorites};
 
 impl Client {
@@ -74,5 +75,88 @@ impl Client {
             }
         })
         .detach();
+    }
+}
+
+/// A GIF share page on its way to being a picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GifShare {
+    Loading,
+    Ready(String),
+    /// The provider had no GIF for it; the page is offered as a link.
+    Failed,
+}
+
+impl Client {
+    /// What a GIF share page turned out to be; `None` until someone asks its provider
+    /// (`request_gif_share`).
+    pub fn gif_share(&self, url: &str) -> Option<GifShare> {
+        if let Some(gif_links::Share::Giphy(id)) = gif_links::share(url) {
+            return Some(GifShare::Ready(gif_links::giphy_media(&id)));
+        }
+        self.gif_shares.get(url).cloned()
+    }
+
+    /// Asks a share page's provider for its GIF, once.
+    pub fn request_gif_share(&mut self, url: &str, cx: &mut Context<Self>) {
+        if self.gif_share(url).is_some() {
+            return;
+        }
+        let Some(share) = gif_links::share(url) else { return };
+        self.gif_shares.insert(url.to_owned(), GifShare::Loading);
+        let (io, http, api) = (self.io.clone(), self.http.clone(), self.home.as_ref().map(|h| h.api.clone()));
+        let key = url.to_owned();
+        cx.spawn(async move |this, cx| {
+            let found = join(io.spawn(async move { resolve_share(&http, api, &share).await })).await;
+            this.update(cx, |this, cx| {
+                let state = match found {
+                    Ok(Some(media)) => GifShare::Ready(media),
+                    Ok(None) => GifShare::Failed,
+                    Err(err) => {
+                        log::debug!("resolving {key}: {err:#}");
+                        GifShare::Failed
+                    }
+                };
+                this.gif_shares.insert(key, state);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+/// Asks Tenor or Klipy (Klipy with the key the home server publishes) for a share page's GIF.
+async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, share: &gif_links::Share) -> anyhow::Result<Option<String>> {
+    let get = |url: String| async move {
+        let answer = http.get(url).header("Accept", "application/json").send().await?.error_for_status()?;
+        anyhow::Ok(answer.json::<serde_json::Value>().await?)
+    };
+    match share {
+        gif_links::Share::Giphy(id) => Ok(Some(gif_links::giphy_media(id))),
+        gif_links::Share::Tenor(id) => {
+            let url = format!(
+                "{}/posts?ids={id}&key={}&client_key={}&media_filter=gif,mediumgif,tinygif,nanogif",
+                gif_links::TENOR_API_BASE,
+                gif_links::TENOR_API_KEY,
+                gif_links::TENOR_CLIENT_KEY
+            );
+            Ok(gif_links::tenor_media(&get(url).await?, id))
+        }
+        gif_links::Share::Klipy(slug) => {
+            let Some(api) = api else { return Ok(None) };
+            let caps: serde_json::Value = api.get("/capabilities").await.map_err(|e| anyhow!("{e}"))?;
+            let provider = &caps["gif_provider"];
+            let (Some(key), true) = (provider["api_key"].as_str().filter(|k| !k.is_empty()), provider["enabled"].as_bool() != Some(false)) else {
+                return Ok(None);
+            };
+            let base = provider["api_base_url"].as_str().unwrap_or("https://api.klipy.com/api/v1").trim_end_matches('/');
+            let url = format!(
+                "{base}/{}/gifs/search?page=1&limit=24&per_page=24&q={}",
+                urlencoding::encode(key),
+                urlencoding::encode(slug)
+            );
+            Ok(gif_links::klipy_media(&get(url).await?, slug))
+        }
     }
 }
