@@ -23,6 +23,7 @@ mod call;
 mod dm_view;
 mod account_prefs;
 mod gifs;
+mod notify;
 mod sound;
 pub use gifs::GifShare;
 pub use sound::{SoundSource, SoundView};
@@ -266,6 +267,10 @@ pub struct Client {
     call: Option<call::ActiveCall>,
     /// The account's shared preferences (`prefs.v1`), as last read or written.
     account_prefs: serde_json::Value,
+    /// Whether the window is in front (alerts come only while it is not).
+    window_active: bool,
+    /// Sounds, the ringing call and their pacing.
+    alerts: notify::Alerts,
     /// No input to the window for a while: shown as idle (see `effective_status`).
     auto_idle: bool,
     /// The account's favourite GIFs (from the sealed sync store), newest first.
@@ -359,6 +364,8 @@ impl Client {
             call: None,
             sound: None,
             auto_idle: false,
+            window_active: true,
+            alerts: notify::Alerts::default(),
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
@@ -631,6 +638,7 @@ impl Client {
         self.sound = None;
         self.gif_favorites.clear();
         self.gif_shares.clear();
+        self.alerts = notify::Alerts::default();
         self.account_prefs = serde_json::Value::Object(Default::default());
         self.sync = None;
         self.speaking_task = None;
@@ -1539,11 +1547,14 @@ impl Client {
                 // A guild's roster, or a conversation's call (on the home gateway).
                 let Some(guild) = state.guild_id.clone().or_else(|| state.conversation_id.clone()) else { return };
                 let roster = self.voice.entry(guild).or_default();
+                let before = roster.len();
                 if state.channel_id.is_some() {
                     roster.insert(state.user_id.clone(), state.clone());
                 } else {
                     roster.remove(&state.user_id);
                 }
+                let after = roster.len();
+                self.ring_on_roster(&state, before, after, cx);
                 self.on_voice_roster(&state, cx);
             }
             Event::PinsUpdate { channel_id, .. } => {
@@ -1933,7 +1944,19 @@ impl Client {
         if message.author == me {
             return;
         }
-        if self.selected_channel() == Some(message.channel_id.as_str()) {
+        let mention = mentions_user(&message.content, &me);
+        let here = self.selected_channel() == Some(message.channel_id.as_str());
+        if !(here && self.window_active) && !self.read_mark(&message.channel_id).muted {
+            if mention {
+                let guild = self.guild_of_channel(&message.channel_id).map(|g| g.guild.id.clone());
+                let sender = self.display_name(guild.as_deref(), &message.author);
+                let place = self.channel(&message.channel_id).map(|c| format!("#{}", c.name));
+                self.alert(notify::Alert::Mention, &sender, place, &message.content, cx);
+            } else {
+                self.message_sound(cx);
+            }
+        }
+        if here {
             if let Some(api) = self.api_for_channel(&message.channel_id) {
                 let (chan, id) = (message.channel_id.clone(), message.id.clone());
                 self.io.spawn(async move {
@@ -1942,7 +1965,6 @@ impl Client {
             }
             return;
         }
-        let mention = mentions_user(&message.content, &me);
         let mark = self.read.entry(message.channel_id.clone()).or_default();
         mark.first_unread.get_or_insert_with(|| message.id.clone());
         mark.unread += 1;

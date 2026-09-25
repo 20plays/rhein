@@ -151,7 +151,14 @@ impl Shell {
                 }
             })
         };
+        let active = window.is_window_active();
+        client.update(cx, |c, _| c.set_window_active(active));
         let subs = vec![
+            // Alerts come only while the window is in the background.
+            cx.observe_window_activation(window, |this, window, cx| {
+                let active = window.is_window_active();
+                this.client.update(cx, |c, _| c.set_window_active(active));
+            }),
             {
                 let (last, client) = (last_input.clone(), client.clone());
                 cx.observe_keystrokes(move |_, _, _, cx| note_input(&last, &client, cx))
@@ -2142,6 +2149,60 @@ impl Shell {
         )
     }
 
+    /// Someone calling you in a conversation: who, with Answer and Decline.
+    fn ringing_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let client = self.client.read(cx);
+        let (conversation, from) = client.ringing().map(|(c, f)| (c.to_owned(), f.to_owned()))?;
+        let t = cx.theme().clone();
+        let name = client.display_name(None, &from);
+        let face = Avatar::new(from.clone(), name.clone()).size(px(40.)).image(client.avatar_url(None, &from).map(Into::into));
+        let (answer, decline) = (self.client.clone(), self.client.clone());
+        Some(
+            div()
+                .absolute()
+                .top(px(16.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(motion::pop_in(
+                    div()
+                        .id("ringing")
+                        .occlude()
+                        .w(px(340.))
+                        .p_3()
+                        .rounded(radius::LG)
+                        .bg(t.bg_raised)
+                        .border_1()
+                        .border_color(t.border_strong)
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(face)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                                .child(div().text_size(text::SM).text_color(t.text_muted).child("is calling you")),
+                        )
+                        .child(Button::new("ring-decline", "Decline").ghost().on_click(move |_, _, cx| decline.update(cx, |c, cx| c.decline_ring(cx))))
+                        .child(Button::new("ring-answer", "Answer").primary().icon(Icon::Phone).on_click(move |_, _, cx| {
+                            let conversation = conversation.clone();
+                            answer.update(cx, |c, cx| {
+                                c.decline_ring(cx);
+                                c.join_dm_call(conversation, cx);
+                            })
+                        })),
+                    "ringing-in",
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let client = self.client.read(cx);
         let (text, kind) = match (&client.error, &client.warning, &client.notice) {
@@ -2194,6 +2255,7 @@ impl Render for Shell {
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
         let toast = self.toast(cx);
+        let ringing = self.ringing_card(cx);
         let modal = self.render_modal(cx);
         let card = self.render_profile_card(cx);
         let switcher = self.switcher.as_ref().map(|(view, _)| {
@@ -2288,6 +2350,7 @@ impl Render for Shell {
             // Side panels run the full height; the status line belongs to the middle column.
             .children(members)
             .children(toast)
+            .children(ringing)
             .children(dialog)
             .children(sign_out)
             .children(settings)

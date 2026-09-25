@@ -21,6 +21,7 @@ enum Section {
     Devices,
     Servers,
     Appearance,
+    Notifications,
     Activity,
     Encryption,
     Voice,
@@ -29,11 +30,12 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 9] = [
+    const ALL: [Section; 10] = [
         Section::Account,
         Section::Devices,
         Section::Servers,
         Section::Appearance,
+        Section::Notifications,
         Section::Activity,
         Section::Encryption,
         Section::Voice,
@@ -47,6 +49,7 @@ impl Section {
             Section::Devices => "Devices",
             Section::Servers => "Servers",
             Section::Appearance => "Appearance",
+            Section::Notifications => "Notifications",
             Section::Activity => "Activity",
             Section::Encryption => "Encryption",
             Section::Voice => "Voice",
@@ -61,6 +64,7 @@ impl Section {
             Section::Devices => Icon::Monitor,
             Section::Servers => Icon::Server,
             Section::Appearance => Icon::Palette,
+            Section::Notifications => Icon::Bell,
             Section::Activity => Icon::Gamepad,
             Section::Encryption => Icon::Lock,
             Section::Voice => Icon::Mic,
@@ -1008,6 +1012,53 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Alerts, as the web client offers them; the choices are the account's, on every device.
+    fn notifications(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let preview = client.account_pref(&["notificationPreview"]).and_then(|v| v.as_str()).unwrap_or("full").to_owned();
+        let sounds = client.account_flag(&["notifySounds"], false);
+        let c = self.client.clone();
+        let preview_control = div()
+            .flex()
+            .gap_1()
+            .children([("full", "Message"), ("sender", "Sender only"), ("hidden", "Nothing")].into_iter().enumerate().map(|(i, (value, label))| {
+                let active = preview == value;
+                let c = c.clone();
+                div()
+                    .id(("notify-preview", i))
+                    .px_2()
+                    .py_1()
+                    .rounded(radius::MD)
+                    .border_1()
+                    .border_color(if active { t.accent } else { t.border_strong })
+                    .text_size(text::SM)
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.set_account_pref(&["notificationPreview"], Some(value.into()), cx)))
+                    .child(label)
+            }))
+            .into_any_element();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("Alerts", t))
+            .child(setting_row(t, "What an alert shows", "The message itself, only who sent it, or neither.", preview_control))
+            .child(setting_row(t, "Mentions", "When someone mentions you while Rhein is in the background.", account_switch(&self.client, "notify-mentions", &["notifyMentions"], true, cx)))
+            .child(setting_row(t, "Private messages", "Every message in your conversations while Rhein is in the background.", account_switch(&self.client, "notify-dms", &["notifyDms"], true, cx)))
+            .child(setting_row(t, "Sounds", "A ping with mentions and private messages.", account_switch(&self.client, "notify-sounds", &["notifySounds"], false, cx)))
+            .child(
+                div().when(!sounds, |d| d.opacity(0.5)).child(setting_row(
+                    t,
+                    "Sound for every message",
+                    "A softer sound for any other message, in channels you are not looking at.",
+                    if sounds { account_switch(&self.client, "notify-sound-messages", &["notifySoundMessages"], false, cx) } else { Switch::new("notify-sound-messages", false).into_any_element() },
+                )),
+            )
+            .child(setting_row(t, "Ring for calls", "The ringtone when someone calls you in a conversation.", account_switch(&self.client, "notify-ring", &["notifyCallRing"], true, cx)))
+            .child(div().pt_2().text_size(text::SM).text_color(t.text_faint).child("Nothing alerts while you are set to Do not disturb. These choices follow your account to your other devices."))
+            .into_any_element()
+    }
+
     /// Rich presence: what is shared, from which sources, and what is being shared right now.
     fn activity_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
@@ -1263,6 +1314,40 @@ impl SettingsView {
     }
 }
 
+/// One setting: its name and what it does on the left, its control on the right.
+fn setting_row(t: &Theme, title: &'static str, detail: &'static str, control: AnyElement) -> gpui::Div {
+    div()
+        .p_3()
+        .rounded(radius::MD)
+        .border_1()
+        .border_color(t.border)
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().font_weight(FontWeight::MEDIUM).child(title))
+                .child(div().text_size(text::SM).text_color(t.text_faint).child(detail)),
+        )
+        .child(control)
+}
+
+/// A group heading inside a section.
+fn heading(title: &'static str, t: &Theme) -> gpui::Div {
+    div().pt_2().pb_1().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(title.to_lowercase())
+}
+
+/// A switch for a yes-or-no preference shared with the account (`prefs.v1`).
+fn account_switch(client: &Entity<Client>, id: &'static str, path: &'static [&'static str], default: bool, cx: &gpui::App) -> AnyElement {
+    let on = client.read(cx).account_flag(path, default);
+    let client = client.clone();
+    Switch::new(id, on).on_toggle(move |on, _, cx| client.update(cx, |c, cx| c.set_account_pref(path, Some(on.into()), cx))).into_any_element()
+}
+
 fn date(ms: i64) -> String {
     jiff::Timestamp::from_millisecond(ms)
         .ok()
@@ -1293,6 +1378,7 @@ impl Render for SettingsView {
             Section::Devices => self.devices_section(&t, cx),
             Section::Servers => self.servers_section(&t, cx),
             Section::Appearance => self.appearance(&t, cx),
+            Section::Notifications => self.notifications(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
             Section::Encryption => self.encryption_section(&t, cx),
             Section::Voice => self.voice_section(&t, cx),

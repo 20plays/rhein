@@ -147,8 +147,18 @@ impl Client {
         log.reached_start = true;
         log.error = state.error.clone();
         if grew && before > 0 {
+            let fresh: Vec<(String, String)> =
+                log.messages[before..].iter().filter(|m| m.author != me).map(|m| (m.author.clone(), m.content.clone())).collect();
             for _ in before..log.messages.len() {
                 cx.emit(ClientEvent::MessageAppended { channel_id: id.to_owned() });
+            }
+            // New words from someone else, in a conversation not in front of you.
+            let open = self.home_conversation.as_deref() == Some(id) && self.window_active;
+            if !open {
+                for (author, text) in fresh {
+                    let sender = self.display_name(None, &author);
+                    self.alert(notify::Alert::Direct, &sender, None, &text, cx);
+                }
             }
         } else {
             cx.emit(ClientEvent::MessagesReset { channel_id: id.to_owned() });

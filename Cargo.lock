@@ -7140,6 +7140,7 @@ dependencies = [
  "unicode-segmentation",
  "url",
  "urlencoding",
+ "zbus",
 ]
 
 [[package]]
