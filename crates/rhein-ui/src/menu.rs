@@ -309,6 +309,19 @@ impl MenuHost {
         self.open.is_some()
     }
 
+    /// Whether a menu has just closed and is still fading out (a click that closed it by
+    /// pressing outside it is over by then).
+    pub fn is_closing(&self) -> bool {
+        self.closing.is_some()
+    }
+
+    /// Closes the open menu, as Escape would.
+    pub fn close<V: 'static>(&mut self, cx: &mut Context<V>) {
+        if let Some((_, menu, _)) = &self.open {
+            menu.update(cx, |_, cx| cx.emit(DismissEvent));
+        }
+    }
+
     /// The open menu and the afterimage of one that just closed, if any.
     pub fn element(&self) -> Vec<AnyElement> {
         let closing = self.closing.as_ref().map(|(place, menu, _)| (*place, menu));

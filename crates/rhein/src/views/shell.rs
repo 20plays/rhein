@@ -892,7 +892,8 @@ impl Shell {
         let this = cx.weak_entity();
         let mut entries = Vec::new();
 
-        // The card: your banner or accent, face, name, address and status line.
+        // Your whole card, as others see it: banner, face, name, address, pronouns, status line,
+        // about me, and what you are sharing.
         {
             let client = self.client.clone();
             let me = me.clone();
@@ -904,26 +905,50 @@ impl Shell {
                 let look = profile::Look {
                     banner: profile.as_ref().and_then(|p| p.banner_ref.as_deref()).and_then(|r| c.banner_url(&me, r)),
                     accent: profile.as_ref().and_then(|p| p.accent_color),
-                    theme: None,
+                    theme: profile.as_ref().and_then(|p| p.theme_colors),
                 };
                 let presence = presence_of(c.effective_status());
-                let face = Avatar::new(me.clone(), name.clone()).size(px(56.)).image(c.avatar_url(None, &me).map(Into::into)).presence(Some(presence));
-                div()
-                    .mb_1()
-                    .rounded(radius::MD)
-                    .overflow_hidden()
-                    .bg(t.bg_panel)
-                    .child(profile::header_sized(&look, face.into_any_element(), 56., 64., &t))
+                let face = Avatar::new(me.clone(), name.clone()).size(px(profile::FACE_SIZE)).image(c.avatar_url(None, &me).map(Into::into)).presence(Some(presence));
+                let pronouns = profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty());
+                let bio = profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty());
+                let now_ms = rhein_store::client::now_ms().max(0) as u64;
+                let activities: Vec<AnyElement> = c
+                    .shared_activities()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        // Our own artwork loads directly: it came from this machine or its home server.
+                        let assets = a.assets.clone().unwrap_or_default();
+                        activity::card(&format!("me-activity-{i}"), a, assets.large_image, assets.small_image, now_ms, &t)
+                    })
+                    .collect();
+                let body = div()
+                    .px_4()
+                    .pb_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
-                            .px_3()
-                            .pb_3()
                             .flex()
                             .flex_col()
                             .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
                             .child(div().text_size(text::SM).text_color(t.text_faint).truncate().child(me.clone()))
-                            .children(c.prefs.custom_status.clone().map(|s| div().pt_1().text_size(text::SM).text_color(t.text_muted).child(s))),
+                            .children(pronouns.map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p)))
+                            .children(c.prefs.custom_status.clone().map(|s| div().pt_1().text_size(text::SM).child(s))),
                     )
+                    .children(bio.map(|bio| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("about me"))
+                            .child(div().text_size(text::SM).child(bio))
+                    }))
+                    .children(activities);
+                div()
+                    .mb_1()
+                    .child(profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face.into_any_element(), &t)).child(body)))
                     .into_any_element()
             }));
         }
@@ -979,16 +1004,16 @@ impl Shell {
             entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
         }
 
-        // Saved accounts: switch without a password, or add another.
+        // Saved accounts, folded away: switch without a password, or add another.
         entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::Label("switch account".into()));
+        let mut switch = Vec::new();
         for account in accounts {
             let id = account.user_id.clone();
             let name = account.display_name.clone().unwrap_or_else(|| rhein_proto::localpart(&id).to_owned());
             let label = format!("{name} · {}", rhein_proto::domain_of(&id).unwrap_or_default());
             let (c, target) = (self.client.clone(), id.clone());
             let (face_id, face_name) = (id.clone(), name.clone());
-            entries.push(
+            switch.push(
                 MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.switch_account(&target, cx)))
                     .with_leading(move |_, _| Avatar::new(face_id.clone(), face_name.clone()).size(px(20.)).into_any_element())
                     .checked(id == me),
@@ -996,8 +1021,12 @@ impl Shell {
         }
         {
             let c = self.client.clone();
-            entries.push(MenuEntry::item("Add an account", move |_, cx| c.update(cx, |c, cx| c.add_account(cx))).with_icon(Icon::UserPlus));
+            switch.push(MenuEntry::item("Add an account", move |_, cx| c.update(cx, |c, cx| c.add_account(cx))).with_icon(Icon::UserPlus));
         }
+        entries.push(
+            MenuEntry::expand("Switch account", switch)
+                .with_leading(|_, cx| rhein_ui::icon_sized(Icon::Users, px(16.)).text_color(cx.theme().text).into_any_element()),
+        );
         entries.push(MenuEntry::Separator);
         {
             let v = this.clone();
@@ -1009,7 +1038,9 @@ impl Shell {
         // Opens upward from the strip's top edge, flush with the sidebar's left.
         let strip = if self.client.read(cx).shared_activities().is_empty() { PROFILE_ROW_H } else { PROFILE_ROW_H * 2. };
         let at = gpui::point(px(8.), window.viewport_size().height - strip - px(4.));
-        self.menu.show_anchored(at, gpui::Anchor::BottomLeft, px(280.), entries, |v: &mut Shell| &mut v.menu, window, cx);
+        // The card's own width, and the menu's padding around it.
+        let width = px(profile::CARD_W + 10.);
+        self.menu.show_anchored(at, gpui::Anchor::BottomLeft, width, entries, |v: &mut Shell| &mut v.menu, window, cx);
     }
 
     // ---------------------------------------------------------------- modals
@@ -1681,7 +1712,15 @@ impl Shell {
             .gap_2()
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
-            .on_click(cx.listener(|this, _, window, cx| this.account_menu(window, cx)))
+            // A second click closes it: the press already has (as a click outside the menu), so
+            // the menu is on its way out and is not opened again.
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.menu.is_open() || this.menu.is_closing() {
+                    this.menu.close(cx);
+                } else {
+                    this.account_menu(window, cx);
+                }
+            }))
             .child(Avatar::new(me.clone(), name.clone()).size(px(32.)).image(avatar.map(Into::into)).presence(Some(presence)))
             .child(
                 div()
