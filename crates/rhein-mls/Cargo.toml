@@ -17,6 +17,7 @@ openmls_traits = "0.6"
 tls_codec = "0.5"
 aes-gcm = "0.10"
 hmac = "0.12"
+hkdf = "0.12"
 sha2.workspace = true
 ed25519-dalek.workspace = true
 getrandom = "0.3"

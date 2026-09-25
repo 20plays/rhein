@@ -315,6 +315,18 @@ impl Api {
         self.get(&format!("/channels/{}/voice", urlencoding::encode(channel_id))).await
     }
 
+    // --- the account's sync store (`docs/sync-encryption.md`) ---
+
+    /// Every key of the sync store, sealed values included: `{key: {value, updated_at}}`.
+    pub async fn sync_all(&self) -> ApiResult<serde_json::Value> {
+        self.get("/sync?sealed=1").await
+    }
+
+    /// Writes one key (a sealed envelope).
+    pub async fn sync_put(&self, key: &str, value: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.put(&format!("/sync/{}", urlencoding::encode(key)), value).await
+    }
+
     // --- conversation calls, on the home server (`server/src/routes/dmvoice.rs`) ---
 
     /// Joins a conversation's call. `wants_sfu` is the one bit the sequencer learns about our
