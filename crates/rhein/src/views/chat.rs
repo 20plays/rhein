@@ -1116,7 +1116,8 @@ impl ChatView {
         let client = self.client.read(cx);
         let (muted, deafened) = (client.voice_muted(), client.voice_deafened());
         let sharing = client.call().is_some_and(|c| c.sharing_screen);
-        let (c1, c2, c3, c4) = (self.client.clone(), self.client.clone(), self.client.clone(), self.client.clone());
+        let hidden = client.own_screen_hidden();
+        let (c1, c2, c3, c4, c5) = (self.client.clone(), self.client.clone(), self.client.clone(), self.client.clone(), self.client.clone());
         let id = |what: &str| SharedString::from(format!("{prefix}-{what}"));
         div()
             .flex()
@@ -1140,6 +1141,15 @@ impl ChatView {
                     .tooltip(if sharing { "Stop sharing your screen" } else { "Share your screen" })
                     .on_click(move |_, _, cx| c3.update(cx, |c, cx| if sharing { c.stop_screen_share(cx) } else { c.start_screen_share(cx) })),
             )
+            // Only while sharing: our own preview off (the share goes on) or back on.
+            .when(sharing, |d| {
+                d.child(
+                    IconButton::new(id("preview"), if hidden { Icon::EyeOff } else { Icon::Eye })
+                        .active(hidden)
+                        .tooltip(if hidden { "Show your screen to yourself again" } else { "Hide your screen from yourself (others still see it)" })
+                        .on_click(move |_, _, cx| c5.update(cx, |c, cx| c.set_own_screen_hidden(!hidden, cx))),
+                )
+            })
             .child(
                 IconButton::new(id("leave"), Icon::PhoneOff)
                     .danger(true)
@@ -1172,7 +1182,6 @@ impl ChatView {
         });
         let me = client.user_id().map(str::to_owned);
         let sfu = call.is_some_and(|c| matches!(c.mode, Some(rhein_store::CallMode::Sfu { .. })));
-        let own_hidden = call.is_some_and(|c| c.sharing_screen) && client.own_screen_hidden();
         // The screen on the stage: someone else's we watch, else our own while we share.
         let screen = members
             .iter()
@@ -1283,21 +1292,12 @@ impl ChatView {
                     .gap_6()
                     .p_8()
                     .children(screen.map(|(user, picture)| {
-                        let mine = me.as_deref() == Some(user.as_str());
-                        let label = if mine {
+                        let label = if me.as_deref() == Some(user.as_str()) {
                             "Your screen".to_owned()
                         } else {
                             format!("{}'s screen", client.display_name(guild_id.as_deref(), &user))
                         };
-                        // Our own preview can go: the share goes on, only we stop seeing it.
-                        let hide = mine.then(|| {
-                            let c = self.client.clone();
-                            div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
-                                IconButton::new("own-screen-hide", Icon::EyeOff)
-                                    .tooltip("Hide your screen (others still see it)")
-                                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.set_own_screen_hidden(true, cx))),
-                            )
-                        });
+
                         div()
                             .w_full()
                             .flex_1()
@@ -1307,7 +1307,6 @@ impl ChatView {
                             .overflow_hidden()
                             .relative()
                             .child(gpui::img(picture).size_full().object_fit(gpui::ObjectFit::Contain))
-                            .children(hide)
                             .child(
                                 div()
                                     .absolute()
@@ -1320,28 +1319,6 @@ impl ChatView {
                                     .text_size(text::SM)
                                     .child(label),
                             )
-                    }))
-                    .children(own_hidden.then(|| {
-                        let c = self.client.clone();
-                        div()
-                            .id("own-screen-show")
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(t.bg_panel)
-                            .border_1()
-                            .border_color(t.border)
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(text::SM)
-                            .text_color(t.text_muted)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(t.bg_hover))
-                            .on_click(move |_, _, cx| c.update(cx, |c, cx| c.set_own_screen_hidden(false, cx)))
-                            .child(rhein_ui::icon_sized(Icon::ScreenShare, px(14.)).text_color(t.live))
-                            .child("Your screen is hidden")
-                            .child(div().text_color(t.text).child("Show"))
                     }))
                     .child(if members.is_empty() {
                         div().text_color(t.text_faint).child("Nobody is here right now.").into_any_element()
