@@ -56,8 +56,9 @@ pub fn activity(track: &Track, start: u64) -> Option<Value> {
     if !track.artists.is_empty() {
         activity["state"] = json!(track.artists.join(", "));
     }
-    // Only web artwork can be shared; a file:// cover exists on this machine alone.
-    if let Some(art) = track.art.as_deref().filter(|a| a.starts_with("https://") || a.starts_with("http://")) {
+    // Web artwork is shared as it is. A file:// cover exists on this machine alone: the client
+    // uploads it to the home server and shares that copy, and never sends the path.
+    if let Some(art) = track.art.as_deref().filter(|a| a.starts_with("https://") || a.starts_with("http://") || a.starts_with("file://")) {
         activity["assets"] = json!({ "large_image": art, "large_text": track.album });
     }
     Some(activity)
@@ -200,11 +201,12 @@ mod tests {
     }
 
     #[test]
-    fn a_browser_video_is_watching_and_local_art_stays_home() {
+    fn a_browser_video_is_watching_and_local_art_is_passed_on() {
         let t = Track { url: Some("https://www.youtube.com/watch?v=x".into()), art: Some("file:///tmp/c.png".into()), ..track() };
         let a = activity(&t, 0).unwrap();
         assert_eq!(a["type"], 3);
-        assert!(a.get("assets").is_none());
+        // For the client to upload; the path itself is never shared.
+        assert_eq!(a["assets"]["large_image"], "file:///tmp/c.png");
         assert!(activity(&Track { title: None, ..track() }, 0).is_none());
     }
 }

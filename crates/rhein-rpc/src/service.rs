@@ -146,7 +146,17 @@ pub fn start(config: Config) -> Handle {
                         Some(raw) => {
                             let raw = resolver.complete(raw).await;
                             match Activity::normalize(&raw) {
-                                Some(activity) => {
+                                Some(mut activity) => {
+                                    // A media player's own cover file (never another program's:
+                                    // that could name any picture on the disk). The client
+                                    // uploads it and shares the copy, never the path.
+                                    if key == "mpris"
+                                        && let Some(local) = raw["assets"]["large_image"].as_str().filter(|u| u.starts_with("file://"))
+                                    {
+                                        let assets = activity.assets.get_or_insert_with(Default::default);
+                                        assets.large_image = Some(local.to_owned());
+                                        assets.large_text = raw["assets"]["large_text"].as_str().map(|t| t.chars().take(128).collect());
+                                    }
                                     // A detected game re-reports every scan; keep its place in line.
                                     let same = entries.get(&key).is_some_and(|e| e.activity == activity);
                                     if !same {

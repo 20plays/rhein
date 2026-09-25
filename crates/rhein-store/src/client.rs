@@ -23,6 +23,7 @@ mod call;
 mod dm_view;
 mod account;
 mod account_prefs;
+mod covers;
 mod gifs;
 mod notify;
 mod signals;
@@ -277,6 +278,8 @@ pub struct Client {
     dm_seen: HashMap<String, String>,
     /// The read receipt waiting to go out.
     read_flush: Option<Task<()>>,
+    /// Local covers of shared activities, uploaded to the home server.
+    covers: covers::Covers,
     /// No input to the window for a while: shown as idle (see `effective_status`).
     auto_idle: bool,
     /// The account's favourite GIFs (from the sealed sync store), newest first.
@@ -372,6 +375,7 @@ impl Client {
             call: None,
             sound: None,
             auto_idle: false,
+            covers: covers::Covers::load(),
             window_active: true,
             alerts: notify::Alerts::default(),
             dm_seen: HashMap::new(),
@@ -862,7 +866,7 @@ impl Client {
 
     /// Applies the sharing preferences to what the sources found and tells the servers when that
     /// changes.
-    fn share_local(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn share_local(&mut self, cx: &mut Context<Self>) {
         if self.rpc.is_none() {
             return;
         }
@@ -878,6 +882,7 @@ impl Client {
             .filter(|a| !prefs.hidden_activities.contains(&a.name))
             .cloned()
             .collect();
+        let shared = self.with_shared_covers(shared, cx);
         // With nothing of our own we stay out of it, so another session's activity (the Telium
         // desktop app's, say) isn't erased; when ours ends, it is cleared once.
         if shared.is_empty() {
