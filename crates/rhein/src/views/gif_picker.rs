@@ -123,7 +123,7 @@ impl Render for GifPicker {
                     div()
                         .absolute()
                         .top_1()
-                        .right_1()
+                        .left_1()
                         .rounded(radius::MD)
                         .bg(t.bg_base)
                         .invisible()

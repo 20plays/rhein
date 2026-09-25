@@ -1126,7 +1126,7 @@ impl ChatView {
             });
             let who = client.display_name(guild_id.as_deref(), &state.user_id);
             let avatar = client.avatar_url(guild_id.as_deref(), &state.user_id);
-            let badge = |glyph: Icon, danger: bool| {
+            let badge = |glyph: Icon, color: Option<gpui::Rgba>| {
                 div()
                     .size(px(24.))
                     .rounded_full()
@@ -1134,7 +1134,7 @@ impl ChatView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(rhein_ui::icon_sized(glyph, px(14.)).text_color(if danger { t.danger } else { t.text_muted }))
+                    .child(rhein_ui::icon_sized(glyph, px(14.)).text_color(color.unwrap_or(t.text_muted)))
             };
             let speaking = client.is_speaking(&state.user_id);
             div()
@@ -1161,10 +1161,10 @@ impl ChatView {
                     div()
                         .flex()
                         .gap_1()
-                        .when(state.self_mute || state.server_mute, |d| d.child(badge(Icon::MicOff, state.server_mute)))
-                        .when(state.self_deaf || state.server_deaf, |d| d.child(badge(Icon::HeadphoneOff, state.server_deaf)))
-                        .when(state.self_video, |d| d.child(badge(Icon::Video, false)))
-                        .when(state.streaming, |d| d.child(badge(Icon::ScreenShare, true))),
+                        .when(state.self_mute || state.server_mute, |d| d.child(badge(Icon::MicOff, state.server_mute.then_some(t.danger))))
+                        .when(state.self_deaf || state.server_deaf, |d| d.child(badge(Icon::HeadphoneOff, state.server_deaf.then_some(t.danger))))
+                        .when(state.self_video, |d| d.child(badge(Icon::Video, None)))
+                        .when(state.streaming, |d| d.child(badge(Icon::ScreenShare, Some(t.live)))),
                 )
         });
         div()

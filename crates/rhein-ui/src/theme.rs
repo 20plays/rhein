@@ -33,6 +33,8 @@ pub struct Theme {
     pub danger_soft: Rgba,
     pub success: Rgba,
     pub warning: Rgba,
+    /// Someone sharing their screen.
+    pub live: Rgba,
 
     pub selection: Rgba,
     pub overlay: Rgba,
@@ -65,6 +67,7 @@ impl Theme {
             danger_soft: rgba(0xee444426),
             success: rgb(0x3ecf8e),
             warning: rgb(0xf5a524),
+            live: rgb(0xa78bfa),
 
             selection: rgba(0xffffff33),
             overlay: rgba(0x000000b3),

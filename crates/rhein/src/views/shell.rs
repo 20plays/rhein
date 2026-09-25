@@ -257,9 +257,18 @@ impl Shell {
                                 break;
                             }
                         }
-                        // RHEIN_DEV_SHARE=1: then presses the screen share button.
+                        // RHEIN_DEV_SHARE=1: then presses the screen share button, once connected.
                         // (=pattern shares a test pattern instead of asking the desktop.)
                         if let Ok(how) = std::env::var("RHEIN_DEV_SHARE") {
+                            for _ in 0..40 {
+                                let up = this
+                                    .update(cx, |v, cx| v.client.read(cx).call().is_some_and(|c| c.status == CallStatus::Connected))
+                                    .unwrap_or(true);
+                                if up {
+                                    break;
+                                }
+                                cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            }
                             this.update(cx, |v, cx| {
                                 v.client.update(cx, |c, cx| if how == "pattern" { c.share_test_pattern(cx) } else { c.start_screen_share(cx) })
                             })
@@ -1931,26 +1940,26 @@ impl Shell {
                     let deaf = state.self_deaf || state.server_deaf;
                     rows.push(
                         div()
-                            .pl(px(30.))
+                            .pl(px(28.))
                             .pr_2()
-                            .py_0p5()
+                            .py(px(3.))
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_size(text::SM)
+                            .text_size(text::MD)
                             .text_color(t.text_muted)
                             .child(
                                 div()
                                     .rounded_full()
                                     .border_2()
                                     .border_color(if client.is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
-                                    .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(20.)).image(avatar.map(Into::into))),
+                                    .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(24.)).image(avatar.map(Into::into))),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(name))
-                            .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(12.)).text_color(t.danger)))
-                            .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(12.)).text_color(t.text_faint)))
-                            .when(muted, |d| d.child(icon_sized(Icon::MicOff, px(12.)).text_color(if state.server_mute { t.danger } else { t.text_faint })))
-                            .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(12.)).text_color(if state.server_deaf { t.danger } else { t.text_faint })))
+                            .when(state.streaming, |d| d.child(icon_sized(Icon::ScreenShare, px(14.)).text_color(t.live)))
+                            .when(state.self_video, |d| d.child(icon_sized(Icon::Video, px(14.)).text_color(t.text_faint)))
+                            .when(muted, |d| d.child(icon_sized(Icon::MicOff, px(14.)).text_color(if state.server_mute { t.danger } else { t.text_faint })))
+                            .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(14.)).text_color(if state.server_deaf { t.danger } else { t.text_faint })))
                             .into_any_element(),
                     );
                 }
