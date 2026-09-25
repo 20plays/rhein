@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Starts everything Rhein needs for development and then the client:
+#
+#   ./rheinrun              dev servers a and b, the dev SFU, then the client
+#   ./rheinrun --demo       the same, signed in as the demo account (.dev/config-demo)
+#   ./rheinrun --no-sfu     no SFU: calls on server a are peer to peer
+#   ./rheinrun --null-audio calls open no real microphone or speakers
+#   ./rheinrun --release    build the client in release mode
+#
+# Anything already running (a server on its port, the SFU) is reused and left alone. What this
+# script starts is stopped again when the client exits. Logs go to .dev/logs/.
+set -euo pipefail
+root="$(cd "$(dirname "$0")" && pwd)"
+cd "$root"
+
+demo=0 sfu=1 null_audio=0 profile=()
+for arg in "$@"; do
+  case "$arg" in
+    --demo) demo=1 ;;
+    --no-sfu) sfu=0 ;;
+    --null-audio) null_audio=1 ;;
+    --release) profile=(--release) ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
+  esac
+done
+
+logs="$root/.dev/logs"
+mkdir -p "$logs"
+started=()
+
+cleanup() {
+  for pid in "${started[@]}"; do
+    # The scripts exec their servers, so the pid is the server; the SFU also has a livekit child.
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+up() { curl -s -o /dev/null --max-time 1 "$1"; }
+
+wait_for() {
+  local name="$1" url="$2" log="$3"
+  for _ in $(seq 1 600); do
+    up "$url" && return 0
+    sleep 0.5
+  done
+  echo "$name did not come up; see $log" >&2
+  exit 1
+}
+
+start() {
+  local name="$1" url="$2" log="$logs/$3.log"
+  shift 3
+  if up "$url"; then
+    echo "· $name already running"
+    return
+  fi
+  echo "· starting $name (log: ${log#"$root/"})"
+  "$@" >"$log" 2>&1 &
+  started+=($!)
+  wait_for "$name" "$url" "$log"
+}
+
+if [[ $sfu == 1 && -x .dev/bin/livekit-server ]]; then
+  start "SFU" http://127.0.0.1:7890/health sfu scripts/dev-sfu.sh
+  sfu_env=(RHEIN_SFU=1)
+else
+  [[ $sfu == 1 ]] && echo "· no .dev/bin/livekit-server: calls are peer to peer"
+  sfu_env=()
+fi
+# The first build of a server can take a few minutes.
+start "server a (localhost:8448)" http://localhost:8448/.well-known/telium server-a env "${sfu_env[@]}" scripts/dev-server.sh a
+start "server b (localhost:8449)" http://localhost:8449/.well-known/telium server-b scripts/dev-server.sh b
+
+client_env=()
+[[ $demo == 1 ]] && client_env+=(RHEIN_CONFIG_DIR="$root/.dev/config-demo")
+[[ $null_audio == 1 ]] && client_env+=(RHEIN_AUDIO=null)
+
+echo "· starting the client"
+env "${client_env[@]}" cargo run -q "${profile[@]}" -p rhein

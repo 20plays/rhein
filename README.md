@@ -34,6 +34,14 @@ The plan and its risks are in `~/.claude/plans/lies-die-das-hier-vectorized-snai
 ## Running it
 
 ```sh
+./rheinrun                   # both dev servers, the dev SFU, then the client; stops them on exit
+./rheinrun --demo            # the same as the demo account (--no-sfu, --null-audio, --release)
+```
+
+Or piece by piece:
+
+```sh
+scripts/dev-sfu.sh           # optional: a Telium SFU in front of .dev/bin/livekit-server
 scripts/dev-server.sh a      # Telium "localhost" on :8448 (built from .dev/telium, a clone)
 scripts/dev-server.sh b      # Telium "b.localhost" on :8449, federates with a
 cargo run -p rhein
