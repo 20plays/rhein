@@ -1654,24 +1654,28 @@ impl ChatView {
                             .tooltip("Attach files")
                             .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
                     )
+                    // In a slot as tall as the icon buttons beside it, so all three share one
+                    // middle.
                     .child(
-                        div()
-                            .id("composer-gif")
-                            .h(px(28.))
-                            .px_1p5()
-                            .flex()
-                            .items_center()
-                            .rounded(radius::MD)
-                            .border_1()
-                            .border_color(t.text_faint)
-                            .text_color(t.text_muted)
-                            .text_size(text::XS)
-                            .font_weight(FontWeight::BOLD)
-                            .cursor_pointer()
-                            .hover(|s| s.text_color(t.text).border_color(t.text_muted))
-                            .tooltip(rhein_ui::tooltip("Favourite GIFs"))
-                            .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.open_gif_picker(e.position(), window, cx)))
-                            .child("GIF"),
+                        div().h(size::ICON_BUTTON_LG).flex().items_center().child(
+                            div()
+                                .id("composer-gif")
+                                .h(px(28.))
+                                .px_1p5()
+                                .flex()
+                                .items_center()
+                                .rounded(radius::MD)
+                                .border_1()
+                                .border_color(t.text_faint)
+                                .text_color(t.text_muted)
+                                .text_size(text::XS)
+                                .font_weight(FontWeight::BOLD)
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(t.text).border_color(t.text_muted))
+                                .tooltip(rhein_ui::tooltip("Favourite GIFs"))
+                                .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| this.open_gif_picker(e.position(), window, cx)))
+                                .child("GIF"),
+                        ),
                     )
                     .child(
                         IconButton::new("composer-emoji", Icon::Smile)
