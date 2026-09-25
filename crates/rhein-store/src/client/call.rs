@@ -75,6 +75,8 @@ pub struct ActiveCall {
     screen: Option<ScreenShare>,
     /// A test pattern shared in place of a screen (`RHEIN_DEV_SHARE=pattern`).
     test_pattern: Option<rhein_voice::video::TestPattern>,
+    /// What we share, for our own eyes (paused while hidden, see `set_own_screen_hidden`).
+    own_preview: Option<VideoFeed>,
     videos: HashMap<(String, Slot), VideoFeed>,
     /// The picture drawn for each video, and which frame it is.
     images: HashMap<(String, Slot), (u64, Arc<gpui::RenderImage>)>,
@@ -327,6 +329,7 @@ impl Client {
             speaking: HashSet::new(),
             screen: None,
             test_pattern: None,
+            own_preview: None,
             videos: HashMap::new(),
             images: HashMap::new(),
             _task: Some(task),
@@ -608,7 +611,6 @@ impl Client {
             return;
         }
         let io = self.io.clone();
-        let me = self.home.as_ref().map(|h| h.user_id.clone());
         cx.spawn(async move |this, cx| {
             let started = io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await }).await;
             let started = match started {
@@ -622,12 +624,10 @@ impl Client {
                         if let Some(commands) = &call.commands {
                             let _ = commands.send(Command::Publish { slot: Slot::Screen, video: share.video().clone() });
                         }
-                        // Our own screen on our own stage.
-                        if let Some(me) = me.clone() {
-                            call.videos.insert((me, Slot::Screen), share.preview());
-                        }
+                        call.own_preview = Some(share.preview());
                         call.screen = Some(share);
                         call.sharing_screen = true;
+                        this.place_own_preview(cx);
                         if let Some(route) = this.route() {
                             this.io.spawn(async move { route.stream(true).await });
                         }
@@ -654,7 +654,6 @@ impl Client {
     /// Shares a moving test pattern as if it were a screen, without asking the desktop: the
     /// same publishing and preview, for screenshots in a headless session.
     pub fn share_test_pattern(&mut self, cx: &mut Context<Self>) {
-        let me = self.home.as_ref().map(|h| h.user_id.clone());
         let Some(call) = self.call.as_mut() else { return };
         let _inside = self.io.handle().enter();
         let (preview, sink) = rhein_voice::video::VideoFeed::local(1280, 10);
@@ -663,14 +662,44 @@ impl Client {
         if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Publish { slot: Slot::Screen, video });
         }
-        if let Some(me) = me {
-            call.videos.insert((me, Slot::Screen), preview);
-        }
+        call.own_preview = Some(preview);
         call.sharing_screen = true;
+        self.place_own_preview(cx);
         if let Some(route) = self.route() {
             self.io.spawn(async move { route.stream(true).await });
         }
         cx.notify();
+    }
+
+    /// Whether our own screen stays off our own stage (a choice kept on this device).
+    pub fn own_screen_hidden(&self) -> bool {
+        self.prefs.hide_own_screen
+    }
+
+    /// Hides (or shows again) the preview of what we share; the share itself goes on.
+    pub fn set_own_screen_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        self.prefs.hide_own_screen = hidden;
+        self.save_prefs();
+        self.place_own_preview(cx);
+        cx.notify();
+    }
+
+    /// Puts our preview on our stage, or takes it off and stops making its pictures.
+    fn place_own_preview(&mut self, cx: &mut Context<Self>) {
+        let hidden = self.prefs.hide_own_screen;
+        let Some(me) = self.home.as_ref().map(|h| h.user_id.clone()) else { return };
+        let Some(call) = self.call.as_mut() else { return };
+        let Some(preview) = call.own_preview.clone() else { return };
+        preview.set_paused(hidden);
+        let key = (me, Slot::Screen);
+        if hidden {
+            call.videos.remove(&key);
+            if let Some((_, image)) = call.images.remove(&key) {
+                cx.drop_image(image, None);
+            }
+        } else {
+            call.videos.insert(key, preview);
+        }
     }
 
     pub fn stop_screen_share(&mut self, cx: &mut Context<Self>) {
@@ -681,6 +710,7 @@ impl Client {
         call.sharing_screen = false;
         call.screen = None;
         call.test_pattern = None;
+        call.own_preview = None;
         if let Some(me) = self.home.as_ref().map(|h| h.user_id.clone()) {
             call.videos.remove(&(me.clone(), Slot::Screen));
             if let Some((_, image)) = call.images.remove(&(me, Slot::Screen)) {

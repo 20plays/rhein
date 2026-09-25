@@ -17,6 +17,8 @@ pub struct Prefs {
     pub clock_24h: bool,
     /// Show every change instantly: no fades, glides or blinking cursor.
     pub reduce_motion: bool,
+    /// Keep the preview of our own screen share off our own stage.
+    pub hide_own_screen: bool,
     /// Share what you are playing, listening to or watching (rich presence).
     pub share_activity: bool,
     pub share_games: bool,
@@ -64,6 +66,7 @@ impl Default for Prefs {
             compact: false,
             clock_24h: true,
             reduce_motion: false,
+            hide_own_screen: false,
             share_activity: true,
             share_games: true,
             share_music: true,

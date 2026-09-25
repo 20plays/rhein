@@ -24,6 +24,8 @@ pub struct VideoFeed {
     latest: Arc<Mutex<Option<Arc<Picture>>>>,
     seq: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
+    /// A preview of our own, not wanted for now: no pictures are made (see `set_paused`).
+    paused: Arc<AtomicBool>,
     /// Held by the handles only: the last one dropped stops the task.
     _guard: Arc<StopOnDrop>,
 }
@@ -41,7 +43,7 @@ impl VideoFeed {
     /// scaled down, and at most `fps` are converted per second.
     pub fn start(track: RtcVideoTrack, max_width: u32, fps: u32) -> VideoFeed {
         let stopped = Arc::new(AtomicBool::new(false));
-        let feed = VideoFeed { latest: Arc::default(), seq: Arc::default(), stopped: stopped.clone(), _guard: Arc::new(StopOnDrop(stopped)) };
+        let feed = VideoFeed { latest: Arc::default(), seq: Arc::default(), stopped: stopped.clone(), paused: Arc::default(), _guard: Arc::new(StopOnDrop(stopped)) };
         let (latest, seq, stopped) = (feed.latest.clone(), feed.seq.clone(), feed.stopped.clone());
         tokio::spawn(async move {
             let mut stream = NativeVideoStream::new(track);
@@ -74,11 +76,17 @@ impl VideoFeed {
         self.stopped.store(true, Ordering::Relaxed);
     }
 
+    /// Stops (or resumes) making pictures for a local preview, which costs nothing while off.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
     /// A feed of our own pictures (a screen we share), filled through the returned sink.
     pub fn local(max_width: u32, fps: u32) -> (VideoFeed, PreviewSink) {
         let stopped = Arc::new(AtomicBool::new(false));
-        let feed = VideoFeed { latest: Arc::default(), seq: Arc::default(), stopped: stopped.clone(), _guard: Arc::new(StopOnDrop(stopped)) };
+        let feed = VideoFeed { latest: Arc::default(), seq: Arc::default(), stopped: stopped.clone(), paused: Arc::default(), _guard: Arc::new(StopOnDrop(stopped)) };
         let sink = PreviewSink {
+            paused: feed.paused.clone(),
             latest: feed.latest.clone(),
             seq: feed.seq.clone(),
             every: Duration::from_millis(1000 / fps.max(1) as u64),
@@ -92,6 +100,7 @@ impl VideoFeed {
 /// Where our own outgoing pictures are previewed: a few per second, scaled down.
 #[derive(Clone)]
 pub struct PreviewSink {
+    paused: Arc<AtomicBool>,
     latest: Arc<Mutex<Option<Arc<Picture>>>>,
     seq: Arc<AtomicU64>,
     every: Duration,
@@ -102,6 +111,9 @@ pub struct PreviewSink {
 impl PreviewSink {
     /// Takes a picture on its way out, unless one was taken too recently.
     pub fn offer(&self, buffer: &dyn VideoBuffer) {
+        if self.paused.load(Ordering::Relaxed) {
+            return;
+        }
         {
             let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
             if last.is_some_and(|at| at.elapsed() < self.every) {
