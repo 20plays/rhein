@@ -144,7 +144,7 @@ impl Render for Menu {
                         .text_color(color)
                         .map(|d| match (leading, glyph) {
                             (Some(build), _) => d.child(build(window, cx)),
-                            (None, Some(g)) => d.child(icon(*g)),
+                            (None, Some(g)) => d.child(icon(*g).text_color(color)),
                             (None, None) => d,
                         })
                         .child(div().flex_1().min_w_0().truncate().child(label.clone()))
@@ -264,7 +264,8 @@ impl MenuHost {
             .chain(open)
             .map(|(place, menu)| {
                 deferred(anchored().position(place.at).anchor(place.corner).snap_to_window_with_margin(px(8.)).child(menu.clone()))
-                    .with_priority(1)
+                    // Above everything else that floats, a profile card or a picker included.
+                    .with_priority(3)
                     .into_any_element()
             })
             .collect()

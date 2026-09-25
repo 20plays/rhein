@@ -166,6 +166,24 @@ impl Shell {
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
                 "signout" => this.ask_sign_out(window, cx),
+                // Someone's profile card over the chat, once READY is in.
+                "card" => {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                        this.update_in(cx, |v, _, cx| {
+                            let other = v.client.read(cx).selected_guild.clone().and_then(|g| {
+                                let c = v.client.read(cx);
+                                let me = c.user_id().map(str::to_owned);
+                                c.members.get(&g).and_then(|l| l.iter().find(|m| Some(&m.user_id) != me.as_ref()).map(|m| m.user_id.clone()))
+                            });
+                            if let Some(user) = other {
+                                v.show_profile(user, gpui::point(px(420.), px(200.)), cx);
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 // The account menu, once the profile is in.
                 "account" => {
                     cx.spawn_in(window, async move |this, cx| {
@@ -883,6 +901,10 @@ impl Shell {
                 v.update(cx, |v, cx| v.open_settings(window, cx)).ok();
             }).with_icon(Icon::Pencil));
         }
+        {
+            let id = me.clone();
+            entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+        }
 
         // Saved accounts: switch without a password, or add another.
         entries.push(MenuEntry::Separator);
@@ -1213,14 +1235,37 @@ impl Shell {
                     }))))
             });
         let body = body.children(activity_cards);
+        let more = {
+            let (v, uid) = (cx.weak_entity(), user_id.clone());
+            div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
+                IconButton::new("profile-more", Icon::Ellipsis).tooltip("More").on_click(move |e, window, cx| {
+                    let uid = uid.clone();
+                    let at = e.position();
+                    v.update(cx, |v, cx| {
+                        let entries = vec![MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(uid.clone()))).with_icon(Icon::Copy)];
+                        v.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
+                    })
+                    .ok();
+                }),
+            )
+        };
         let card = profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
+            .relative()
+            .child(more)
             .occlude()
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| {
                 v.profile_card = None;
                 cx.notify();
             }));
-        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card.relative(), "profile-card-in"))).with_priority(2).into_any_element())
+        // Over the whole window, behind the card: whatever is under it neither scrolls nor
+        // answers the pointer while the card is open (a click outside only closes the card).
+        let backdrop = div().id("profile-card-backdrop").absolute().inset_0().occlude().on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        Some(
+            deferred(backdrop.child(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card, "profile-card-in"))))
+                .with_priority(2)
+                .into_any_element(),
+        )
     }
 
     // ---------------------------------------------------------------- settings & switcher

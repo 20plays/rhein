@@ -511,7 +511,7 @@ fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Them
     div()
         .absolute()
         .top_1p5()
-        .right_1p5()
+        .left_1p5()
         .rounded(radius::MD)
         .bg(t.bg_base)
         .when(!starred, |d| d.invisible().group_hover(group, |s| s.visible()))
