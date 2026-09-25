@@ -35,6 +35,8 @@ pub enum GatewayEvent {
 enum Command {
     Send(Value),
     Reconnect(String),
+    /// A renewed session's token for the next IDENTIFY; the live connection stays.
+    Token(String),
     /// Remember a presence for the next IDENTIFY and send it now.
     Presence(PresenceState),
     /// The calls to claim in every later IDENTIFY.
@@ -65,6 +67,12 @@ impl GatewayHandle {
     /// Reconnects now with a fresh token (after a renewed session).
     pub fn reconnect(&self, token: String) {
         let _ = self.commands.send(Command::Reconnect(token));
+    }
+
+    /// Hands over a renewed session's token for the next time this connects; a live
+    /// connection is not dropped for it.
+    pub fn set_token(&self, token: String) {
+        let _ = self.commands.send(Command::Token(token));
     }
 }
 
@@ -126,7 +134,7 @@ async fn run(
                 // Park until the owner hands over a new token or goes away.
                 loop {
                     match commands.recv().await {
-                        Some(Command::Reconnect(token)) => {
+                        Some(Command::Reconnect(token) | Command::Token(token)) => {
                             config.token = token;
                             failures = 0;
                             break;
@@ -147,6 +155,7 @@ async fn run(
                 _ = sleep_until(deadline) => break,
                 cmd = commands.recv() => match cmd {
                     Some(Command::Reconnect(token)) => { config.token = token; break; }
+                    Some(Command::Token(token)) => config.token = token,
                     Some(Command::Send(_)) => {}
                     Some(Command::Presence(presence)) => config.presence = presence,
                     Some(Command::Voice(claims)) => config.voice = claims,
@@ -217,11 +226,13 @@ async fn session(
                         queued.push(frame);
                     }
                 }
-                Some(Command::Reconnect(_)) => {
+                Some(Command::Reconnect(token)) => {
                     // A new token mid-session: drop this socket and identify again with it.
+                    config.token = token;
                     let _ = sink.close().await;
                     return Outcome::Retry { quick: true };
                 }
+                Some(Command::Token(token)) => config.token = token,
                 Some(Command::Close) | None => {
                     let _ = sink.close().await;
                     return Outcome::Closed;

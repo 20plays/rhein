@@ -46,6 +46,22 @@ pub struct Api {
     http: reqwest::Client,
     base: Arc<str>,
     token: Arc<RwLock<Option<String>>>,
+    /// How a guild session is renewed when it runs out (shared by every clone).
+    renewal: Arc<Renewal>,
+}
+
+/// A guild session's renewal, as the web client does it: the same handshake as the first time
+/// (an assertion from the home server, then `POST /sessions`), never a new sign-in.
+#[derive(Default)]
+struct Renewal {
+    /// The home server and the audience its assertions name.
+    from: std::sync::Mutex<Option<(Api, String)>>,
+    /// One renewal at a time; the others wait for it and use its token.
+    running: tokio::sync::Mutex<()>,
+    /// Counts renewals, so a request refused on an older token only retries.
+    generation: std::sync::atomic::AtomicU64,
+    /// When the current session ends (ms since the epoch), if known.
+    expires_at: std::sync::atomic::AtomicI64,
 }
 
 impl Api {
@@ -54,7 +70,59 @@ impl Api {
             http,
             base: base.trim_end_matches('/').into(),
             token: Arc::new(RwLock::new(token)),
+            renewal: Arc::default(),
         }
+    }
+
+    /// Makes this a guild session that renews itself from `home` when the server refuses it
+    /// (and ahead of time, `renew_if_expiring`).
+    pub fn renew_from(&self, home: &Api, audience: &str) {
+        *self.renewal.from.lock().unwrap_or_else(|e| e.into_inner()) = Some((home.clone(), audience.to_owned()));
+    }
+
+    /// Records when the current session ends.
+    pub fn set_expires_at(&self, at: Option<i64>) {
+        self.renewal.expires_at.store(at.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn expires_at(&self) -> Option<i64> {
+        Some(self.renewal.expires_at.load(std::sync::atomic::Ordering::Relaxed)).filter(|at| *at > 0)
+    }
+
+    /// Renews the session if it ends within `margin`. Returns the new token when it did.
+    pub async fn renew_if_expiring(&self, margin: std::time::Duration) -> ApiResult<Option<String>> {
+        let Some(at) = self.expires_at() else { return Ok(None) };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+        if at - now > margin.as_millis() as i64 {
+            return Ok(None);
+        }
+        let seen = self.renewal.generation.load(std::sync::atomic::Ordering::Acquire);
+        self.renew_after(seen).await
+    }
+
+    fn renews(&self) -> bool {
+        self.renewal.from.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
+    /// Renews the session unless another renewal already did since `seen`. Returns the new
+    /// token when this call renewed.
+    async fn renew_after(&self, seen: u64) -> ApiResult<Option<String>> {
+        use std::sync::atomic::Ordering;
+        let _one = self.renewal.running.lock().await;
+        if self.renewal.generation.load(Ordering::Acquire) != seen {
+            return Ok(None);
+        }
+        let Some((home, audience)) = self.renewal.from.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return Ok(None) };
+        // Both straight to the servers (the home session is not a renewable one either way).
+        let ask = home.http.post(home.url("/assertions")).json(&AssertionRequest { audience: &audience });
+        let assertion: AssertionResponse = home.send_once(ask).await?;
+        let req = self.http.post(self.url("/sessions")).json(&SessionRequest { assertion: &assertion.assertion });
+        let session: GuildSession = self.send_once(req).await?;
+        self.set_token(session.session_token.clone()).await;
+        self.set_expires_at(session.expires_at);
+        self.renewal.generation.fetch_add(1, Ordering::Release);
+        log::info!("renewed the session on {}", self.base);
+        Ok(Some(session.session_token))
     }
 
     pub fn base(&self) -> &str {
@@ -77,7 +145,24 @@ impl Api {
         format!("{}/_telium/v1{}", self.base, path)
     }
 
+    /// Sends, and when a renewable session is refused (it ran out), renews it once and sends
+    /// the same request again.
     async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
+        let again = self.renews().then(|| req.try_clone()).flatten();
+        let seen = self.renewal.generation.load(std::sync::atomic::Ordering::Acquire);
+        let result = self.send_once(req).await;
+        match (result, again) {
+            (Err(err), Some(again)) if err.status() == Some(401) => {
+                if self.renew_after(seen).await.is_err() {
+                    return Err(err);
+                }
+                self.send_once(again).await
+            }
+            (result, _) => result,
+        }
+    }
+
+    async fn send_once<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
         let req = match self.token.read().await.as_deref() {
             Some(token) => req.bearer_auth(token),
             None => req,
@@ -662,5 +747,72 @@ impl Api {
     /// Answers the invite object; its `code` is what `join_invite` takes.
     pub async fn create_invite(&self, guild_id: &str, channel_id: Option<&str>) -> ApiResult<serde_json::Value> {
         self.post(&format!("/guilds/{guild_id}/invites"), &serde_json::json!({ "channel_id": channel_id })).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::Api;
+
+    /// A guild server whose sessions have all run out but one (`Bearer new`), and a home server
+    /// that hands out assertions; counts the sessions minted.
+    async fn servers() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let minted = Arc::new(AtomicUsize::new(0));
+        let count = minted.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let count = count.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                    let fresh = request.lines().any(|l| l.eq_ignore_ascii_case("authorization: bearer new"));
+                    let (status, body) = match path.as_str() {
+                        "/_telium/v1/assertions" => ("200 OK", r#"{"assertion":"a"}"#.to_owned()),
+                        "/_telium/v1/sessions" => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            // A moment's work, so the refused requests pile up behind it.
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            ("200 OK", r#"{"session_token":"new","user_id":"@u:x","expires_at":4102444800000}"#.to_owned())
+                        }
+                        _ if fresh => ("200 OK", r#"{"ok":true}"#.to_owned()),
+                        _ => ("401 Unauthorized", r#"{"error":"unauthorized","message":"guild session expired"}"#.to_owned()),
+                    };
+                    let reply = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (base, minted)
+    }
+
+    #[tokio::test]
+    async fn a_run_out_session_renews_itself_once() {
+        let (base, minted) = servers().await;
+        let http = reqwest::Client::new();
+        let home = Api::new(http.clone(), &base, Some("home".into()));
+        let guild = Api::new(http, &base, Some("old".into()));
+        // Without a way to renew, the refusal stands.
+        assert_eq!(guild.get::<serde_json::Value>("/thing").await.unwrap_err().status(), Some(401));
+        guild.renew_from(&home, "x");
+        let (a, b, c) = tokio::join!(guild.get::<serde_json::Value>("/a"), guild.get::<serde_json::Value>("/b"), guild.get::<serde_json::Value>("/c"));
+        for answer in [a, b, c] {
+            assert_eq!(answer.unwrap()["ok"], true);
+        }
+        assert_eq!(minted.load(Ordering::SeqCst), 1, "three refusals, one renewal");
+        assert_eq!(guild.token().await.as_deref(), Some("new"));
+        assert_eq!(guild.expires_at(), Some(4102444800000));
+        // Far from its end: nothing to do ahead of time.
+        assert_eq!(guild.renew_if_expiring(std::time::Duration::from_secs(300)).await.unwrap(), None);
     }
 }

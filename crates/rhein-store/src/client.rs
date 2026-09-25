@@ -69,6 +69,9 @@ impl ServerStatus {
     }
 }
 
+/// How long before a guild session ends it is renewed.
+const RENEW_BEFORE: Duration = Duration::from_secs(5 * 60);
+
 pub struct Home {
     pub input: String,
     pub doc: Discovery,
@@ -294,6 +297,8 @@ pub struct Client {
     /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
     null_audio: bool,
     speaking_task: Option<Task<()>>,
+    /// Renews guild sessions before they run out (every minute, see `freshen_sessions`).
+    renew_ticker: Option<Task<()>>,
     /// guild id → user id → their voice state (only users in a channel).
     voice: HashMap<String, HashMap<String, rhein_proto::VoiceState>>,
     selected_channel: HashMap<String, String>,
@@ -389,6 +394,7 @@ impl Client {
             sync: None,
             null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             speaking_task: None,
+            renew_ticker: None,
             signin: None,
             mfa_required: false,
         };
@@ -532,7 +538,41 @@ impl Client {
         }));
     }
 
+    /// Renews every guild session that is about to run out (they last an hour), and gives each
+    /// gateway the current token for its next connection; a session refused in between renews
+    /// itself on the spot (`Api`). As the web client does, a minute apart and on waking.
+    pub fn freshen_sessions(&mut self, cx: &mut Context<Self>) {
+        let margin = std::env::var("RHEIN_RENEW_MARGIN_SECS").ok().and_then(|s| s.parse().ok()).map_or(RENEW_BEFORE, Duration::from_secs);
+        let live: Vec<(String, Api)> = self.servers.iter().filter_map(|s| s.api.clone().map(|api| (s.name.clone(), api))).collect();
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            for (name, api) in live {
+                let check = api.clone();
+                let renewed = join(io.spawn(async move { Ok(check.renew_if_expiring(margin).await?) })).await;
+                if let Err(err) = &renewed {
+                    log::info!("renewing {name}: {err:#}");
+                }
+                let token = join(io.spawn(async move { Ok(api.token().await) })).await.ok().flatten();
+                this.update(cx, |this, _| {
+                    if let (Some(token), Some(gw)) = (token, this.server(&name).and_then(|s| s.gateway.as_ref())) {
+                        gw.set_token(token);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     fn signed_in(&mut self, home: Home, extra: Vec<String>, cx: &mut Context<Self>) {
+        self.renew_ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                if this.update(cx, |this, cx| this.freshen_sessions(cx)).is_err() {
+                    return;
+                }
+            }
+        }));
         let home_name = home.doc.server_name.clone();
         let home_input = home.input.clone();
         self.home = Some(home);
@@ -674,6 +714,7 @@ impl Client {
         self.account_prefs = serde_json::Value::Object(Default::default());
         self.sync = None;
         self.speaking_task = None;
+        self.renew_ticker = None;
         self.rpc = None;
         self.dm = None;
         self.dm_error = None;

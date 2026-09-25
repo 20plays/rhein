@@ -137,5 +137,8 @@ pub async fn guild_session(home: &Api, guild: &Api, audience: &str) -> Result<Gu
     let assertion = home.assertion(audience).await.context("identity assertion")?;
     let session = guild.create_session(&assertion.assertion).await.context("guild session")?;
     guild.set_token(session.session_token.clone()).await;
+    guild.set_expires_at(session.expires_at);
+    // From here on it renews itself when it runs out, as the web client's sessions do.
+    guild.renew_from(home, audience);
     Ok(session)
 }

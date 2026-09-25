@@ -55,7 +55,12 @@ pub struct Alerts {
 impl Client {
     /// Whether this window is in front (alerts only come while it is not).
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        let woke = active && !self.window_active;
         self.window_active = active;
+        // Back after a while (a laptop lid, say): sessions that ran out meanwhile are renewed.
+        if woke {
+            self.freshen_sessions(cx);
+        }
         // Back in front of an open conversation: it has been read.
         if let Some(id) = self.home_conversation.clone().filter(|_| active) {
             self.note_dm_read(&id, cx);
