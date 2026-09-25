@@ -2152,6 +2152,16 @@ impl Client {
 
     // ---------------------------------------------------------------- permissions
 
+    /// Whether the message bar in a channel is open. A guild channel whose permissions are known
+    /// and lack SEND_MESSAGES is closed; one not loaded yet stays open (no flicker while READY
+    /// arrives), and a conversation always is.
+    pub fn may_write(&self, channel_id: &str) -> bool {
+        match self.guild_of_channel(channel_id) {
+            Some(entry) if entry.guild.me.is_some() => self.can(channel_id, crate::perms::SEND_MESSAGES),
+            _ => true,
+        }
+    }
+
     /// This user's permissions in a channel, from READY's roles and overwrites. Threads inherit
     /// their parent's.
     pub fn permissions(&self, channel_id: &str) -> u64 {

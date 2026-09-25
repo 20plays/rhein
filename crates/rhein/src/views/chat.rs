@@ -359,8 +359,13 @@ impl ChatView {
         .detach();
     }
 
+    /// The channel on screen, if its message bar is open.
+    fn writable(&self, cx: &App) -> Option<String> {
+        self.current().filter(|c| self.client.read(cx).may_write(c))
+    }
+
     fn submit(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(channel) = self.current() else { return };
+        let Some(channel) = self.writable(cx) else { return };
         let channel_for_stop = channel.clone();
         let text = self.composer.read(cx).text().to_owned();
         if let Some(message_id) = self.editing.take() {
@@ -395,7 +400,7 @@ impl ChatView {
             self.stop_typing(&channel, cx);
             return;
         }
-        if self.editing.is_some() || !grew {
+        if self.editing.is_some() || !grew || !self.client.read(cx).may_write(&channel) {
             return;
         }
         // In a conversation the others are told when we stop: after a while without a key.
@@ -634,7 +639,7 @@ impl ChatView {
     }
 
     fn attach(&mut self, cx: &mut Context<Self>) {
-        let Some(channel) = self.current() else { return };
+        let Some(channel) = self.writable(cx) else { return };
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -649,6 +654,9 @@ impl ChatView {
     }
 
     fn stage_paths(&mut self, channel: String, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        if !self.client.read(cx).may_write(&channel) {
+            return;
+        }
         self.client.update(cx, |c, cx| {
             for path in paths.into_iter().filter(|p| p.is_file()) {
                 c.stage_path(channel.clone(), path, cx);
@@ -657,7 +665,7 @@ impl ChatView {
     }
 
     fn paste_files(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
-        let Some(channel) = self.current() else { return };
+        let Some(channel) = self.writable(cx) else { return };
         for entry in item.entries() {
             match entry {
                 ClipboardEntry::Image(image) => {
@@ -1460,6 +1468,7 @@ impl ChatView {
         let t = cx.theme().clone();
         let focused = self.composer.read(cx).is_focused(window);
         let client = self.client.read(cx);
+        let locked = !client.may_write(channel_id);
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
         let typing: Vec<String> = client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect();
         // Who is typing, just above the message bar, as in Discord: floating over the end of the
@@ -1588,8 +1597,27 @@ impl ChatView {
             .children(typing_line)
             .children(chips)
             .children(context_bar)
-            // A prompt line: `›`, the text with its block cursor, and the attach and emoji buttons.
-            .child(
+            // A prompt line: `›`, the text with its block cursor, and the attach and emoji buttons;
+            // where we may not write, a closed bar saying so.
+            .child(if locked {
+                div()
+                    .h(px(46.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(radius::MD)
+                    .bg(t.bg_raised)
+                    .border_1()
+                    .border_color(t.border)
+                    .opacity(0.7)
+                    .cursor(gpui::CursorStyle::OperationNotAllowed)
+                    .text_size(text::MD)
+                    .text_color(t.text_faint)
+                    .child(icon(Icon::Lock).text_color(t.text_faint))
+                    .child("You don't have permission to send messages in this channel.")
+                    .into_any_element()
+            } else {
                 div()
                     .relative()
                     .flex()
@@ -1652,8 +1680,9 @@ impl ChatView {
                             .on_click(cx.listener(|this, e: &gpui::ClickEvent, window, cx| {
                                 this.open_picker(e.position(), PickerTarget::Composer, window, cx)
                             })),
-                    ),
-            )
+                    )
+                    .into_any_element()
+            })
             .pb_1()
     }
 
