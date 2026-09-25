@@ -24,6 +24,7 @@ enum Section {
     Notifications,
     Privacy,
     Security,
+    Extras,
     Activity,
     Encryption,
     Voice,
@@ -32,7 +33,7 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 12] = [
+    const ALL: [Section; 13] = [
         Section::Account,
         Section::Devices,
         Section::Servers,
@@ -40,6 +41,7 @@ impl Section {
         Section::Notifications,
         Section::Privacy,
         Section::Security,
+        Section::Extras,
         Section::Activity,
         Section::Encryption,
         Section::Voice,
@@ -56,6 +58,7 @@ impl Section {
             Section::Notifications => "Notifications",
             Section::Privacy => "Messages & privacy",
             Section::Security => "Account & security",
+            Section::Extras => "Extras",
             Section::Activity => "Activity",
             Section::Encryption => "Encryption",
             Section::Voice => "Voice",
@@ -73,6 +76,7 @@ impl Section {
             Section::Notifications => Icon::Bell,
             Section::Privacy => Icon::Eye,
             Section::Security => Icon::Shield,
+            Section::Extras => Icon::Star,
             Section::Activity => Icon::Gamepad,
             Section::Encryption => Icon::Lock,
             Section::Voice => Icon::Mic,
@@ -127,6 +131,10 @@ pub struct SettingsView {
     saving: bool,
     status: Option<(bool, String)>,
     security: SecurityForm,
+    /// What the Extras page last did.
+    extras_status: Option<(bool, String)>,
+    /// A first click on removing this device's keys.
+    extras_confirm: bool,
     /// The crop dialog for a picked avatar or banner.
     crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
@@ -207,6 +215,8 @@ impl SettingsView {
             crop: None,
             crop_focus: false,
             security: SecurityForm::new(cx),
+            extras_status: None,
+            extras_confirm: false,
             devices: None,
             audio_devices: None,
             meter: None,
@@ -1362,6 +1372,140 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn import_gifs(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import GIF favourites".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            let Some(path) = paths.into_iter().next() else { return };
+            let read = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| "That file is not valid JSON.".to_owned()));
+            this.update(cx, |v, cx| {
+                v.extras_status = Some(match read {
+                    Ok(doc) => {
+                        let urls = rhein_store::gif_links::favourites_in_export(&doc);
+                        if urls.is_empty() {
+                            (false, "No https GIF links were found in that file.".into())
+                        } else {
+                            let (added, dropped) = v.client.update(cx, |c, cx| c.import_gif_favorites(urls, cx));
+                            let over = if dropped > 0 { format!(" {dropped} did not fit (500 at most).") } else { String::new() };
+                            (true, format!("Imported {added} GIF favourite{}.{over}", if added == 1 { "" } else { "s" }))
+                        }
+                    }
+                    Err(e) => (false, e),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn upload_gifs(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Upload GIFs as favourites".into()) });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else { return };
+            this.update(cx, |v, cx| {
+                v.extras_status = Some((true, format!("Uploading {} file{}…", paths.len(), if paths.len() == 1 { "" } else { "s" })));
+                let weak = cx.weak_entity();
+                v.client.update(cx, |c, cx| {
+                    c.upload_gif_favorites(
+                        paths,
+                        move |added, failed, cx| {
+                            weak.update(cx, |v, cx| {
+                                let tail = if failed.is_empty() { String::new() } else { format!(" Not added: {}", failed.join("; ")) };
+                                v.extras_status = Some((failed.is_empty(), format!("Added {added} GIF favourite{}.{tail}", if added == 1 { "" } else { "s" })));
+                                cx.notify();
+                            })
+                            .ok();
+                        },
+                        cx,
+                    )
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// GIF favourites in bulk, what this device keeps, and how connections are made.
+    fn extras(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let client = self.client.read(cx);
+        let (count, ready) = (client.gif_favorites().len(), client.gif_favorites_ready());
+        let mode = client.account_pref(&["network", "mode"]).and_then(|v| v.as_str()).unwrap_or("direct").to_owned();
+        let overrides = client.account_pref(&["network", "guilds"]).and_then(|v| v.as_object()).map_or(0, |m| m.values().filter(|v| v.as_str() == Some("protected")).count());
+        let mode_label = match mode.as_str() {
+            "protected" => "Protect my IP".to_owned(),
+            "per-guild" => format!("Choose per guild ({overrides} protected)"),
+            _ => "Direct".to_owned(),
+        };
+        let c1 = self.client.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(self.extras_status.clone().map(|(ok, msg)| div().text_size(text::SM).text_color(if ok { t.success } else { t.danger }).child(msg)))
+            .child(heading("GIF favourites", t))
+            .child(setting_row(
+                t,
+                "Import favourites",
+                "From a JSON export, such as Discord's; added after the ones you have.",
+                Button::new("gif-import", "Choose file…").disabled(!ready).on_click(cx.listener(|v, _, _, cx| v.import_gifs(cx))).into_any_element(),
+            ))
+            .child(setting_row(
+                t,
+                "Upload GIFs",
+                "GIF or MP4 files from this computer, each kept as a favourite.",
+                Button::new("gif-upload", "Choose files…").disabled(!ready).on_click(cx.listener(|v, _, _, cx| v.upload_gifs(cx))).into_any_element(),
+            ))
+            .child(div().text_size(text::SM).text_color(t.text_faint).child(if ready {
+                format!("{count} of 500 favourites. Remove one with its star in the GIF menu.")
+            } else {
+                "Favourites open once this device has your account's keys.".to_owned()
+            }))
+            .child(heading("Local data", t))
+            .child(setting_row(
+                t,
+                "Clear cached data",
+                "The game list, app names, link previews and resolved GIF links. It all comes back when needed.",
+                Button::new("clear-cache", "Clear")
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        c1.update(cx, |c, cx| c.clear_cache(cx));
+                        v.extras_status = Some((true, "Cached data cleared.".into()));
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ))
+            .child(setting_row(
+                t,
+                "Remove this device's keys",
+                "Signs out here and deletes this device's copy of your encryption keys and messages. Your account and other devices are not affected.",
+                Button::new("wipe-device", if self.extras_confirm { "Click again to remove" } else { "Sign out and remove" })
+                    .danger()
+                    .on_click(cx.listener(|v, _, _, cx| {
+                        if v.extras_confirm {
+                            v.client.update(cx, |c, cx| c.sign_out(cx));
+                        } else {
+                            v.extras_confirm = true;
+                            cx.notify();
+                        }
+                    }))
+                    .into_any_element(),
+            ))
+            .child(heading("Network privacy", t))
+            .child(setting_row(
+                t,
+                "How connections are made",
+                "Set in the web client. \"Protect my IP\" sends guild traffic through your account server so guild servers don't see your address.",
+                div().font_family(FONT_MONO).text_size(text::SM).child(mode_label).into_any_element(),
+            ))
+            .when(mode != "direct" || overrides > 0, |d| {
+                d.child(div().text_size(text::SM).text_color(t.warning).child(
+                    "Rhein can't relay through your account server yet, so it still connects to guild servers directly and they see your IP address.",
+                ))
+            })
+            .into_any_element()
+    }
+
     /// Rich presence: what is shared, from which sources, and what is being shared right now.
     fn activity_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
@@ -1747,6 +1891,7 @@ impl Render for SettingsView {
             Section::Notifications => self.notifications(&t, cx),
             Section::Privacy => self.privacy(&t, cx),
             Section::Security => self.security_section(&t, cx),
+            Section::Extras => self.extras(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
             Section::Encryption => self.encryption_section(&t, cx),
             Section::Voice => self.voice_section(&t, cx),
@@ -1766,6 +1911,8 @@ impl Render for SettingsView {
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(SettingsEvent::Close)))
             .absolute()
             .inset_0()
+            // What is behind (the chat) neither hovers nor scrolls while settings are open.
+            .occlude()
             .bg(t.bg_main)
             .flex()
             .text_color(t.text)

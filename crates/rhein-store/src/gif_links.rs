@@ -181,6 +181,30 @@ pub fn klipy_media(payload: &serde_json::Value, slug: &str) -> Option<String> {
     .map(|u| u.to_string())
 }
 
+/// The GIF links in a favourites export (Discord's, as the web client reads it): a list of
+/// links, or an object of link → `{order, …}`, in their order; https links only.
+pub fn favourites_in_export(document: &serde_json::Value) -> Vec<String> {
+    let mut entries: Vec<(f64, String)> = match document {
+        serde_json::Value::Array(items) => items.iter().enumerate().filter_map(|(i, v)| v.as_str().map(|u| (i as f64, u.to_owned()))).collect(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .enumerate()
+            .map(|(i, (url, meta))| (meta["order"].as_f64().unwrap_or(i as f64), url.clone()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    entries.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<String> = Vec::new();
+    for (_, url) in entries {
+        if let Some(url) = https(&url).map(|u| u.to_string())
+            && !out.contains(&url)
+        {
+            out.push(url);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +234,17 @@ mod tests {
         assert!(is_gif_only(" https://media.klipy.com/test/celebrate.gif "));
         assert!(!is_gif_only("lol https://media.klipy.com/test/celebrate.gif"));
         assert!(!is_gif("https://evil-tenor.com/x"));
+    }
+
+    #[test]
+    fn a_discord_export_in_its_order() {
+        let export = json!({
+            "https://tenor.com/view/second-gif-2": {"order": 20, "src": "https://media.tenor.com/second.mp4"},
+            "https://media.tenor.com/first.gif": {"order": 10},
+            "http://insecure.example/x.gif": {"order": 5},
+        });
+        assert_eq!(favourites_in_export(&export), ["https://media.tenor.com/first.gif", "https://tenor.com/view/second-gif-2"]);
+        assert_eq!(favourites_in_export(&json!(["https://a.example/1.gif", "nope", "https://a.example/1.gif"])), ["https://a.example/1.gif"]);
     }
 
     #[test]

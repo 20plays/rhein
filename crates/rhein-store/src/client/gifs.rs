@@ -161,3 +161,81 @@ async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, shar
         }
     }
 }
+
+impl Client {
+    /// Adds links from a favourites export after the ones already kept, up to the limit.
+    /// Returns how many were added and how many did not fit.
+    pub fn import_gif_favorites(&mut self, urls: Vec<String>, cx: &mut Context<Self>) -> (usize, usize) {
+        let before = self.gif_favorites.len();
+        let fresh: Vec<String> = urls.into_iter().filter(|u| !self.gif_favorites.contains(u)).collect();
+        let total = before + fresh.len();
+        self.gif_favorites.extend(fresh);
+        self.gif_favorites.truncate(MAX_GIF_FAVORITES);
+        self.save_gif_favorites(cx);
+        cx.notify();
+        (self.gif_favorites.len() - before, total.saturating_sub(MAX_GIF_FAVORITES))
+    }
+
+    /// Uploads GIF (or MP4) files to the home server and keeps each as a favourite. `done`
+    /// hears how many were added and what failed.
+    pub fn upload_gif_favorites(
+        &mut self,
+        files: Vec<std::path::PathBuf>,
+        done: impl FnOnce(usize, Vec<String>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let uploaded = join(io.spawn(async move {
+                let mut urls = Vec::new();
+                let mut failed = Vec::new();
+                for path in files {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("gif").to_owned();
+                    let lower = name.to_ascii_lowercase();
+                    let mime = if lower.ends_with(".gif") { "image/gif" } else if lower.ends_with(".mp4") { "video/mp4" } else {
+                        failed.push(format!("{name}: not a GIF or MP4 file"));
+                        continue;
+                    };
+                    let result = async {
+                        let bytes = tokio::fs::read(&path).await?;
+                        let media = api.upload(&name, mime, bytes).await?;
+                        media.url.filter(|u| u.starts_with("https://")).ok_or_else(|| anyhow!("the server gave no https link for it"))
+                    };
+                    match result.await {
+                        Ok(url) => urls.push(url),
+                        Err(err) => failed.push(format!("{name}: {err:#}")),
+                    }
+                }
+                anyhow::Ok((urls, failed))
+            }))
+            .await;
+            this.update(cx, |this, cx| match uploaded {
+                Ok((urls, failed)) => {
+                    let (added, _) = this.import_gif_favorites(urls, cx);
+                    done(added, failed, cx);
+                }
+                Err(err) => done(0, vec![friendly(&err)], cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Forgets what this device keeps only to be quicker (the game list, app names, link
+    /// previews, resolved GIF links); it all comes back when needed.
+    pub fn clear_cache(&mut self, cx: &mut Context<Self>) {
+        let dir = crate::persist::cache_dir();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            }
+        }
+        self.embeds.clear();
+        self.artwork.clear();
+        self.gif_shares.clear();
+        self.notice = Some("Cached data cleared.".into());
+        cx.notify();
+    }
+}
