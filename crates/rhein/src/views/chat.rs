@@ -65,6 +65,8 @@ pub struct ChatView {
     lightbox_focus: FocusHandle,
     /// A running glide to the newest message; replaced by the next one.
     glide: Option<gpui::Task<()>>,
+    /// A voice channel's own chat, in a column beside its call (closed to begin with).
+    voice_chat: Option<(Entity<ChatView>, Subscription)>,
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
@@ -198,6 +200,7 @@ impl ChatView {
             lightbox: None,
             lightbox_focus: cx.focus_handle(),
             glide: None,
+            voice_chat: None,
             prefetched: HashSet::new(),
             arrived: HashSet::new(),
             row_progress: HashMap::new(),
@@ -235,6 +238,7 @@ impl ChatView {
             return;
         }
         *self.channel.borrow_mut() = selected.clone();
+        self.voice_chat = None;
         self.editing = None;
         self.replying = None;
         let name = selected
@@ -1082,6 +1086,31 @@ impl ChatView {
         )
     }
 
+    /// Opens or closes a voice channel's chat column.
+    fn toggle_voice_chat(&mut self, channel_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice_chat.take().is_some() {
+            self.client.update(cx, |c, cx| c.set_voice_chat(None, cx));
+            cx.notify();
+            return;
+        }
+        let chat = cx.new(|cx| ChatView::fixed(self.client.clone(), channel_id.clone(), window, cx));
+        // Its close button closes the column; a profile or a menu opened in it goes on up.
+        let sub = cx.subscribe(&chat, |this, _, event: &ChatEvent, cx| match event {
+            ChatEvent::ClosePanel => {
+                this.voice_chat = None;
+                this.client.update(cx, |c, cx| c.set_voice_chat(None, cx));
+                cx.notify();
+            }
+            ChatEvent::Profile { user_id, at } => cx.emit(ChatEvent::Profile { user_id: user_id.clone(), at: *at }),
+            ChatEvent::MemberMenu { user_id, at } => cx.emit(ChatEvent::MemberMenu { user_id: user_id.clone(), at: *at }),
+            ChatEvent::OpenThread(id) => cx.emit(ChatEvent::OpenThread(id.clone())),
+            _ => {}
+        });
+        self.voice_chat = Some((chat, sub));
+        self.client.update(cx, |c, cx| c.set_voice_chat(Some(channel_id), cx));
+        cx.notify();
+    }
+
     /// The call's controls, where the call is shown: microphone, sound, screen share, leave.
     fn call_controls(&self, prefix: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
@@ -1205,7 +1234,24 @@ impl ChatView {
                         .when(state.streaming, |d| d.child(badge(Icon::ScreenShare, Some(t.live)))),
                 )
         });
-        div()
+        // The channel's own chat, beside the call; unread while it is closed.
+        let chat_open = self.voice_chat.is_some();
+        let unread = !chat_open && client.read_mark(channel_id).is_unread();
+        let chat_toggle = {
+            let id = channel_id.to_owned();
+            div()
+                .relative()
+                .child(
+                    IconButton::new("voice-chat", Icon::MessageSquare)
+                        .large()
+                        .active(chat_open)
+                        .tooltip(if chat_open { "Close the chat" } else { "Chat" })
+                        .on_click(cx.listener(move |this, _, window, cx| this.toggle_voice_chat(id.clone(), window, cx))),
+                )
+                .when(unread, |d| d.child(div().absolute().top_1().right_1().size(px(8.)).rounded_full().bg(t.danger)))
+        };
+        let column = self.voice_chat.as_ref().map(|(chat, _)| div().w(px(380.)).flex_none().h_full().border_l_1().border_color(t.border).child(chat.clone()));
+        let stage = div()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -1224,7 +1270,8 @@ impl ChatView {
                     .border_b_1()
                     .border_color(t.border)
                     .child(icon(Icon::Volume).text_color(t.text_faint))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(name)),
+                    .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .child(chat_toggle),
             )
             .child(
                 div()
@@ -1320,7 +1367,8 @@ impl ChatView {
                             .children(note.map(|(line, color)| div().text_size(text::SM).text_color(color).child(line))),
                     ),
             )
-            .into_any_element()
+;
+        div().flex_1().min_w_0().h_full().flex().child(stage).children(column).into_any_element()
     }
 
     fn render_picker(&self) -> Option<AnyElement> {
@@ -1609,7 +1657,7 @@ impl Render for ChatView {
                 .into_any_element();
         };
         let channel = client.channel(&channel_id).cloned();
-        if channel.as_ref().is_some_and(|c| c.is_voice()) {
+        if self.fixed.is_none() && channel.as_ref().is_some_and(|c| c.is_voice()) {
             return self.render_voice_stage(&channel_id, cx);
         }
         let client = self.client.read(cx);

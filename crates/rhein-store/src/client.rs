@@ -274,6 +274,8 @@ pub struct Client {
     window_active: bool,
     /// Sounds, the ringing call and their pacing.
     alerts: notify::Alerts,
+    /// The voice channel whose chat column is open (its messages count as read only then).
+    voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
     dm_seen: HashMap<String, String>,
     /// The read receipt waiting to go out.
@@ -379,6 +381,7 @@ impl Client {
             window_active: true,
             alerts: notify::Alerts::default(),
             dm_seen: HashMap::new(),
+            voice_chat_open: None,
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -1143,6 +1146,23 @@ impl Client {
     // ---------------------------------------------------------------- mark read
 
     /// Acknowledges the newest message of a channel, fetching it when the history isn't loaded.
+    /// Opens (with the channel) or closes a voice channel's chat; opening reads it.
+    pub fn set_voice_chat(&mut self, channel_id: Option<String>, cx: &mut Context<Self>) {
+        self.voice_chat_open = channel_id.clone();
+        if let Some(id) = channel_id {
+            let needs_load = self.logs.get(&id).is_none_or(|l| !l.loaded && !l.loading);
+            if needs_load {
+                self.load_history(id.clone(), false, cx);
+            }
+            self.mark_read(id, cx);
+        }
+        cx.notify();
+    }
+
+    pub fn voice_chat_open(&self) -> Option<&str> {
+        self.voice_chat_open.as_deref()
+    }
+
     pub fn mark_read(&mut self, channel_id: String, cx: &mut Context<Self>) {
         if self.is_dm(&channel_id) {
             // Read state of an encrypted conversation travels inside it (receipts), not to a server.
@@ -1833,6 +1853,12 @@ impl Client {
         self.visited.retain(|c| *c != channel_id);
         self.visited.insert(0, channel_id.clone());
         self.visited.truncate(50);
+        // A voice channel's chat starts closed; what is said there stays unread until it opens.
+        self.voice_chat_open = None;
+        if self.channel(&channel_id).is_some_and(|c| c.is_voice()) {
+            cx.notify();
+            return;
+        }
         let had_unread = self.read.get(&channel_id).is_some_and(|m| m.unread > 0 || m.mentions > 0);
         let divider = self.read.get(&channel_id).filter(|m| m.unread > 0).and_then(|m| {
             m.first_unread.clone().map(Divider::At).or_else(|| m.last_read.clone().map(Divider::After))
@@ -1975,7 +2001,9 @@ impl Client {
             return;
         }
         let mention = mentions_user(&message.content, &me);
-        let here = self.selected_channel() == Some(message.channel_id.as_str());
+        // A voice channel is in front of you only with its chat open.
+        let voice = self.channel(&message.channel_id).is_some_and(|c| c.is_voice());
+        let here = self.selected_channel() == Some(message.channel_id.as_str()) && (!voice || self.voice_chat_open.as_deref() == Some(message.channel_id.as_str()));
         if !(here && self.window_active) && !self.read_mark(&message.channel_id).muted {
             if mention {
                 let guild = self.guild_of_channel(&message.channel_id).map(|g| g.guild.id.clone());
