@@ -419,6 +419,13 @@ impl Client {
     }
 
     pub fn set_voice_deafened(&mut self, deafened: bool, cx: &mut Context<Self>) {
+        // Deafening mutes too; undeafening gives the microphone back only if it was on before.
+        if deafened && !self.prefs.voice.deafened {
+            self.muted_before_deafen = self.prefs.voice.muted;
+            self.prefs.voice.muted = true;
+        } else if !deafened && self.prefs.voice.deafened {
+            self.prefs.voice.muted = self.muted_before_deafen;
+        }
         self.prefs.voice.deafened = deafened;
         self.save_prefs();
         self.push_voice_state(cx);

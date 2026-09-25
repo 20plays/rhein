@@ -300,6 +300,9 @@ pub struct Client {
     sound: Option<sound::Sound>,
     /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
     null_audio: bool,
+    /// Whether the microphone was already muted when deafening muted it, so undeafening leaves
+    /// it as it was.
+    muted_before_deafen: bool,
     speaking_task: Option<Task<()>>,
     /// Renews guild sessions before they run out (every minute, see `freshen_sessions`).
     renew_ticker: Option<Task<()>>,
@@ -398,6 +401,7 @@ impl Client {
             gif_shares: HashMap::new(),
             sync: None,
             null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
+            muted_before_deafen: false,
             speaking_task: None,
             renew_ticker: None,
             signin: None,
