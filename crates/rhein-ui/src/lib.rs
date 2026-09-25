@@ -14,6 +14,7 @@ pub mod input;
 mod menu;
 mod modal;
 pub mod motion;
+pub mod smooth;
 pub mod theme;
 mod tooltip;
 
@@ -28,6 +29,7 @@ pub use icon::{Icon, icon, icon_sized};
 pub use input::{InputEvent, Nav, TextInput};
 pub use menu::{Menu, MenuEntry, MenuHost};
 pub use modal::Modal;
+pub use smooth::{ScrollTarget, smooth_scroll};
 pub use theme::{ActiveTheme, Theme};
 pub use tooltip::tooltip;
 

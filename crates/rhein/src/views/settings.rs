@@ -96,6 +96,7 @@ pub const SHORTCUTS: [(&str, &str); 16] = [
 
 pub struct SettingsView {
     client: Entity<Client>,
+    body_scroll: gpui::ScrollHandle,
     section: Section,
     display_name: Entity<TextInput>,
     pronouns: Entity<TextInput>,
@@ -171,6 +172,7 @@ impl SettingsView {
         window.focus(&focus, cx);
         Self {
             client,
+            body_scroll: gpui::ScrollHandle::new(),
             section: Section::Account,
             display_name,
             pronouns,
@@ -1235,11 +1237,14 @@ impl Render for SettingsView {
             .flex()
             .text_color(t.text)
             .child(nav)
-            .child(
+            .child(rhein_ui::smooth_scroll(
+                "settings-glide",
+                rhein_ui::ScrollTarget::Handle(self.body_scroll.clone()),
                 div()
                     .id("settings-body")
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.body_scroll)
                     .px_10()
                     .py_8()
                     .child(
@@ -1261,6 +1266,6 @@ impl Render for SettingsView {
                             )
                             .child(body),
                     ),
-            )
+            ))
     }
 }

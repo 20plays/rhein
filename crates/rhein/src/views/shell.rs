@@ -90,6 +90,9 @@ enum Panel {
 
 pub struct Shell {
     client: Entity<Client>,
+    /// The sidebar tree's and the member list's scrolling, for smooth wheel steps.
+    tree_scroll: gpui::ScrollHandle,
+    members_scroll: gpui::ScrollHandle,
     chat: Entity<ChatView>,
     home: Entity<HomeView>,
     dialog: Option<DialogTab>,
@@ -273,6 +276,8 @@ impl Shell {
         }
         Self {
             client,
+            tree_scroll: gpui::ScrollHandle::new(),
+            members_scroll: gpui::ScrollHandle::new(),
             chat,
             home,
             dialog: None,
@@ -1230,7 +1235,7 @@ impl Shell {
         let home = client.showing_home;
         let selected = client.selected_guild.clone();
 
-        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().px_2().pb_2().flex().flex_col();
+        let mut tree = div().id("sidebar-tree").flex_1().overflow_y_scroll().track_scroll(&self.tree_scroll).px_2().pb_2().flex().flex_col();
 
         // Direct messages: the row sits in a strip as tall as the chat header, so both share one
         // line underneath; its conversations open below it.
@@ -1399,7 +1404,7 @@ impl Shell {
             .border_r_1()
             .border_color(t.border)
             .child(top)
-            .child(tree)
+            .child(rhein_ui::smooth_scroll("sidebar-glide", rhein_ui::ScrollTarget::Handle(self.tree_scroll.clone()), tree))
             .children(self.call_bar(cx))
             .child(self.profile_strip(cx))
             .into_any_element()
@@ -1859,18 +1864,21 @@ impl Shell {
                         .font_weight(FontWeight::SEMIBOLD)
                         .child("Members"),
                 )
-                .child(
+                .child(rhein_ui::smooth_scroll(
+                    "members-glide",
+                    rhein_ui::ScrollTarget::Handle(self.members_scroll.clone()),
                     div()
                         .id("members")
                         .flex_1()
                         .min_h_0()
                         .px_2()
                         .overflow_y_scroll()
+                        .track_scroll(&self.members_scroll)
                         .child(online_label)
                         .children(online.into_iter().map(row))
                         .children(offline_label)
                         .children(offline.into_iter().map(row)),
-                )
+                ))
                 .into_any_element(),
         )
     }

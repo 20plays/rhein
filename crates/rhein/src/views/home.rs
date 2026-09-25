@@ -42,6 +42,7 @@ impl Tab {
 
 pub struct HomeView {
     client: Entity<Client>,
+    list_scroll: gpui::ScrollHandle,
     tab: Tab,
     add: Entity<TextInput>,
     group: Entity<TextInput>,
@@ -65,7 +66,7 @@ impl HomeView {
                 }
             }),
         ];
-        Self { client, tab: Tab::Online, add, group, _subs: subs }
+        Self { client, list_scroll: gpui::ScrollHandle::new(), tab: Tab::Online, add, group, _subs: subs }
     }
 
     /// An encrypted group chat with the addresses typed in, separated by commas or spaces.
@@ -187,7 +188,7 @@ impl HomeView {
             Tab::Pending => "No pending requests.",
             Tab::Blocked => "You haven't blocked anyone.",
         };
-        let mut list = div().id("friends-list").flex_1().min_h_0().overflow_y_scroll().px_4().flex().flex_col().gap_0p5();
+        let mut list = div().id("friends-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.list_scroll).px_4().flex().flex_col().gap_0p5();
         if friends.is_empty() {
             list = list.child(div().p_6().text_center().text_color(t.text_faint).child(empty));
         }
@@ -235,7 +236,7 @@ impl HomeView {
                             .child(Button::new("group-start", "Start").icon(Icon::Lock).on_click(cx.listener(|v, _, _, cx| v.start_group(cx)))),
                     ),
             )
-            .child(list)
+            .child(rhein_ui::smooth_scroll("friends-glide", rhein_ui::ScrollTarget::Handle(self.list_scroll.clone()), list))
             .into_any_element()
     }
 

@@ -1522,7 +1522,11 @@ impl Render for ChatView {
             view: cx.weak_entity(),
             channel_id: channel_id.clone(),
         });
-        let messages = list(self.list.clone(), move |ix, window, cx| render_row(&row_ctx, ix, window, cx)).size_full();
+        let messages = rhein_ui::smooth_scroll(
+            "history-glide",
+            rhein_ui::ScrollTarget::List(self.list.clone()),
+            list(self.list.clone(), move |ix, window, cx| render_row(&row_ctx, ix, window, cx)).size_full(),
+        );
 
         let behind = !self.list.is_following_tail() && self.count(cx) > 0;
         let jump = behind.then(|| {
