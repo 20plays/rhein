@@ -228,10 +228,15 @@ impl Api {
 
     // --- guild voice (`server/src/routes/voice.rs`) ---
 
-    pub async fn voice_join(&self, channel_id: &str, self_mute: bool, self_deaf: bool, self_video: bool, region: Option<&str>) -> ApiResult<VoiceJoin> {
+    /// Joins a guild voice channel. `key_package` (base64) is this device's offer for the call's
+    /// MLS group; an SFU channel refuses a join without one.
+    pub async fn voice_join(&self, channel_id: &str, self_mute: bool, self_deaf: bool, self_video: bool, region: Option<&str>, key_package: Option<&str>) -> ApiResult<VoiceJoin> {
         let mut body = serde_json::json!({ "self_mute": self_mute, "self_deaf": self_deaf, "self_video": self_video });
         if let Some(region) = region {
             body["region"] = region.into();
+        }
+        if let Some(package) = key_package {
+            body["key_package"] = package.into();
         }
         self.post(&format!("/channels/{}/voice/join", urlencoding::encode(channel_id)), &body).await
     }
@@ -292,6 +297,17 @@ impl Api {
     pub async fn voice_watch(&self, channel_id: &str, streamer: &str, watching: bool, quality: Option<&str>) -> ApiResult<serde_json::Value> {
         let body = serde_json::json!({ "streamer": streamer, "watching": watching, "quality": quality });
         self.post(&format!("/channels/{}/voice/watch", urlencoding::encode(channel_id)), &body).await
+    }
+
+    /// A guild call's MLS group for its committer: `{group_id, epoch, participants: [{user_id,
+    /// device_id, member, key_package}]}`.
+    pub async fn voice_e2ee(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/channels/{}/voice/e2ee", urlencoding::encode(channel_id))).await
+    }
+
+    /// Posts a commit for the call's group; a 409 means another commit took this epoch.
+    pub async fn voice_e2ee_commit(&self, channel_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/channels/{}/voice/e2ee", urlencoding::encode(channel_id)), body).await
     }
 
     /// Who is in a voice channel: `{channel_id, voice_states, watchers}`.

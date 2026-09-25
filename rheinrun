@@ -63,16 +63,21 @@ start() {
   wait_for "$name" "$url" "$log"
 }
 
+sfu_env=()
 if [[ $sfu == 1 && -x .dev/bin/livekit-server ]]; then
-  start "SFU" http://127.0.0.1:7890/health sfu scripts/dev-sfu.sh
   sfu_env=(RHEIN_SFU=1)
-else
-  [[ $sfu == 1 ]] && echo "· no .dev/bin/livekit-server: calls are peer to peer"
-  sfu_env=()
+elif [[ $sfu == 1 ]]; then
+  echo "· no .dev/bin/livekit-server: calls are peer to peer"
+  sfu=0
 fi
 # The first build of a server can take a few minutes.
 start "server a (localhost:8448)" http://localhost:8448/.well-known/telium server-a env "${sfu_env[@]}" scripts/dev-server.sh a
 start "server b (localhost:8449)" http://localhost:8449/.well-known/telium server-b scripts/dev-server.sh b
+# After the servers: the SFU fetches their signing keys when it starts, and one it could not
+# reach refuses every join token it signed ("bad signature").
+if [[ $sfu == 1 ]]; then
+  start "SFU" http://127.0.0.1:7890/health sfu scripts/dev-sfu.sh
+fi
 
 client_env=()
 [[ $demo == 1 ]] && client_env+=(RHEIN_CONFIG_DIR="$root/.dev/config-demo")

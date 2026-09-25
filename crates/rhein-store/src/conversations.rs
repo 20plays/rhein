@@ -257,7 +257,7 @@ impl Engine {
 
     /// `verifyClaimedPackage`: `Some(true/false)` for accounts with a cross-signing identity,
     /// `None` for accounts that have none (accepted as they are).
-    async fn verify_claimed(&mut self, api: &Api, user: &str, device: &str, key_b64: &str) -> Option<bool> {
+    pub async fn verify_claimed(&mut self, api: &Api, user: &str, device: &str, key_b64: &str) -> Option<bool> {
         let list = api.device_list(user).await.ok()?;
         let identity_key = list["identity_key"].as_str()?.to_owned();
         if let Ok(doc) = api.identity_document(user).await {

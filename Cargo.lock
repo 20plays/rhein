@@ -7109,6 +7109,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "emojis",
+ "env_logger",
  "gpui",
  "image",
  "log",

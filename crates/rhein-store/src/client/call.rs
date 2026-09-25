@@ -18,6 +18,7 @@ use rhein_voice::livekit::webrtc::peer_connection_factory::native::PeerConnectio
 use rhein_proto::{VoiceClaim, VoiceServer};
 use rhein_voice::audio::{AudioConfig, AudioEngine};
 use rhein_voice::e2ee;
+use crate::guild_keys::{GuildKeys, Verifier};
 use rhein_voice::mesh::{self, Mesh};
 use rhein_voice::posture::{self, Hello, Posture};
 use rhein_voice::screen::ScreenShare;
@@ -88,6 +89,10 @@ enum Command {
     Signal { from: String, payload: Value },
     /// A conversation's call secrets for a (new) epoch: the hello key and the media key.
     Keys { hello: Option<(Vec<u8>, u64)>, media: Option<(Vec<u8>, u64)> },
+    /// A guild call's `VOICE_E2EE` event.
+    GuildE2ee(Value),
+    /// A guild call's voice states, for its committer.
+    GuildRoster(Vec<Value>),
     Roster(Vec<String>),
     Server(VoiceServer),
     Watch { user: String, on: bool },
@@ -149,12 +154,21 @@ impl Client {
         let (muted, deafened) = (self.prefs.voice.muted, self.prefs.voice.deafened);
         let (http, channel) = (self.http.clone(), channel_id.clone());
         let route = Route::Channel { api: api.clone(), channel: channel_id.clone() };
+        let mut keys = self.guild_keys(&channel_id, &api);
         let dial = async move {
             let published = api.voice_regions().await.unwrap_or(Value::Null);
             let region = rhein_voice::region::choose(&http, &published, None).await;
-            let joined = api.voice_join(&channel, muted, deafened, false, region.as_deref()).await?;
+            // Offered with every join: only the server knows whether the channel is on an SFU,
+            // where the call is end-to-end encrypted and a join without one is refused.
+            let package = keys.as_mut().and_then(|k| k.offer().ok());
+            let joined = api.voice_join(&channel, muted, deafened, false, region.as_deref(), package.as_deref()).await?;
+            let mut guild = None;
+            if let (Some(mut keys), Some(info)) = (keys, joined.e2ee.clone()) {
+                keys.begin(&info).await?;
+                guild = Some(keys);
+            }
             let here = api.voice_channel(&channel).await.ok();
-            Ok((joined, None, here))
+            Ok(Dialed { joined, privacy: None, guild, here })
         };
         self.begin(server, guild_id, channel_id, false, route, dial, cx);
     }
@@ -183,7 +197,7 @@ impl Client {
             // posture asks for an SFU, the strict way round.
             let joined = api.conversation_voice_join(&id, muted, deafened, posture::wants_sfu(own, false), false).await?;
             let here = api.conversation_voice(&id).await.ok();
-            Ok((joined, Some(Privacy::new(id, own, keys.0, keys.1)), here))
+            Ok(Dialed { joined, privacy: Some(Privacy::new(id, own, keys.0, keys.1)), guild: None, here })
         };
         self.begin(server, conversation.clone(), conversation, true, route, dial, cx);
     }
@@ -199,7 +213,7 @@ impl Client {
         conversation: bool,
         route: Route,
         // The join answer, a conversation's privacy state, and who is already there.
-        dial: impl std::future::Future<Output = Result<(rhein_proto::VoiceJoin, Option<Privacy>, Option<Value>)>> + Send + 'static,
+        dial: impl std::future::Future<Output = Result<Dialed>> + Send + 'static,
         cx: &mut Context<Self>,
     ) {
         let Some(me) = self.home.as_ref().map(|h| h.user_id.clone()) else { return };
@@ -210,13 +224,13 @@ impl Client {
 
         let task = cx.spawn(async move |this, cx| {
             let started = join(io.spawn(async move {
-                let (joined, privacy, here) = dial.await?;
+                let dialed = dial.await?;
                 let engine = tokio::task::spawn_blocking(move || AudioEngine::start(prefs.audio_config())).await??;
-                Ok((joined, privacy, Arc::new(engine), here))
+                Ok((dialed, Arc::new(engine)))
             }))
             .await;
-            let Ok(Some((joined, privacy, engine, _))) = this.update(cx, |this, cx| {
-                if let Ok((_, _, _, Some(here))) = &started {
+            let Ok(Some((dialed, engine))) = this.update(cx, |this, cx| {
+                if let Ok((Dialed { here: Some(here), .. }, _)) = &started {
                     let states: Vec<rhein_proto::VoiceState> = here["voice_states"].as_array().into_iter().flatten().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect();
                     let room = this.call.as_ref()?.room_id.clone();
                     let roster = this.voice.entry(room).or_default();
@@ -227,9 +241,9 @@ impl Client {
                 let call = this.call.as_mut()?;
                 match started {
                     Ok(ready) => {
-                        call.session_id = ready.0.voice_state.session_id.clone();
-                        call.engine = Some(ready.2.clone());
-                        call.epoch = ready.1.as_ref().and_then(|p| p.hello.as_ref().map(|(_, e)| *e));
+                        call.session_id = ready.0.joined.voice_state.session_id.clone();
+                        call.engine = Some(ready.1.clone());
+                        call.epoch = ready.0.privacy.as_ref().and_then(|p| p.hello.as_ref().map(|(_, e)| *e));
                         this.apply_call_audio();
                         this.claim_voice(cx);
                         cx.notify();
@@ -249,7 +263,10 @@ impl Client {
                 log::warn!("call audio: {error}");
             }
             let roster = this.read_with(cx, |this, _| this.call_roster()).unwrap_or_default();
-            io.spawn(drive(me, route, http, joined.voice_server, engine, roster, privacy, command_rx, updates));
+            let Dialed { joined, privacy, guild, .. } = dialed;
+            io.spawn(drive(me, route, http, joined.voice_server, engine, roster, privacy, guild, command_rx, updates));
+            // The committer's first look at who waits.
+            this.update(cx, |this, _| this.tend_guild_keys()).ok();
 
             while let Some(update) = update_rx.recv().await {
                 let alive = this.update(cx, |this, cx| {
@@ -313,6 +330,48 @@ impl Client {
         });
         self.watch_speaking(cx);
         cx.notify();
+    }
+
+    /// The keys of a guild call: this device's MLS signature key, and the account trust check a
+    /// conversation uses. `None` before this device has DM keys.
+    fn guild_keys(&self, channel: &str, api: &Api) -> Option<GuildKeys> {
+        let home = self.home.as_ref()?;
+        let (private, public) = crate::dm::Secrets::load(&home.user_id).mls_signature?;
+        let (private, public) = (rhein_mls::vault::unb64(&private).ok()?, rhein_mls::vault::unb64(&public).ok()?);
+        let (engine, home_api) = (self.dm_engine.clone(), home.api.clone());
+        let verify: Verifier = Arc::new(move |user, device, key| {
+            let (engine, api) = (engine.clone(), home_api.clone());
+            Box::pin(async move {
+                match engine {
+                    Some(engine) => engine.lock().await.verify_claimed(&api, &user, &device, &key).await != Some(false),
+                    None => true,
+                }
+            })
+        });
+        GuildKeys::new(&home.user_id, &home.device_id, (&private, &public), channel, api.clone(), verify)
+            .map_err(|err| log::warn!("guild call keys: {err:#}"))
+            .ok()
+    }
+
+    /// Hands a guild call's roster (with who holds the key and since when) to its keys.
+    fn tend_guild_keys(&self) {
+        let Some(call) = self.call.as_ref().filter(|c| !c.conversation) else { return };
+        let states: Vec<Value> = self
+            .voice_members(&call.room_id, &call.channel_id)
+            .into_iter()
+            .filter_map(|s| serde_json::to_value(s).ok())
+            .collect();
+        if let Some(commands) = &call.commands {
+            let _ = commands.send(Command::GuildRoster(states));
+        }
+    }
+
+    pub(super) fn on_voice_e2ee(&mut self, channel_id: &str, data: Value) {
+        if let Some(call) = self.call.as_ref().filter(|c| c.channel_id == channel_id && !c.conversation)
+            && let Some(commands) = &call.commands
+        {
+            let _ = commands.send(Command::GuildE2ee(data));
+        }
     }
 
     /// The route (endpoints) of the call we are in.
@@ -494,6 +553,7 @@ impl Client {
         if let Some(commands) = self.call.as_ref().and_then(|c| c.commands.as_ref()) {
             let _ = commands.send(Command::Roster(roster));
         }
+        self.tend_guild_keys();
     }
 
     pub(super) fn on_voice_signal(&mut self, channel_id: &str, from: String, payload: Value) {
@@ -682,6 +742,17 @@ impl Client {
     }
 }
 
+/// What dialling a call brought back.
+struct Dialed {
+    joined: rhein_proto::VoiceJoin,
+    /// A conversation call's privacy state.
+    privacy: Option<Privacy>,
+    /// A guild call's MLS keys (on an SFU the key comes from them).
+    guild: Option<GuildKeys>,
+    /// Who is already there.
+    here: Option<Value>,
+}
+
 /// Where a call's requests go: a guild channel's routes, or a conversation's on the home server.
 #[derive(Clone)]
 enum Route {
@@ -805,6 +876,7 @@ async fn drive(
     engine: Arc<AudioEngine>,
     mut roster: Vec<String>,
     mut privacy: Option<Privacy>,
+    mut guild: Option<GuildKeys>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     updates: mpsc::UnboundedSender<Update>,
 ) {
@@ -879,7 +951,8 @@ async fn drive(
                                 call.set_relay(pinned(&privacy, effective));
                             }
                             Some(Command::Server(new)) => break Some(new),
-                            Some(Command::Watch { .. }) => {}
+                            // A mesh guild call is DTLS peer to peer; its group matters on an SFU.
+                            Some(Command::Watch { .. } | Command::GuildE2ee(_) | Command::GuildRoster(_)) => {}
                             Some(Command::Publish { slot, video }) => {
                                 let track: MediaStreamTrack = call.factory().create_video_track(if slot == Slot::Screen { "screen" } else { "camera" }, video.source()).into();
                                 call.set_source(slot, Some(track));
@@ -901,7 +974,14 @@ async fn drive(
                         Some((key, epoch)) => Ok(Some(e2ee::key_provider(key, *epoch))),
                         None => Err(anyhow!("This device has no keys for this conversation yet, so it cannot join an encrypted call.")),
                     },
-                    None if required.is_some() => Err(anyhow!("This call must be end-to-end encrypted and there are no keys for it.")),
+                    // A guild call's key comes from its own group. Until the welcome arrives the
+                    // provider holds a key nobody has, so nothing is heard and nothing goes out
+                    // readable.
+                    None if guild.is_some() => {
+                        let (key, epoch) = guild.as_ref().and_then(|g| g.key()).unwrap_or_else(|| (rhein_mls::vault::rand_bytes::<32>().to_vec(), 0));
+                        Ok(Some(e2ee::key_provider(&key, epoch)))
+                    }
+                    None if required.is_some() => Err(anyhow!("This call must be end-to-end encrypted, and this device has no key to offer it yet.")),
                     None => Ok(None),
                 };
                 let joined = match keys {
@@ -932,7 +1012,7 @@ async fn drive(
                                         // An epoch change rekeys; the ring keeps the last keys for a
                                         // peer a commit behind.
                                         if let (Some(provider), Some((key, epoch))) = (&provider, &media) {
-                                            e2ee::set_epoch_key(provider, key, *epoch);
+                                            call.rekey(provider, key, *epoch);
                                         }
                                         if let Some(p) = privacy.as_mut() {
                                             p.rekey(hello, media);
@@ -951,6 +1031,40 @@ async fn drive(
                                     Some(Command::Roster(users)) => {
                                         roster = users;
                                         greet(&mut privacy, &roster);
+                                    }
+                                    Some(Command::GuildE2ee(event)) => {
+                                        log::debug!("guild call: {} for epoch {}", event["op"], event["epoch"]);
+                                        let moved = match guild.as_mut() {
+                                            Some(keys) => keys.hear(&event).await,
+                                            None => Ok(None),
+                                        };
+                                        match moved {
+                                            Ok(Some((key, epoch))) => {
+                                                log::debug!("guild call: key for epoch {epoch}");
+                                                if let Some(provider) = &provider {
+                                                    call.rekey(provider, &key, epoch);
+                                                }
+                                            }
+                                            Ok(None) => {}
+                                            // A device nobody vouched for, or a lost epoch: leave, and say why.
+                                            Err(err) => {
+                                                let _ = updates.send(Update::Failed(format!("{err:#}")));
+                                                break None;
+                                            }
+                                        }
+                                    }
+                                    Some(Command::GuildRoster(states)) => {
+                                        if let Some(keys) = guild.as_mut() {
+                                            match keys.tend(&states).await {
+                                                Ok(Some((key, epoch))) => {
+                                                    if let Some(provider) = &provider {
+                                                        call.rekey(provider, &key, epoch);
+                                                    }
+                                                }
+                                                Ok(None) => {}
+                                                Err(err) => log::warn!("guild call keys: {err:#}"),
+                                            }
+                                        }
                                     }
                                     Some(Command::Leave) | None => break None,
                                 },

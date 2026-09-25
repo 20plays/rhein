@@ -108,6 +108,8 @@ pub struct VoiceState {
     pub region: Option<String>,
     pub stream_preset: Option<String>,
     pub joined_at: Option<i64>,
+    /// Holds the key of a guild call on an SFU (a member of the call's MLS group).
+    pub e2ee_member: bool,
 }
 
 /// One row of a channel's screen-watch table.
@@ -328,6 +330,19 @@ impl IceServer {
 pub struct VoiceJoin {
     pub voice_state: VoiceState,
     pub voice_server: VoiceServer,
+    /// A guild call on an SFU: its MLS group, and whether we found it.
+    #[serde(default)]
+    pub e2ee: Option<GuildE2ee>,
+}
+
+/// Which MLS group encrypts a guild call, and whether this device is its first member.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GuildE2ee {
+    pub group_id: String,
+    #[serde(default)]
+    pub epoch: u64,
+    #[serde(default)]
+    pub member: bool,
 }
 
 /// What `POST {sfu}/session` answers with: where the LiveKit room is and how to get in.

@@ -1504,6 +1504,7 @@ impl Client {
                 self.load_conversations(cx);
             }
             Event::VoiceSignal { channel_id, from, payload } => self.on_voice_signal(&channel_id, from, payload),
+            Event::VoiceE2ee { channel_id, data } => self.on_voice_e2ee(&channel_id, data),
             Event::VoiceServerUpdate(data) => self.on_voice_server(data),
             // Screen watchers matter with M4.2.
             Event::VoiceWatchersUpdate { .. } => {}

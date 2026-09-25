@@ -157,6 +157,8 @@ pub enum Event {
     VoiceServerUpdate(Value),
     /// A mesh relay payload from another participant.
     VoiceSignal { channel_id: String, from: String, payload: Value },
+    /// A guild call's MLS group moved: `{op: "commit" | "reset", group_id, epoch, ...}`.
+    VoiceE2ee { channel_id: String, data: Value },
     /// A channel's whole screen-watch table.
     VoiceWatchersUpdate { channel_id: String, watchers: Vec<crate::model::VoiceWatcher> },
     PinsUpdate { channel_id: String, message_id: String, pinned: bool },
@@ -267,6 +269,7 @@ impl Event {
                 Err(_) => Event::Other { t: t.into(), d },
             },
             "VOICE_SERVER_UPDATE" => Event::VoiceServerUpdate(d),
+            "VOICE_E2EE" => Event::VoiceE2ee { channel_id: str_of(&d, "channel_id"), data: d },
             "VOICE_SIGNAL" => Event::VoiceSignal {
                 channel_id: str_of(&d, "channel_id"),
                 from: str_of(&d, "from"),

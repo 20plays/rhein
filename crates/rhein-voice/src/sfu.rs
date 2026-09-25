@@ -57,12 +57,16 @@ pub struct SfuCall {
     session: SfuSession,
     watching: HashSet<String>,
     published: HashMap<Slot, TrackSid>,
+    /// The key slot our media is sent under (`epoch % 16`); LiveKit itself leaves every sender
+    /// at slot 0, where a receiver keyed by epoch has nothing.
+    send_slot: Option<i32>,
 }
 
 impl SfuCall {
     /// Joins the room of `session`, publishing `microphone`. With `e2ee` (DM calls) every frame
     /// is encrypted from the first one on.
     pub async fn connect(session: SfuSession, microphone: NativeAudioSource, e2ee: Option<KeyProvider>) -> Result<(SfuCall, mpsc::UnboundedReceiver<CallEvent>)> {
+        let slot = e2ee.as_ref().map(|p| p.get_latest_key_index());
         let mut options = RoomOptions::default();
         options.auto_subscribe = false;
         options.adaptive_stream = true;
@@ -72,7 +76,7 @@ impl SfuCall {
         }
         let (room, room_events) = Room::connect(&session.url, &session.token, options).await.context("joining the LiveKit room")?;
         let (events, rx) = mpsc::unbounded_channel();
-        let call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new() };
+        let mut call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new(), send_slot: None };
         // What was already in the room before we came.
         for participant in call.room.remote_participants().values() {
             let _ = events.send(CallEvent::Link { user: participant.identity().to_string(), up: true });
@@ -88,6 +92,8 @@ impl SfuCall {
             .publish_track(LocalTrack::Audio(track), TrackPublishOptions { source: TrackSource::Microphone, ..Default::default() })
             .await
             .context("publishing the microphone")?;
+        call.send_slot = slot;
+        call.aim_senders();
         Ok((call, rx))
     }
 
@@ -130,7 +136,27 @@ impl SfuCall {
             .await
             .context("publishing video")?;
         self.published.insert(slot, publication.sid());
+        self.aim_senders();
         Ok(())
+    }
+
+    /// Installs a new epoch's key and sends under it from now on. The earlier keys stay in the
+    /// ring, so a peer a commit behind is still heard.
+    pub fn rekey(&mut self, provider: &KeyProvider, key: &[u8], epoch: u64) {
+        crate::e2ee::set_epoch_key(provider, key, epoch);
+        self.send_slot = Some(crate::e2ee::key_slot(epoch));
+        self.aim_senders();
+    }
+
+    /// Points our own tracks' frame cryptors at the current key slot.
+    fn aim_senders(&self) {
+        let Some(slot) = self.send_slot else { return };
+        let me = self.room.local_participant().identity();
+        for ((who, _), cryptor) in self.room.e2ee_manager().frame_cryptors() {
+            if who == me {
+                cryptor.set_key_index(slot);
+            }
+        }
     }
 
     /// Takes a published camera or screen down again.

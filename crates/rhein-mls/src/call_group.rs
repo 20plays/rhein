@@ -49,6 +49,10 @@ impl CallGroup {
         Ok(package)
     }
 
+    pub fn own_device(&self) -> &str {
+        &self.device_id
+    }
+
     pub fn group_id(&self) -> Option<&str> {
         self.group_id.as_deref()
     }

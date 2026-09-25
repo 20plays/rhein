@@ -1,7 +1,8 @@
-//! Guild voice over a running dev server (`RHEIN_LIVE`): two accounts join a voice channel, the
-//! server answers with a mesh, their relay payloads go through `/voice/signal` and come back as
-//! `VOICE_SIGNAL`, the roster follows `VOICE_STATE_UPDATE`, and one hears the other's tone.
-//! Leaving takes the peer away on the other side.
+//! Guild voice over a running dev server without an SFU region (`RHEIN_LIVE`, for example server
+//! b): two accounts join a voice channel, the server answers with a mesh, their relay payloads go
+//! through `/voice/signal` and come back as `VOICE_SIGNAL`, the roster follows
+//! `VOICE_STATE_UPDATE`, and one hears the other's tone. Leaving takes the peer away on the other
+//! side. SFU calls, which are end-to-end encrypted, are in `rhein-store/tests/guild_call_live.rs`.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -195,7 +196,7 @@ async fn two_members_talk_over_a_server_mesh() {
     let factory = PeerConnectionFactory::default();
     let (mic, feeder) = tone(&factory, 440.);
     for (i, m) in members.iter_mut().enumerate() {
-        let joined = m.api.voice_join(&voice_id, false, false, false, None).await.expect("join voice");
+        let joined = m.api.voice_join(&voice_id, false, false, false, None, None).await.expect("join voice");
         assert_eq!(joined.voice_state.channel_id.as_deref(), Some(voice_id.as_str()));
         assert!(joined.voice_state.session_id.is_some());
         let VoiceServer::Mesh { ice_servers, .. } = joined.voice_server else {
@@ -262,158 +263,4 @@ async fn two_members_talk_over_a_server_mesh() {
     assert_eq!(ended, a_user);
     feeder.abort();
     members[1].api.voice_leave(&voice_id).await.ok();
-}
-
-/// The same through the dev SFU (`scripts/dev-sfu.sh`, `RHEIN_SFU=1 scripts/dev-server.sh a`):
-/// the join token is spent at the SFU, both sit in its LiveKit room, and a's microphone (the
-/// audio engine's source, fed a tone) is heard in b's mix.
-#[tokio::test]
-async fn two_members_talk_through_the_sfu() {
-    use rhein_voice::audio::AudioEngine;
-    use rhein_voice::sfu::{self, SfuCall};
-    use rhein_voice::CallEvent;
-    let Some((members, voice_id, http)) = two_in_a_guild("vs").await else { return };
-    let engines = [std::sync::Arc::new(AudioEngine::headless().unwrap()), std::sync::Arc::new(AudioEngine::headless().unwrap())];
-    let mut calls = Vec::new();
-    for (m, engine) in members.iter().zip(&engines) {
-        let joined = m.api.voice_join(&voice_id, false, false, false, None).await.expect("join voice");
-        let VoiceServer::Sfu { endpoint, token, .. } = joined.voice_server else {
-            eprintln!("the server answered with a mesh (no SFU region); skipping the SFU test");
-            return;
-        };
-        let session = sfu::session(&http, &endpoint, &token).await.expect("SFU session");
-        assert!(session.max_bitrate.unwrap_or(0) > 0);
-        calls.push(SfuCall::connect(session, engine.microphone(), None).await.expect("join the room"));
-    }
-
-    // a speaks, in real time.
-    let speaking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let feeder = {
-        let (speaking, engine) = (speaking.clone(), engines[0].clone());
-        std::thread::spawn(move || {
-            let tone: Vec<i16> = (0..480 * 100).map(|i| ((i as f32 * 2. * std::f32::consts::PI * 440. / 48_000.).sin() * 8000.) as i16).collect();
-            let mut chunks = tone.chunks(480).cycle();
-            while speaking.load(std::sync::atomic::Ordering::Relaxed) {
-                engine.feed(chunks.next().unwrap());
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        })
-    };
-
-    let (_, b_events) = &mut calls[1];
-    let a_user = members[0].user.clone();
-    let track = tokio::time::timeout(Duration::from_secs(20), async {
-        while let Some(event) = b_events.recv().await {
-            if let CallEvent::Track { from, slot: Slot::Mic, track: MediaStreamTrack::Audio(track) } = event {
-                assert_eq!(from, a_user);
-                return track;
-            }
-        }
-        panic!("the call ended");
-    })
-    .await
-    .expect("b is sent a's microphone");
-    engines[1].add_voice(&a_user, track);
-    let tap = engines[1].tap();
-    let heard = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            match tap.try_recv() {
-                Ok(frame) if is_tone(&frame, 440.) => return true,
-                Ok(_) => {}
-                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
-            }
-        }
-    })
-    .await
-    .unwrap_or(false);
-    assert!(heard, "b hears a's tone through the SFU");
-
-    // a hangs up: b loses the track.
-    let (a_call, _) = calls.remove(0);
-    a_call.close().await;
-    let _ = members[0].api.post_patiently::<_, serde_json::Value>(&format!("/channels/{voice_id}/voice/leave"), &serde_json::json!({})).await;
-    let (_, b_events) = &mut calls[0];
-    let gone = tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(event) = b_events.recv().await {
-            match event {
-                CallEvent::TrackEnded { from, .. } | CallEvent::Link { user: from, up: false } if from == members[0].user => return true,
-                _ => {}
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-    assert!(gone, "a's track ends for b");
-    speaking.store(false, std::sync::atomic::Ordering::Relaxed);
-    feeder.join().unwrap();
-}
-
-/// A screen share through the SFU: a publishes a (test pattern) screen, b does not get it until
-/// it watches, then gets pictures.
-#[tokio::test]
-async fn a_screen_share_waits_for_watch_on_the_sfu() {
-    use rhein_voice::audio::AudioEngine;
-    use rhein_voice::sfu::{self, SfuCall};
-    use rhein_voice::video::{TestPattern, VideoFeed, VideoOut};
-    use rhein_voice::CallEvent;
-    let Some((members, voice_id, http)) = two_in_a_guild("vw").await else { return };
-    let engines = [AudioEngine::headless().unwrap(), AudioEngine::headless().unwrap()];
-    let mut calls = Vec::new();
-    for (m, engine) in members.iter().zip(&engines) {
-        let joined = m.api.voice_join(&voice_id, false, false, false, None).await.expect("join voice");
-        let VoiceServer::Sfu { endpoint, token, .. } = joined.voice_server else {
-            eprintln!("no SFU region; skipping");
-            return;
-        };
-        let session = sfu::session(&http, &endpoint, &token).await.expect("SFU session");
-        calls.push(SfuCall::connect(session, engine.microphone(), None).await.expect("join the room"));
-    }
-    let out = VideoOut::new(640, 360, true);
-    let _pattern = TestPattern::start(out.clone(), 640, 360);
-    members[0].api.voice_stream(&voice_id, true, Some("detail 360p@15")).await.expect("stream state");
-    calls[0].0.publish_video(Slot::Screen, out.source()).await.expect("publish the screen");
-
-    // Not watched: nothing arrives for a while.
-    let a_user = members[0].user.clone();
-    let early = tokio::time::timeout(Duration::from_secs(3), async {
-        while let Some(event) = calls[1].1.recv().await {
-            if matches!(event, CallEvent::Track { slot: Slot::Screen, .. }) {
-                return true;
-            }
-        }
-        false
-    })
-    .await
-    .unwrap_or(false);
-    assert!(!early, "a screen share is not forwarded before Watch");
-
-    members[1].api.voice_watch(&voice_id, &a_user, true, None).await.expect("watch");
-    calls[1].0.watch(&a_user, true);
-    let track = tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(event) = calls[1].1.recv().await {
-            if let CallEvent::Track { from, slot: Slot::Screen, track: MediaStreamTrack::Video(track) } = event {
-                assert_eq!(from, a_user);
-                return track;
-            }
-        }
-        panic!("the call ended");
-    })
-    .await
-    .expect("the screen arrives once watched");
-    let feed = VideoFeed::start(track, 1920, 30);
-    let picture = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some((_, picture)) = feed.latest() {
-                return picture;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("a picture of the screen");
-    assert!(picture.width > 0 && picture.height > 0);
-    for (call, _) in calls {
-        call.close().await;
-    }
 }
