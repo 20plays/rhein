@@ -1561,11 +1561,31 @@ impl Shell {
                                 .child(icon_sized(if expanded { Icon::ChevronDown } else { Icon::ChevronRight }, px(12.)).text_color(t.text_faint)),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(entry.guild.name.clone()))
-                        .when(unread && mentions == 0 && !expanded, |d| d.child(UnreadDot))
                         .when(mentions > 0, |d| d.child(CountBadge(mentions)))
+                        // The unread dot and the menu button share the row's end: the dot until
+                        // the pointer is on the row, then the button in its place.
                         .child(
                             div()
+                                .relative()
+                                .size(px(20.))
+                                .flex_none()
+                                .when(unread && mentions == 0 && !expanded, |d| {
+                                    d.child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .group_hover("guild-row", |s| s.invisible())
+                                            .child(UnreadDot),
+                                    )
+                                })
+                                .child(
+                            div()
                                 .id(SharedString::from(format!("tree-more-{gid}")))
+                                .absolute()
+                                .inset_0()
                                 .invisible()
                                 .group_hover("guild-row", |s| s.visible())
                                 .size(px(20.))
@@ -1581,6 +1601,7 @@ impl Shell {
                                     this.show_guild_menu(more_id.clone(), e.position(), window, cx)
                                 }))
                                 .child(icon_sized(Icon::Ellipsis, px(14.)).text_color(t.text_muted)),
+                                ),
                         ),
                 );
                 if expanded {

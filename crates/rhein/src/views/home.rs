@@ -216,6 +216,8 @@ impl HomeView {
             .child(
                 div()
                     .p_4()
+                    // A form of a readable width, not the whole window's.
+                    .max_w(px(720.))
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -225,7 +227,7 @@ impl HomeView {
                             .flex()
                             .gap_2()
                             .child(div().flex_1().child(self.add.clone()))
-                            .child(Button::new("friend-send", "Send request").primary().on_click(cx.listener(|v, _, _, cx| v.send_request(cx)))),
+                            .child(div().w(px(FORM_BUTTON_W)).flex_none().flex().child(Button::new("friend-send", "Send request").primary().full_width().on_click(cx.listener(|v, _, _, cx| v.send_request(cx))))),
                     )
                     .child(div().pt_2().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).child("New group chat"))
                     .child(
@@ -233,7 +235,7 @@ impl HomeView {
                             .flex()
                             .gap_2()
                             .child(div().flex_1().child(self.group.clone()))
-                            .child(Button::new("group-start", "Start").icon(Icon::Lock).on_click(cx.listener(|v, _, _, cx| v.start_group(cx)))),
+                            .child(div().w(px(FORM_BUTTON_W)).flex_none().flex().child(Button::new("group-start", "Start").icon(Icon::Lock).full_width().on_click(cx.listener(|v, _, _, cx| v.start_group(cx))))),
                     ),
             )
             .child(rhein_ui::smooth_scroll("friends-glide", rhein_ui::ScrollTarget::Handle(self.list_scroll.clone()), list))
@@ -241,6 +243,9 @@ impl HomeView {
     }
 
 }
+
+/// Both form rows end in a button of the same width, so their fields line up.
+const FORM_BUTTON_W: f32 = 132.;
 
 impl Render for HomeView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

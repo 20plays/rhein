@@ -1,7 +1,7 @@
 //! The message pane: history as a virtual list that sticks to the bottom, and the composer with
 //! replies, edits and staged attachments.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -68,6 +68,8 @@ pub struct ChatView {
     /// Takes the keyboard while text is selected, so Ctrl+C reaches the selection and not the
     /// composer.
     pub(crate) select_focus: FocusHandle,
+    /// The message bar's box, as last laid out.
+    composer_bounds: Rc<Cell<gpui::Bounds<Pixels>>>,
     /// Messages that arrived while the channel was open, animating in (see `rows::message_key`).
     pub(crate) fresh: HashSet<String>,
     /// A message briefly highlighted after a jump.
@@ -216,6 +218,7 @@ impl ChatView {
             voice_chat: None,
             selection: None,
             select_focus: cx.focus_handle(),
+            composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
             arrived: HashSet::new(),
             row_progress: HashMap::new(),
@@ -701,6 +704,7 @@ impl ChatView {
             window.focus(&focus, cx);
             cx.notify();
         });
+        let at = if matches!(target, PickerTarget::Composer) { self.above_composer(at) } else { at };
         self.picker = Some((picker, at, target, vec![sub, dismiss]));
         cx.notify();
     }
@@ -724,8 +728,15 @@ impl ChatView {
             window.focus(&focus, cx);
             cx.notify();
         });
+        let at = self.above_composer(at);
         self.gif_picker = Some((picker, at, vec![pick, dismiss]));
         cx.notify();
+    }
+
+    /// Where a composer picker opens: above the message bar, flush with its right edge.
+    fn above_composer(&self, fallback: Point<Pixels>) -> Point<Pixels> {
+        let b = self.composer_bounds.get();
+        if b.size.width > px(0.) { gpui::point(b.right(), b.top() - px(6.)) } else { fallback }
     }
 
     fn render_gif_picker(&self) -> Option<AnyElement> {
@@ -1580,12 +1591,18 @@ impl ChatView {
             // A prompt line: `›`, the text with its block cursor, and the attach and emoji buttons.
             .child(
                 div()
+                    .relative()
                     .flex()
                     .items_start()
                     .gap_1()
                     .pl_1()
                     .pr(px(4.))
                     .py(px(4.))
+                    // Where the box is, for the pickers to open just above it.
+                    .child({
+                        let bounds = self.composer_bounds.clone();
+                        gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {}).absolute().size_full()
+                    })
                     .rounded(radius::MD)
                     .bg(t.bg_raised)
                     .border_1()

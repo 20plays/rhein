@@ -297,6 +297,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     };
     let row = div()
         .relative()
+        .w_full()
         .group(group)
         .flex()
         .flex_col()
@@ -317,7 +318,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             })
         });
 
+    // As wide as the list: a highlight or the hover spans the row, and the actions sit at its
+    // right edge rather than on the text.
     let element = div()
+        .w_full()
         .flex()
         .flex_col()
         .when(new_day, |d| d.child(day_separator(message.created_at, &t)))
