@@ -22,6 +22,7 @@ use crate::io::{Io, join};
 mod call;
 mod dm_view;
 pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
+pub use rhein_voice::Slot;
 use crate::persist::{self, Saved};
 
 const PAGE: u32 = 50;

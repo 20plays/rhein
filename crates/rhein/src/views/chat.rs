@@ -935,7 +935,22 @@ impl ChatView {
                 t.text_faint,
             ),
         });
+        let me = client.user_id().map(str::to_owned);
+        let sfu = call.is_some_and(|c| matches!(c.mode, Some(rhein_store::CallMode::Sfu { .. })));
+        // The screen on the stage: the first one we have a picture of.
+        let screen = members.iter().find_map(|m| client.video(&m.user_id, rhein_store::Slot::Screen).map(|img| (m.user_id.clone(), img)));
         let tiles = members.iter().map(|state| {
+            let camera = client.video(&state.user_id, rhein_store::Slot::Camera).filter(|_| state.self_video);
+            let mine = me.as_deref() == Some(state.user_id.as_str());
+            let watched = call.is_some_and(|c| c.watching.contains(&state.user_id));
+            // On an SFU a screen share has to be asked for; a mesh sends it anyway.
+            let watch = (in_call && sfu && state.streaming && !mine).then(|| {
+                let (c, user) = (self.client.clone(), state.user_id.clone());
+                Button::new(SharedString::from(format!("watch-{}", state.user_id)), if watched { "Stop watching" } else { "Watch" })
+                    .small()
+                    .icon(Icon::ScreenShare)
+                    .on_click(move |_, _, cx| c.update(cx, |c, cx| c.watch_screen(&user, !watched, cx)))
+            });
             let who = client.display_name(guild_id.as_deref(), &state.user_id);
             let avatar = client.avatar_url(guild_id.as_deref(), &state.user_id);
             let badge = |glyph: Icon, danger: bool| {
@@ -951,7 +966,7 @@ impl ChatView {
             let speaking = client.is_speaking(&state.user_id);
             div()
                 .w(px(200.))
-                .h(px(150.))
+                .h(px(if watch.is_some() { 180. } else { 150. }))
                 .rounded(radius::LG)
                 .bg(t.bg_panel)
                 .border_2()
@@ -961,8 +976,14 @@ impl ChatView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .child(Avatar::new(state.user_id.clone(), who.clone()).size(px(64.)).image(avatar.map(Into::into)))
+                .overflow_hidden()
+                .relative()
+                .child(match camera {
+                    Some(picture) => gpui::img(picture).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                    None => Avatar::new(state.user_id.clone(), who.clone()).size(px(64.)).image(avatar.map(Into::into)).into_any_element(),
+                })
                 .child(div().font_weight(FontWeight::MEDIUM).child(who))
+                .children(watch)
                 .child(
                     div()
                         .flex()
@@ -1003,6 +1024,30 @@ impl ChatView {
                     .justify_center()
                     .gap_6()
                     .p_8()
+                    .children(screen.map(|(user, picture)| {
+                        let who = client.display_name(guild_id.as_deref(), &user);
+                        div()
+                            .w_full()
+                            .flex_1()
+                            .min_h(px(240.))
+                            .rounded(radius::LG)
+                            .bg(t.bg_panel)
+                            .overflow_hidden()
+                            .relative()
+                            .child(gpui::img(picture).size_full().object_fit(gpui::ObjectFit::Contain))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_2()
+                                    .bottom_2()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded(radius::SM)
+                                    .bg(t.bg_base)
+                                    .text_size(text::SM)
+                                    .child(format!("{who}'s screen")),
+                            )
+                    }))
                     .child(if members.is_empty() {
                         div().text_color(t.text_faint).child("Nobody is here right now.").into_any_element()
                     } else {

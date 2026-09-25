@@ -203,3 +203,46 @@ async fn engines_carry_a_voice_through_the_mesh() {
     a.close();
     b.close();
 }
+
+/// A camera (a test pattern) on the camera m-line arrives as pictures on the far side, and
+/// turning it off ends the track.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_camera_crosses_the_mesh() {
+    use rhein_voice::video::{TestPattern, VideoFeed, VideoOut};
+    let (fa, fb) = (PeerConnectionFactory::default(), PeerConnectionFactory::default());
+    let out = VideoOut::new(320, 180, false);
+    let _pattern = TestPattern::start(out.clone(), 320, 180);
+    let camera: MediaStreamTrack = fa.create_video_track("camera", out.source()).into();
+    let (mut a, mut ea) = Mesh::new("@a:test", fa, vec![], false);
+    let (mut b, mut eb) = Mesh::new("@b:test", fb, vec![], false);
+    a.sync(["@a:test", "@b:test"]);
+    b.sync(["@a:test", "@b:test"]);
+    // Connected first, the camera turned on afterwards: the m-line turns around.
+    pump(&mut a, &mut ea, &mut b, &mut eb, |_, e| matches!(e, CallEvent::Link { up: true, .. })).await;
+    a.set_source(Slot::Camera, Some(camera));
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, CallEvent::Track { slot: Slot::Camera, .. })).await;
+    let CallEvent::Track { track: MediaStreamTrack::Video(track), .. } = got else { panic!("a video track") };
+    let feed = VideoFeed::start(track, 1280, 30);
+    let picture = pumping(&mut a, &mut ea, &mut b, &mut eb, async {
+        for _ in 0..400 {
+            if let Some((_, picture)) = feed.latest() {
+                return Some(picture);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        None
+    })
+    .await
+    .expect("a picture arrived");
+    assert_eq!((picture.width, picture.height), (320, 180));
+    assert_eq!(picture.bgra.len(), 320 * 180 * 4);
+    // The pattern's field is green at the bottom, blue to the right: not a black frame.
+    let at = |x: u32, y: u32| &picture.bgra[((y * 320 + x) * 4) as usize..][..3];
+    assert!(at(10, 170)[1] > 120, "green at the bottom left: {:?}", at(10, 170));
+
+    a.set_source(Slot::Camera, None);
+    let got = pump(&mut a, &mut ea, &mut b, &mut eb, |at_a, e| !at_a && matches!(e, CallEvent::TrackEnded { .. })).await;
+    assert!(matches!(got, CallEvent::TrackEnded { slot: Slot::Camera, .. }));
+    a.close();
+    b.close();
+}

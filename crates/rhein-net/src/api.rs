@@ -282,6 +282,18 @@ impl Api {
         }
     }
 
+    /// Starts or stops a screen share; `preset` describes it ("detail 1080p@15").
+    pub async fn voice_stream(&self, channel_id: &str, enabled: bool, preset: Option<&str>) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "enabled": enabled, "preset": preset });
+        self.post(&format!("/channels/{}/voice/stream", urlencoding::encode(channel_id)), &body).await
+    }
+
+    /// Starts or stops watching someone's screen share (on an SFU the server has it forwarded).
+    pub async fn voice_watch(&self, channel_id: &str, streamer: &str, watching: bool, quality: Option<&str>) -> ApiResult<serde_json::Value> {
+        let body = serde_json::json!({ "streamer": streamer, "watching": watching, "quality": quality });
+        self.post(&format!("/channels/{}/voice/watch", urlencoding::encode(channel_id)), &body).await
+    }
+
     /// Who is in a voice channel: `{channel_id, voice_states, watchers}`.
     pub async fn voice_channel(&self, channel_id: &str) -> ApiResult<serde_json::Value> {
         self.get(&format!("/channels/{}/voice", urlencoding::encode(channel_id))).await

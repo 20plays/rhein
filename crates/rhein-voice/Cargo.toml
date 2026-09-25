@@ -15,6 +15,9 @@ log.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 futures.workspace = true
+# The same libwebrtc livekit uses (vendored, see vendor/libwebrtc/RHEIN.md), with the GLib loop
+# the screen capturer needs on Wayland to talk to the desktop portal.
+libwebrtc = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", features = ["glib-main-loop"] }
 livekit = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false, features = ["native", "rustls-tls-webpki-roots"] }
 
 [dev-dependencies]

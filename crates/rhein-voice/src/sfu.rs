@@ -3,12 +3,15 @@
 //! everything but screen shares is subscribed to (screens only once watched), and the
 //! microphone goes out from the [`AudioEngine`](crate::audio::AudioEngine)'s source.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, anyhow};
 use livekit::e2ee::key_provider::KeyProvider;
 use livekit::options::TrackPublishOptions;
-use livekit::track::{LocalAudioTrack, LocalTrack, RemoteTrack, TrackSource};
+use livekit::id::TrackSid;
+use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, TrackSource};
+use livekit::webrtc::video_source::RtcVideoSource;
+use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::media_stream_track::MediaStreamTrack;
 use livekit::webrtc::prelude::RtcAudioSource;
@@ -53,6 +56,7 @@ pub struct SfuCall {
     room: Room,
     session: SfuSession,
     watching: HashSet<String>,
+    published: HashMap<Slot, TrackSid>,
 }
 
 impl SfuCall {
@@ -68,7 +72,7 @@ impl SfuCall {
         }
         let (room, room_events) = Room::connect(&session.url, &session.token, options).await.context("joining the LiveKit room")?;
         let (events, rx) = mpsc::unbounded_channel();
-        let call = SfuCall { room, session, watching: HashSet::new() };
+        let call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new() };
         // What was already in the room before we came.
         for participant in call.room.remote_participants().values() {
             let _ = events.send(CallEvent::Link { user: participant.identity().to_string(), up: true });
@@ -107,6 +111,32 @@ impl SfuCall {
                     publication.set_subscribed(on);
                 }
             }
+        }
+    }
+
+    /// Publishes a camera or a screen (simulcast, so each viewer gets the layer it can take).
+    pub async fn publish_video(&mut self, slot: Slot, source: NativeVideoSource) -> Result<()> {
+        self.unpublish(slot).await;
+        let source_kind = match slot {
+            Slot::Camera => TrackSource::Camera,
+            Slot::Screen => TrackSource::Screenshare,
+            _ => return Err(anyhow!("{slot:?} is not a video slot")),
+        };
+        let track = LocalVideoTrack::create_video_track(if slot == Slot::Screen { "screen" } else { "camera" }, RtcVideoSource::Native(source));
+        let publication = self
+            .room
+            .local_participant()
+            .publish_track(LocalTrack::Video(track), TrackPublishOptions { source: source_kind, simulcast: true, ..Default::default() })
+            .await
+            .context("publishing video")?;
+        self.published.insert(slot, publication.sid());
+        Ok(())
+    }
+
+    /// Takes a published camera or screen down again.
+    pub async fn unpublish(&mut self, slot: Slot) {
+        if let Some(sid) = self.published.remove(&slot) {
+            let _ = self.room.local_participant().unpublish_track(&sid).await;
         }
     }
 

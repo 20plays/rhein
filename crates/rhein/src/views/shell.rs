@@ -189,6 +189,19 @@ impl Shell {
                             }
                         })
                         .ok();
+                        // Then watches whoever shares a screen.
+                        cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                        this.update(cx, |v, cx| {
+                            v.client.update(cx, |c, cx| {
+                                let Some(call) = c.call() else { return };
+                                let (guild, channel) = (call.guild_id.clone(), call.channel_id.clone());
+                                let streaming: Vec<String> = c.voice_members(&guild, &channel).into_iter().filter(|s| s.streaming).map(|s| s.user_id).collect();
+                                for user in streaming {
+                                    c.watch_screen(&user, true, cx);
+                                }
+                            });
+                        })
+                        .ok();
                     })
                     .detach();
                 }
@@ -1410,6 +1423,13 @@ impl Shell {
                         .child(div().flex().items_center().gap_1p5().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).text_color(color).child(icon_sized(Icon::Volume, px(14.)).text_color(color)).child(label))
                         .child(div().text_size(text::XS).text_color(t.text_faint).truncate().child(detail)),
                 )
+                .child({
+                    let (sharing, c) = (call.sharing_screen, self.client.clone());
+                    IconButton::new("call-screen", Icon::ScreenShare)
+                        .active(sharing)
+                        .tooltip(if sharing { "Stop sharing your screen" } else { "Share your screen" })
+                        .on_click(move |_, _, cx| c.update(cx, |c, cx| if sharing { c.stop_screen_share(cx) } else { c.start_screen_share(cx) }))
+                })
                 .child(
                     IconButton::new("call-leave", Icon::PhoneOff)
                         .danger(true)

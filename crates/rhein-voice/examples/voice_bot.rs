@@ -3,6 +3,8 @@
 //!
 //!   cargo run -p rhein-voice --example voice_bot -- localhost:8448 @ben…:localhost 'rhein demo password'
 //!
+//! With `--screen` after the password it also shares a moving test pattern as its screen.
+//!
 //! Signs in as that account (a new device each time) and uses the guild on its home server.
 //! Needs a server with an SFU region (`scripts/dev-sfu.sh`, `RHEIN_SFU=1 scripts/dev-server.sh
 //! a`); a mesh would need a gateway for its signals.
@@ -18,7 +20,7 @@ use rhein_voice::sfu::{self, SfuCall};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let (Some(server), Some(user), Some(password)) = (args.next(), args.next(), args.next()) else {
+    let (Some(server), Some(user), Some(password), screen) = (args.next(), args.next(), args.next(), args.next().is_some_and(|a| a == "--screen")) else {
         anyhow::bail!("usage: voice_bot <server> <user id> <password>");
     };
     let http = reqwest::Client::new();
@@ -36,7 +38,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let engine = AudioEngine::headless()?;
     let session = sfu::session(&http, &endpoint, &token).await?;
-    let (call, mut events) = SfuCall::connect(session, engine.microphone(), None).await?;
+    let (mut call, mut events) = SfuCall::connect(session, engine.microphone(), None).await?;
+    let _pattern = if screen {
+        let out = rhein_voice::video::VideoOut::new(1280, 720, true);
+        let pattern = rhein_voice::video::TestPattern::start(out.clone(), 1280, 720);
+        api.voice_stream(&channel.id, true, Some("detail 720p@15")).await?;
+        call.publish_video(rhein_voice::Slot::Screen, out.source()).await?;
+        Some(pattern)
+    } else {
+        None
+    };
     println!("in #{} of {}; Ctrl-C to leave", channel.name, guild.name);
     tokio::spawn(async move { while events.recv().await.is_some() {} });
 

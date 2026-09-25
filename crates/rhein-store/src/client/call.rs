@@ -12,7 +12,9 @@ use rhein_voice::livekit::webrtc::peer_connection_factory::native::PeerConnectio
 use rhein_proto::{VoiceClaim, VoiceServer};
 use rhein_voice::audio::{AudioConfig, AudioEngine};
 use rhein_voice::mesh::{self, Mesh};
+use rhein_voice::screen::ScreenShare;
 use rhein_voice::sfu::{self, SfuCall};
+use rhein_voice::video::{VideoFeed, VideoOut};
 use rhein_voice::{CallEvent, Slot};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -46,9 +48,17 @@ pub struct ActiveCall {
     pub linked: HashSet<String>,
     pub muted: bool,
     pub deafened: bool,
+    /// Our own screen share, while it runs.
+    pub sharing_screen: bool,
+    /// Whose screens we asked to see (an SFU forwards them only then).
+    pub watching: HashSet<String>,
     engine: Option<Arc<AudioEngine>>,
     commands: Option<mpsc::UnboundedSender<Command>>,
     speaking: HashSet<String>,
+    screen: Option<ScreenShare>,
+    videos: HashMap<(String, Slot), VideoFeed>,
+    /// The picture drawn for each video, and which frame it is.
+    images: HashMap<(String, Slot), (u64, Arc<gpui::RenderImage>)>,
     _task: Option<Task<()>>,
 }
 
@@ -63,12 +73,15 @@ enum Command {
     Roster(Vec<String>),
     Server(VoiceServer),
     Watch { user: String, on: bool },
+    Publish { slot: Slot, video: VideoOut },
+    Unpublish(Slot),
     Leave,
 }
 
 enum Update {
     Connected(CallMode),
     Link { user: String, up: bool },
+    Video { user: String, slot: Slot, feed: Option<VideoFeed> },
     Failed(String),
 }
 
@@ -174,6 +187,17 @@ impl Client {
                                 call.linked.remove(&user);
                             }
                         }
+                        Update::Video { user, slot, feed } => match feed {
+                            Some(feed) => {
+                                call.videos.insert((user, slot), feed);
+                            }
+                            None => {
+                                call.videos.remove(&(user.clone(), slot));
+                                if let Some((_, image)) = call.images.remove(&(user, slot)) {
+                                    cx.drop_image(image, None);
+                                }
+                            }
+                        },
                         Update::Failed(err) => call.status = CallStatus::Failed(err),
                     }
                     cx.notify();
@@ -194,9 +218,14 @@ impl Client {
             linked: HashSet::new(),
             muted,
             deafened,
+            sharing_screen: false,
+            watching: HashSet::new(),
             engine: None,
             commands: Some(commands),
             speaking: HashSet::new(),
+            screen: None,
+            videos: HashMap::new(),
+            images: HashMap::new(),
             _task: Some(task),
         });
         self.watch_speaking(cx);
@@ -205,9 +234,12 @@ impl Client {
 
     /// Hangs up.
     pub fn leave_voice(&mut self, cx: &mut Context<Self>) {
-        let Some(call) = self.call.take() else { return };
+        let Some(mut call) = self.call.take() else { return };
         if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Leave);
+        }
+        for (_, (_, image)) in call.images.drain() {
+            cx.drop_image(image, None);
         }
         if let Some(api) = self.api_for_guild(&call.guild_id) {
             let channel = call.channel_id.clone();
@@ -394,28 +426,132 @@ impl Client {
         }
     }
 
-    /// Subscribes to (or drops) someone's screen share on an SFU call.
-    pub fn watch_screen(&self, user_id: &str, on: bool) {
-        if let Some(commands) = self.call.as_ref().and_then(|c| c.commands.as_ref()) {
+    /// Starts (or stops) watching someone's screen share. The server records it and has the SFU
+    /// forward it; a mesh sends screens to everyone anyway.
+    pub fn watch_screen(&mut self, user_id: &str, on: bool, cx: &mut Context<Self>) {
+        let Some(call) = self.call.as_mut() else { return };
+        if on {
+            call.watching.insert(user_id.to_owned());
+        } else {
+            call.watching.remove(user_id);
+        }
+        if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Watch { user: user_id.to_owned(), on });
         }
+        let (guild, channel, user) = (call.guild_id.clone(), call.channel_id.clone(), user_id.to_owned());
+        if let Some(api) = self.api_for_guild(&guild) {
+            self.io.spawn(async move {
+                if let Err(err) = api.voice_watch(&channel, &user, on, None).await {
+                    log::warn!("watch {user}: {err}");
+                }
+            });
+        }
+        cx.notify();
     }
 
-    /// Polls the engine for who is audible, and redraws when that changes.
+    /// The latest picture of someone's camera or screen in the call.
+    pub fn video(&self, user_id: &str, slot: Slot) -> Option<Arc<gpui::RenderImage>> {
+        self.call.as_ref()?.images.get(&(user_id.to_owned(), slot)).map(|(_, image)| image.clone())
+    }
+
+    /// Asks the desktop for a screen or window and shares it into the call.
+    pub fn start_screen_share(&mut self, cx: &mut Context<Self>) {
+        let Some(call) = self.call.as_ref() else { return };
+        if call.sharing_screen {
+            return;
+        }
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let started = join(io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await? })).await;
+            this.update(cx, |this, cx| {
+                let Some(call) = this.call.as_mut() else { return };
+                match started {
+                    Ok(share) => {
+                        if let Some(commands) = &call.commands {
+                            let _ = commands.send(Command::Publish { slot: Slot::Screen, video: share.video().clone() });
+                        }
+                        call.screen = Some(share);
+                        call.sharing_screen = true;
+                        let (guild, channel) = (call.guild_id.clone(), call.channel_id.clone());
+                        if let Some(api) = this.api_for_guild(&guild) {
+                            this.io.spawn(async move {
+                                let _ = api.voice_stream(&channel, true, Some("detail native@30")).await;
+                            });
+                        }
+                    }
+                    Err(err) => log::info!("screen share not started: {err:#}"),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn stop_screen_share(&mut self, cx: &mut Context<Self>) {
+        let Some(call) = self.call.as_mut() else { return };
+        if !call.sharing_screen {
+            return;
+        }
+        call.sharing_screen = false;
+        call.screen = None;
+        if let Some(commands) = &call.commands {
+            let _ = commands.send(Command::Unpublish(Slot::Screen));
+        }
+        let (guild, channel) = (call.guild_id.clone(), call.channel_id.clone());
+        if let Some(api) = self.api_for_guild(&guild) {
+            self.io.spawn(async move {
+                let _ = api.voice_stream(&channel, false, None).await;
+            });
+        }
+        cx.notify();
+    }
+
+    /// Polls the engine for who is audible and the videos for new pictures, and redraws when
+    /// something changed.
     fn watch_speaking(&mut self, cx: &mut Context<Self>) {
         self.speaking_task = Some(cx.spawn(async move |this, cx| {
+            let mut tick = 0u32;
             loop {
-                cx.background_executor().timer(Duration::from_millis(100)).await;
+                cx.background_executor().timer(Duration::from_millis(33)).await;
+                tick += 1;
                 let Ok(alive) = this.update(cx, |this, cx| {
                     let me = this.home.as_ref().map(|h| h.user_id.clone()).unwrap_or_default();
                     let Some(call) = this.call.as_mut() else { return false };
-                    let now: HashSet<String> = call
-                        .engine
-                        .as_ref()
-                        .map(|e| e.speaking().into_iter().map(|k| if k.is_empty() { me.clone() } else { k }).collect())
-                        .unwrap_or_default();
-                    if now != call.speaking {
-                        call.speaking = now;
+                    let mut changed = false;
+                    if tick.is_multiple_of(3) {
+                        let now: HashSet<String> = call
+                            .engine
+                            .as_ref()
+                            .map(|e| e.speaking().into_iter().map(|k| if k.is_empty() { me.clone() } else { k }).collect())
+                            .unwrap_or_default();
+                        if now != call.speaking {
+                            call.speaking = now;
+                            changed = true;
+                        }
+                    }
+                    let mut stale = Vec::new();
+                    for (key, feed) in &call.videos {
+                        let Some((seq, picture)) = feed.latest() else { continue };
+                        if call.images.get(key).is_some_and(|(have, _)| *have == seq) {
+                            continue;
+                        }
+                        if let Some(image) = render_image(&picture) {
+                            if let Some((_, old)) = call.images.insert(key.clone(), (seq, image)) {
+                                stale.push(old);
+                            }
+                            changed = true;
+                        }
+                    }
+                    // The desktop's own "stop sharing" ends a share without us.
+                    let ended = call.screen.as_ref().is_some_and(|s| s.ended());
+                    for old in stale {
+                        cx.drop_image(old, None);
+                    }
+                    if ended {
+                        this.stop_screen_share(cx);
+                    }
+                    if changed {
                         cx.notify();
                     }
                     true
@@ -428,6 +564,11 @@ impl Client {
             }
         }));
     }
+}
+
+fn render_image(picture: &rhein_voice::video::Picture) -> Option<Arc<gpui::RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(picture.width, picture.height, picture.bgra.clone())?;
+    Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buffer)])))
 }
 
 /// The media side of one call, on the tokio runtime. Reconnects when the server points the call
@@ -476,6 +617,11 @@ async fn drive(
                             }
                             Some(Command::Server(new)) => break Some(new),
                             Some(Command::Watch { .. }) => {}
+                            Some(Command::Publish { slot, video }) => {
+                                let track: MediaStreamTrack = call.factory().create_video_track(if slot == Slot::Screen { "screen" } else { "camera" }, video.source()).into();
+                                call.set_source(slot, Some(track));
+                            }
+                            Some(Command::Unpublish(slot)) => call.set_source(slot, None),
                             Some(Command::Leave) | None => break None,
                         },
                         Some(event) = events.recv() => match event {
@@ -497,6 +643,12 @@ async fn drive(
                             tokio::select! {
                                 command = commands.recv() => match command {
                                     Some(Command::Watch { user, on }) => call.watch(&user, on),
+                                    Some(Command::Publish { slot, video }) => {
+                                        if let Err(err) = call.publish_video(slot, video.source()).await {
+                                            let _ = updates.send(Update::Failed(format!("{err:#}")));
+                                        }
+                                    }
+                                    Some(Command::Unpublish(slot)) => call.unpublish(slot).await,
                                     Some(Command::Server(new)) => break Some(new),
                                     Some(Command::Signal { .. }) => {}
                                     Some(Command::Roster(users)) => roster = users,
@@ -537,11 +689,17 @@ fn media(engine: &AudioEngine, updates: &mpsc::UnboundedSender<Update>, event: C
         CallEvent::Track { from, slot: Slot::ScreenAudio, track: MediaStreamTrack::Audio(track) } => engine.add_voice(&format!("{from}#screen"), track),
         CallEvent::TrackEnded { from, slot: Slot::Mic } => engine.remove_voice(&from),
         CallEvent::TrackEnded { from, slot: Slot::ScreenAudio } => engine.remove_voice(&format!("{from}#screen")),
+        CallEvent::Track { from, slot: slot @ (Slot::Camera | Slot::Screen), track: MediaStreamTrack::Video(track) } => {
+            let feed = VideoFeed::start(track, if slot == Slot::Screen { 1920 } else { 640 }, 30);
+            let _ = updates.send(Update::Video { user: from, slot, feed: Some(feed) });
+        }
+        CallEvent::TrackEnded { from, slot: slot @ (Slot::Camera | Slot::Screen) } => {
+            let _ = updates.send(Update::Video { user: from, slot, feed: None });
+        }
         CallEvent::Link { user, up } => {
             let _ = updates.send(Update::Link { user, up });
         }
         CallEvent::Error(err) => log::warn!("call: {err}"),
-        // Video arrives with M4.2.
         _ => {}
     }
 }
