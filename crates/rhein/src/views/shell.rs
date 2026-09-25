@@ -1,8 +1,10 @@
 //! The signed-in window: sidebar tree with your profile | chat over a status line | side panel,
 //! plus its modals.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
@@ -114,7 +116,21 @@ pub struct Shell {
     switcher: Option<(Entity<QuickSwitcher>, Subscription)>,
     profile_card: Option<(String, Option<String>, Point<Pixels>)>,
     card_ticker: Option<gpui::Task<()>>,
+    /// When this window last had input from you (auto-idle, `IDLE_AFTER`).
+    last_input: Rc<Cell<Instant>>,
+    _idle_watch: gpui::Task<()>,
     _subs: Vec<Subscription>,
+}
+
+/// How long without input to this window before you show as idle.
+const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Input to the window: note the time, and wake from auto-idle.
+fn note_input(last: &Cell<Instant>, client: &Entity<Client>, cx: &mut App) {
+    last.set(Instant::now());
+    if client.read(cx).is_auto_idle() {
+        client.update(cx, |c, cx| c.set_auto_idle(false, cx));
+    }
 }
 
 impl Shell {
@@ -122,7 +138,24 @@ impl Shell {
         let chat = cx.new(|cx| ChatView::new(client.clone(), window, cx));
         let dialog_input = cx.new(|cx| TextInput::new("", cx));
         let home = cx.new(|cx| HomeView::new(client.clone(), window, cx));
+        let last_input = Rc::new(Cell::new(Instant::now()));
+        let idle_after = std::env::var("RHEIN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_AFTER, std::time::Duration::from_secs);
+        let idle_watch = {
+            let (last, client) = (last_input.clone(), client.clone());
+            cx.spawn(async move |_, cx| {
+                loop {
+                    cx.background_executor().timer((idle_after / 20).min(std::time::Duration::from_secs(30))).await;
+                    if last.get().elapsed() >= idle_after {
+                        client.update(cx, |c, cx| c.set_auto_idle(true, cx));
+                    }
+                }
+            })
+        };
         let subs = vec![
+            {
+                let (last, client) = (last_input.clone(), client.clone());
+                cx.observe_keystrokes(move |_, _, _, cx| note_input(&last, &client, cx))
+            },
             cx.observe_in(&client, window, |this, _, window, cx| {
                 this.follow_channel(window, cx);
                 cx.notify();
@@ -369,6 +402,8 @@ impl Shell {
             switcher: None,
             profile_card: None,
             card_ticker: None,
+            last_input,
+            _idle_watch: idle_watch,
             _subs: subs,
         }
     }
@@ -840,7 +875,7 @@ impl Shell {
                     accent: profile.as_ref().and_then(|p| p.accent_color),
                     theme: None,
                 };
-                let presence = presence_of(&c.prefs.status);
+                let presence = presence_of(c.effective_status());
                 let face = Avatar::new(me.clone(), name.clone()).size(px(56.)).image(c.avatar_url(None, &me).map(Into::into)).presence(Some(presence));
                 div()
                     .mb_1()
@@ -1606,8 +1641,8 @@ impl Shell {
         let name = client.display_name(None, &me);
         let avatar = client.avatar_url(None, &me);
         let prefs = &client.prefs;
-        let presence = presence_of(&prefs.status);
-        let status = prefs.custom_status.clone().unwrap_or_else(|| match prefs.status.as_str() {
+        let presence = presence_of(client.effective_status());
+        let status = prefs.custom_status.clone().unwrap_or_else(|| match client.effective_status() {
             "idle" => "idle".into(),
             "dnd" => "do not disturb".into(),
             "invisible" => "invisible".into(),
@@ -2170,7 +2205,32 @@ impl Render for Shell {
             .settings
             .as_ref()
             .map(|(view, _)| motion::fade_in(div().absolute().inset_0().child(view.clone()), "settings-in", motion::FAST));
+        // Pointer input anywhere in the window counts as being here (keys are observed in `new`).
+        let watch_pointer = {
+            let (last, client) = (self.last_input.clone(), self.client.clone());
+            gpui::canvas(|_, _, _| (), move |_, _, window, _| {
+                let (l1, c1, l2, c2, l3, c3) = (last.clone(), client.clone(), last.clone(), client.clone(), last.clone(), client.clone());
+                window.on_mouse_event(move |_: &gpui::MouseMoveEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        note_input(&l1, &c1, cx);
+                    }
+                });
+                window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        note_input(&l2, &c2, cx);
+                    }
+                });
+                window.on_mouse_event(move |_: &gpui::ScrollWheelEvent, phase, _, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        note_input(&l3, &c3, cx);
+                    }
+                });
+            })
+            .absolute()
+            .size_0()
+        };
         div()
+            .child(watch_pointer)
             .key_context(SHELL_CONTEXT)
             // Push-to-talk, while this window has focus: backtick held means talking, and is not
             // typed. (A global shortcut through the desktop portal comes later.)

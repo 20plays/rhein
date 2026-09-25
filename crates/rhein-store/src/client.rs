@@ -263,6 +263,8 @@ pub struct Client {
     artwork: HashMap<String, EmbedState>,
     /// The voice call we are in.
     call: Option<call::ActiveCall>,
+    /// No input to the window for a while: shown as idle (see `effective_status`).
+    auto_idle: bool,
     /// The account's favourite GIFs (from the sealed sync store), newest first.
     gif_favorites: Vec<String>,
     /// GIF share pages (Tenor, Giphy, Klipy) and the media URL each turned out to be.
@@ -353,6 +355,7 @@ impl Client {
             voice: HashMap::new(),
             call: None,
             sound: None,
+            auto_idle: false,
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
             sync: None,
@@ -717,10 +720,33 @@ impl Client {
         cx.notify();
     }
 
+    /// The presence others see: the chosen one, except that "online" reads "idle" while this
+    /// window has gone without input for a while (`set_auto_idle`).
+    pub fn effective_status(&self) -> &str {
+        if self.auto_idle && self.prefs.status == "online" { "idle" } else { &self.prefs.status }
+    }
+
+    /// Marks us idle after a stretch without input, or back when input comes again. The chosen
+    /// status is left as it is, so "do not disturb", "invisible" and a chosen "idle" stand.
+    pub fn set_auto_idle(&mut self, idle: bool, cx: &mut Context<Self>) {
+        if self.auto_idle == idle {
+            return;
+        }
+        self.auto_idle = idle;
+        if self.prefs.status == "online" {
+            self.push_presence();
+            cx.notify();
+        }
+    }
+
+    pub fn is_auto_idle(&self) -> bool {
+        self.auto_idle
+    }
+
     /// What every connection should say about us right now.
     pub fn presence_state(&self) -> PresenceState {
         PresenceState {
-            status: self.prefs.status.clone(),
+            status: self.effective_status().to_owned(),
             custom_status: self.prefs.custom_status.clone(),
             activities: self.sharing.clone(),
         }
