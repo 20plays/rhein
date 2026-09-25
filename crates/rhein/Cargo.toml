@@ -15,6 +15,8 @@ anyhow.workspace = true
 env_logger.workspace = true
 gpui.workspace = true
 image = { version = "0.25", default-features = false }
+# The authenticator-app QR code for two-factor setup, drawn as a grid.
+qrcode = { version = "0.14", default-features = false }
 gpui_platform.workspace = true
 log.workspace = true
 reqwest.workspace = true

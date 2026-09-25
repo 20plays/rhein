@@ -11,6 +11,11 @@ pub struct LoginView {
     server: Entity<TextInput>,
     user: Entity<TextInput>,
     password: Entity<TextInput>,
+    /// The two-factor code, asked for when the server wants one.
+    code: Entity<TextInput>,
+    /// What was signed in with, kept while the code is asked for.
+    pending: Option<(String, String, String)>,
+    code_focused: bool,
     register: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
@@ -22,7 +27,8 @@ impl LoginView {
         let server = cx.new(|cx| TextInput::new("chat.example.com", cx).with_text(default_server));
         let user = cx.new(|cx| TextInput::new("Username", cx));
         let password = cx.new(|cx| TextInput::new("Password", cx).masked());
-        let subs = [&server, &user, &password]
+        let code = cx.new(|cx| TextInput::new("123456", cx));
+        let subs = [&server, &user, &password, &code]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event: &InputEvent, window, cx| {
@@ -34,10 +40,22 @@ impl LoginView {
             .collect();
         let focus = cx.focus_handle();
         window.focus(&user.focus_handle(cx), cx);
-        Self { client, server, user, password, register: false, focus, _subs: subs }
+        Self { client, server, user, password, code, pending: None, code_focused: false, register: false, focus, _subs: subs }
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.client.read(cx).mfa_required
+            && let Some((server, user, password)) = self.pending.clone()
+        {
+            let code = self.code.read(cx).text().trim().to_owned();
+            if code.is_empty() {
+                window.focus(&self.code.focus_handle(cx), cx);
+                return;
+            }
+            self.code.update(cx, |c, cx| c.clear(cx));
+            self.client.update(cx, |client, cx| client.sign_in(server, user, password, false, Some(code), cx));
+            return;
+        }
         let server = self.server.read(cx).text().to_owned();
         let user = self.user.read(cx).text().to_owned();
         let password = self.password.read(cx).text().to_owned();
@@ -52,7 +70,8 @@ impl LoginView {
         }
         let register = self.register;
         self.password.update(cx, |p, cx| p.clear(cx));
-        self.client.update(cx, |client, cx| client.sign_in(server, user, password, register, cx));
+        self.pending = Some((server.clone(), user.clone(), password.clone()));
+        self.client.update(cx, |client, cx| client.sign_in(server, user, password, register, None, cx));
     }
 }
 
@@ -63,12 +82,21 @@ impl Focusable for LoginView {
 }
 
 impl Render for LoginView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let busy = client.phase == Phase::SigningIn;
         let error = client.error.clone();
         let register = self.register;
+        let asking_code = client.mfa_required && self.pending.is_some();
+        // The code field takes the keyboard when it appears.
+        if asking_code && !self.code.focus_handle(cx).contains_focused(window, cx) && !self.code_focused {
+            self.code_focused = true;
+            window.focus(&self.code.focus_handle(cx), cx);
+        }
+        if !asking_code {
+            self.code_focused = false;
+        }
 
         let field = |label: &'static str, input: &Entity<TextInput>| {
             div()
@@ -121,9 +149,10 @@ impl Render for LoginView {
                             })),
                     )
                     .children(error.map(|e| Toast::new(e, ToastKind::Error)))
-                    .child(field("Home server", &self.server))
-                    .child(field("Username", &self.user))
-                    .child(field("Password", &self.password))
+                    .when(!asking_code, |d| {
+                        d.child(field("Home server", &self.server)).child(field("Username", &self.user)).child(field("Password", &self.password))
+                    })
+                    .when(asking_code, |d| d.child(field("Two-factor code", &self.code)))
                     .child(
                         Button::new(
                             "login-submit",

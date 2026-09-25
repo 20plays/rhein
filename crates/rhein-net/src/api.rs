@@ -124,6 +124,59 @@ impl Api {
         self.send(self.http.put(self.url(path)).json(body)).await
     }
 
+    pub async fn delete_json<B: Serialize>(&self, path: &str, body: &B) -> ApiResult<serde_json::Value> {
+        self.send(self.http.delete(self.url(path)).json(body)).await
+    }
+
+    // ---- the account's security (home server); `proof` is `{reauth_token}` from a fresh
+    // OPAQUE reauthentication (`auth::reauth_token`) ----
+
+    /// `{enabled, setup_pending, recovery_codes_remaining, reenrol_required}`.
+    pub async fn mfa_status(&self) -> ApiResult<serde_json::Value> {
+        self.get("/mfa").await
+    }
+
+    /// Starts two-factor setup: `{secret, otpauth_uri}`.
+    pub async fn mfa_setup(&self, proof: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post("/mfa/setup", proof).await
+    }
+
+    /// Turns two-factor sign-in on with a first code: `{ok, recovery_codes}`.
+    pub async fn mfa_enable(&self, code: &str) -> ApiResult<serde_json::Value> {
+        self.post("/mfa/enable", &serde_json::json!({ "code": code })).await
+    }
+
+    pub async fn mfa_disable(&self, proof: &serde_json::Value, code: &str) -> ApiResult<serde_json::Value> {
+        let mut body = proof.clone();
+        body["code"] = code.into();
+        self.post("/mfa/disable", &body).await
+    }
+
+    /// `{state, verified_email, pending_email, mailer, …}`.
+    pub async fn recovery_email(&self) -> ApiResult<serde_json::Value> {
+        self.get("/account/recovery-email").await
+    }
+
+    /// Sets (or with `None` removes) the recovery address; a new one waits for confirmation.
+    pub async fn set_recovery_email(&self, proof: &serde_json::Value, email: Option<&str>) -> ApiResult<serde_json::Value> {
+        let mut body = proof.clone();
+        body["email"] = email.map_or(serde_json::Value::Null, Into::into);
+        self.put("/account/recovery-email", &body).await
+    }
+
+    /// Ends every session of the account, this one included.
+    pub async fn logout_all(&self) -> ApiResult<serde_json::Value> {
+        self.post("/logout-all", &serde_json::json!({})).await
+    }
+
+    pub async fn deactivate_account(&self, proof: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post("/account/deactivate", proof).await
+    }
+
+    pub async fn delete_account(&self, proof: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.delete_json("/account", proof).await
+    }
+
     // ---- encrypted DMs: keys, trust and frames (home server) ----
 
     /// The recovery-keyring vault, sealed (`{exists, mode, ciphertext, …}`).

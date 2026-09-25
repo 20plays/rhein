@@ -21,6 +21,7 @@ use crate::io::{Io, join};
 
 mod call;
 mod dm_view;
+mod account;
 mod account_prefs;
 mod gifs;
 mod notify;
@@ -311,6 +312,8 @@ pub struct Client {
     pub visited: Vec<String>,
     typing: HashMap<String, Vec<(String, Instant)>>,
     signin: Option<Task<()>>,
+    /// The last sign-in stopped for a two-factor code.
+    pub mfa_required: bool,
 }
 
 impl EventEmitter<ClientEvent> for Client {}
@@ -380,6 +383,7 @@ impl Client {
             null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             speaking_task: None,
             signin: None,
+            mfa_required: false,
         };
         this.restore(cx);
         this
@@ -454,12 +458,13 @@ impl Client {
 
     /// Signs in (or registers) with OPAQUE. `server` is a domain such as `chat.example.com` or
     /// `localhost:8448`; `user` is a localpart or a full `@user:server`.
-    pub fn sign_in(&mut self, server: String, user: String, password: String, register: bool, cx: &mut Context<Self>) {
+    pub fn sign_in(&mut self, server: String, user: String, password: String, register: bool, mfa_code: Option<String>, cx: &mut Context<Self>) {
         if self.phase == Phase::SigningIn {
             return;
         }
         self.phase = Phase::SigningIn;
         self.error = None;
+        self.mfa_required = false;
         cx.notify();
         let io = self.io.clone();
         let http = self.http.clone();
@@ -475,7 +480,7 @@ impl Client {
                 let signed = if register {
                     auth::register(&api, localpart(user), &password, &device, &device_name, &ksf).await?
                 } else {
-                    auth::login(&api, user, &password, &device, &device_name, &ksf).await?
+                    auth::login_with_code(&api, user, &password, &device, &device_name, &ksf, mfa_code.as_deref().map(str::trim)).await?
                 };
                 let me = api.whoami().await.ok();
                 Ok((input, doc, api, signed, device, me))
@@ -500,7 +505,18 @@ impl Client {
                     }
                     Err(err) => {
                         this.phase = Phase::SignedOut;
-                        this.error = Some(friendly(&err).into());
+                        // Two-factor sign-in: the same credentials again, with a code.
+                        match err.downcast_ref::<rhein_net::ApiError>().and_then(|e| e.code()) {
+                            Some("mfa_required") => {
+                                this.mfa_required = true;
+                                this.error = Some("Enter the code from your authenticator app, or a recovery code.".into());
+                            }
+                            Some("invalid_mfa_code") => {
+                                this.mfa_required = true;
+                                this.error = Some("That code didn't work. Try the current one.".into());
+                            }
+                            _ => this.error = Some(friendly(&err).into()),
+                        }
                     }
                 }
                 cx.notify();

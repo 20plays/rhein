@@ -23,6 +23,7 @@ enum Section {
     Appearance,
     Notifications,
     Privacy,
+    Security,
     Activity,
     Encryption,
     Voice,
@@ -31,13 +32,14 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 11] = [
+    const ALL: [Section; 12] = [
         Section::Account,
         Section::Devices,
         Section::Servers,
         Section::Appearance,
         Section::Notifications,
         Section::Privacy,
+        Section::Security,
         Section::Activity,
         Section::Encryption,
         Section::Voice,
@@ -53,6 +55,7 @@ impl Section {
             Section::Appearance => "Appearance",
             Section::Notifications => "Notifications",
             Section::Privacy => "Messages & privacy",
+            Section::Security => "Account & security",
             Section::Activity => "Activity",
             Section::Encryption => "Encryption",
             Section::Voice => "Voice",
@@ -68,7 +71,8 @@ impl Section {
             Section::Servers => Icon::Server,
             Section::Appearance => Icon::Palette,
             Section::Notifications => Icon::Bell,
-            Section::Privacy => Icon::Shield,
+            Section::Privacy => Icon::Eye,
+            Section::Security => Icon::Shield,
             Section::Activity => Icon::Gamepad,
             Section::Encryption => Icon::Lock,
             Section::Voice => Icon::Mic,
@@ -122,6 +126,7 @@ pub struct SettingsView {
     look_loaded: bool,
     saving: bool,
     status: Option<(bool, String)>,
+    security: SecurityForm,
     /// The crop dialog for a picked avatar or banner.
     crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
@@ -201,6 +206,7 @@ impl SettingsView {
             status: None,
             crop: None,
             crop_focus: false,
+            security: SecurityForm::new(cx),
             devices: None,
             audio_devices: None,
             meter: None,
@@ -247,6 +253,9 @@ impl SettingsView {
         self.status = None;
         if section == Section::Devices {
             self.reload_devices(cx);
+        }
+        if section == Section::Security {
+            self.reload_security(cx);
         }
         self.meter = None;
         if section == Section::Voice {
@@ -1124,6 +1133,235 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Shows two-factor setup with a made-up key, to look at (`RHEIN_DEV_OPEN=mfa-preview`).
+    #[cfg(debug_assertions)]
+    pub fn dev_mfa_preview(&mut self, cx: &mut Context<Self>) {
+        self.open(Section::Security, cx);
+        self.security.setup = Some(serde_json::json!({
+            "secret": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+            "otpauth_uri": "otpauth://totp/Telium:%40anna%3Alocalhost?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Telium&digits=6&period=30",
+        }));
+        cx.notify();
+    }
+
+    fn reload_security(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.weak_entity();
+        self.client.update(cx, |c, cx| {
+            c.load_security(
+                move |result, cx| {
+                    weak.update(cx, |v, cx| {
+                        v.security.state = Some(result);
+                        cx.notify();
+                    })
+                    .ok();
+                },
+                cx,
+            )
+        });
+    }
+
+    /// Runs one change of the Account & security page; what it answers is shown on the page.
+    fn security_action(&mut self, action: SecurityAction, cx: &mut Context<Self>) {
+        let password = self.security.password.read(cx).text().to_owned();
+        let code = self.security.code.read(cx).text().trim().to_owned();
+        let email = self.security.email.read(cx).text().trim().to_owned();
+        let needs_password = !matches!(action, SecurityAction::EnableMfa | SecurityAction::SignOutAll);
+        if needs_password && password.is_empty() {
+            self.security.status = Some((false, "Enter your password first.".into()));
+            cx.notify();
+            return;
+        }
+        if matches!(action, SecurityAction::EnableMfa | SecurityAction::DisableMfa) && code.is_empty() {
+            self.security.status = Some((false, "Enter the code from your authenticator app.".into()));
+            cx.notify();
+            return;
+        }
+        // What can't be taken back takes a second click.
+        let second = match action {
+            SecurityAction::Close { delete: true } => Some(("delete", "Click Delete account again to delete it for good.")),
+            SecurityAction::Close { delete: false } => Some(("deactivate", "Click Deactivate again to confirm.")),
+            SecurityAction::SignOutAll => Some(("sign-out", "Click Sign out everywhere again to sign out every device.")),
+            _ => None,
+        };
+        if let Some((key, ask)) = second
+            && self.security.confirm != Some(key)
+        {
+            self.security.confirm = Some(key);
+            self.security.status = Some((false, ask.into()));
+            cx.notify();
+            return;
+        }
+        if matches!(action, SecurityAction::SignOutAll) {
+            self.client.update(cx, |c, cx| c.sign_out_everywhere(cx));
+            return;
+        }
+        self.security.busy = true;
+        self.security.status = None;
+        let weak = cx.weak_entity();
+        let finish = move |result: Result<serde_json::Value, String>, cx: &mut gpui::App, ok: &'static str| {
+            weak.update(cx, |v, cx| {
+                v.security.busy = false;
+                v.security.confirm = None;
+                match result {
+                    Ok(answer) => {
+                        v.security.status = Some((true, ok.into()));
+                        if answer.get("otpauth_uri").is_some() {
+                            v.security.setup = Some(answer.clone());
+                        }
+                        if let Some(codes) = answer["recovery_codes"].as_array() {
+                            v.security.setup = None;
+                            v.security.codes = Some(codes.iter().filter_map(|c| c.as_str().map(str::to_owned)).collect());
+                        }
+                        v.security.password.update(cx, |i, cx| i.clear(cx));
+                        v.security.code.update(cx, |i, cx| i.clear(cx));
+                        v.reload_security(cx);
+                    }
+                    Err(e) => v.security.status = Some((false, e)),
+                }
+                cx.notify();
+            })
+            .ok();
+        };
+        self.client.update(cx, |c, cx| match action {
+            SecurityAction::SetupMfa => c.mfa_setup(password, move |r, cx| finish(r, cx, "Scan the code with your authenticator app, then enter the code it shows."), cx),
+            SecurityAction::EnableMfa => c.mfa_enable(code, move |r, cx| finish(r, cx, "Two-factor sign-in is on. Keep the recovery codes somewhere safe."), cx),
+            SecurityAction::DisableMfa => c.mfa_disable(password, code, move |r, cx| finish(r, cx, "Two-factor sign-in is off."), cx),
+            SecurityAction::SetEmail => c.set_recovery_email(password, Some(email), move |r, cx| finish(r, cx, "Saved. Confirm the address from the mail sent to it."), cx),
+            SecurityAction::RemoveEmail => c.set_recovery_email(password, None, move |r, cx| finish(r, cx, "The recovery address is removed."), cx),
+            SecurityAction::Close { delete } => c.close_account(password, delete, move |r, cx| finish(r, cx, "Done."), cx),
+            SecurityAction::SignOutAll => {}
+        });
+        cx.notify();
+    }
+
+    /// The recovery address, two-factor sign-in, signing out everywhere and closing the account,
+    /// as the web client's Account and Security panes have them.
+    fn security_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let form = &self.security;
+        let state = match &form.state {
+            None => return div().text_color(t.text_faint).child("Loading…").into_any_element(),
+            Some(Err(e)) => return div().text_color(t.danger).child(format!("Couldn't load your account's security: {e}")).into_any_element(),
+            Some(Ok(state)) => state.clone(),
+        };
+        let (mfa, recovery) = (&state["mfa"], &state["recovery"]);
+        let enabled = mfa["enabled"].as_bool().unwrap_or(false);
+        let field = |label: &'static str, input: &Entity<TextInput>| {
+            div().flex().flex_col().gap_1p5().child(div().text_size(text::SM).text_color(t.text_muted).child(label)).child(input.clone())
+        };
+        let action = |id: &'static str, label: &'static str, what: SecurityAction, cx: &mut Context<Self>| {
+            Button::new(id, label).disabled(form.busy).on_click(cx.listener(move |v, _, _, cx| v.security_action(what, cx)))
+        };
+
+        // The recovery address.
+        let mailer = recovery["mailer"].as_bool().unwrap_or(false);
+        let address = match (recovery["verified_email"].as_str(), recovery["pending_email"].as_str()) {
+            (Some(v), _) => format!("{v} (confirmed)"),
+            (None, Some(p)) => format!("{p} (waiting for confirmation)"),
+            _ => "None set".into(),
+        };
+        let recovery_block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("Recovery email", t))
+            .child(div().text_size(text::SM).text_color(t.text_muted).child("Where a warning goes if someone tries to move your account elsewhere."))
+            .child(div().child(address))
+            .when(!mailer, |d| d.child(div().text_size(text::SM).text_color(t.text_faint).child("Your home server can't send mail, so it keeps no recovery address.")))
+            .when(mailer, |d| {
+                d.child(field("New address", &form.email)).child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(action("email-save", "Save address", SecurityAction::SetEmail, cx))
+                        .when(recovery["verified_email"].is_string() || recovery["pending_email"].is_string(), |d| {
+                            d.child(action("email-remove", "Remove", SecurityAction::RemoveEmail, cx).ghost())
+                        }),
+                )
+            });
+
+        // Two-factor sign-in.
+        let mut mfa_block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("Two-factor sign-in", t))
+            .child(div().text_size(text::SM).text_color(t.text_muted).child(if enabled {
+                format!("On. {} recovery codes left.", mfa["recovery_codes_remaining"].as_u64().unwrap_or(0))
+            } else {
+                "Off. With it on, signing in also takes a code from an authenticator app.".into()
+            }));
+        if let Some(setup) = &form.setup {
+            let secret = setup["secret"].as_str().unwrap_or_default().to_owned();
+            let uri = setup["otpauth_uri"].as_str().unwrap_or_default().to_owned();
+            let copy = secret.clone();
+            mfa_block = mfa_block
+                .child(div().flex().gap_4().items_center().child(qr_code(&uri)).child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(text::SM).text_color(t.text_muted).child("Or enter this key:"))
+                        .child(div().font_family(FONT_MONO).text_size(text::SM).child(secret))
+                        .child(div().flex().child(Button::new("mfa-copy", "Copy key").ghost().icon(Icon::Copy).on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone()))
+                        }))),
+                ))
+                .child(field("Code from the app", &form.code))
+                .child(div().flex().child(action("mfa-enable", "Turn on", SecurityAction::EnableMfa, cx).primary()));
+        } else if let Some(codes) = &form.codes {
+            let all = codes.join("\n");
+            mfa_block = mfa_block
+                .child(div().text_size(text::SM).text_color(t.warning).child("Recovery codes: each signs you in once if your app is lost. They are shown only now."))
+                .child(div().flex().flex_wrap().gap_2().children(codes.iter().map(|c| {
+                    div().px_2().py_1().rounded(radius::SM).bg(t.bg_raised).font_family(FONT_MONO).text_size(text::SM).child(c.clone())
+                })))
+                .child(div().flex().child(Button::new("mfa-codes-copy", "Copy codes").icon(Icon::Copy).on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(all.clone()))
+                })));
+        } else if enabled {
+            mfa_block = mfa_block
+                .child(field("Code from the app (or a recovery code)", &form.code))
+                .child(div().flex().child(action("mfa-disable", "Turn off", SecurityAction::DisableMfa, cx).danger()));
+        } else {
+            mfa_block = mfa_block.child(div().flex().child(action("mfa-setup", "Set up", SecurityAction::SetupMfa, cx)));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(field("Your password", &form.password))
+            .child(div().text_size(text::XS).text_color(t.text_faint).mt(px(-8.)).child("Every change on this page asks for it again."))
+            .children(form.status.clone().map(|(ok, msg)| div().text_size(text::SM).text_color(if ok { t.success } else { t.danger }).child(msg)))
+            .child(recovery_block)
+            .child(mfa_block)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(heading("Sessions", t))
+                    .child(div().text_size(text::SM).text_color(t.text_muted).child("Signs out every device of this account, this one too. The Devices page lists them one by one."))
+                    .child(div().flex().child(action("sign-out-all", "Sign out everywhere", SecurityAction::SignOutAll, cx).danger())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(heading("Close your account", t))
+                    .child(div().text_size(text::SM).text_color(t.text_muted).child("Deactivating hides the account until you sign in again. Deleting removes it for good."))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(action("account-deactivate", "Deactivate", SecurityAction::Close { delete: false }, cx).danger())
+                            .child(action("account-delete", "Delete account", SecurityAction::Close { delete: true }, cx).danger()),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Rich presence: what is shared, from which sources, and what is being shared right now.
     fn activity_section(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
@@ -1379,6 +1617,69 @@ impl SettingsView {
     }
 }
 
+/// The Account & security page's fields and what it last heard.
+struct SecurityForm {
+    password: Entity<TextInput>,
+    code: Entity<TextInput>,
+    email: Entity<TextInput>,
+    state: Option<Result<serde_json::Value, String>>,
+    /// Two-factor setup under way: `{secret, otpauth_uri}`.
+    setup: Option<serde_json::Value>,
+    /// The recovery codes, shown once after turning two-factor on.
+    codes: Option<Vec<String>>,
+    status: Option<(bool, String)>,
+    busy: bool,
+    /// A first click on something that can't be taken back, waiting for the second.
+    confirm: Option<&'static str>,
+}
+
+impl SecurityForm {
+    fn new(cx: &mut Context<SettingsView>) -> Self {
+        SecurityForm {
+            password: cx.new(|cx| TextInput::new("Your account password", cx).masked()),
+            code: cx.new(|cx| TextInput::new("123456", cx)),
+            email: cx.new(|cx| TextInput::new("you@example.com", cx)),
+            state: None,
+            setup: None,
+            codes: None,
+            status: None,
+            busy: false,
+            confirm: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SecurityAction {
+    SetupMfa,
+    EnableMfa,
+    DisableMfa,
+    SetEmail,
+    RemoveEmail,
+    SignOutAll,
+    Close { delete: bool },
+}
+
+/// A QR code for an authenticator app, drawn module by module on white.
+fn qr_code(data: &str) -> AnyElement {
+    let Ok(code) = qrcode::QrCode::new(data.as_bytes()) else { return div().into_any_element() };
+    let width = code.width();
+    let colors = code.to_colors();
+    const MODULE: f32 = 4.;
+    div()
+        .p(px(MODULE * 2.))
+        .bg(gpui::white())
+        .rounded(radius::SM)
+        .flex()
+        .flex_col()
+        .children(colors.chunks(width).map(|row| {
+            div().flex().children(row.iter().map(|c| {
+                div().size(px(MODULE)).when(*c == qrcode::Color::Dark, |d| d.bg(gpui::black()))
+            }))
+        }))
+        .into_any_element()
+}
+
 /// One setting: its name and what it does on the left, its control on the right.
 fn setting_row(t: &Theme, title: &'static str, detail: &'static str, control: AnyElement) -> gpui::Div {
     div()
@@ -1445,6 +1746,7 @@ impl Render for SettingsView {
             Section::Appearance => self.appearance(&t, cx),
             Section::Notifications => self.notifications(&t, cx),
             Section::Privacy => self.privacy(&t, cx),
+            Section::Security => self.security_section(&t, cx),
             Section::Activity => self.activity_section(&t, cx),
             Section::Encryption => self.encryption_section(&t, cx),
             Section::Voice => self.voice_section(&t, cx),

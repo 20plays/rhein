@@ -406,3 +406,68 @@ async fn rich_presence_reaches_guild_members() {
 fn online() -> PresenceState {
     PresenceState { status: "online".into(), ..Default::default() }
 }
+
+/// The current six-digit TOTP code for a base32 secret (RFC 6238, SHA-1, 30 s).
+fn totp(secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let key = data_encoding::BASE32_NOPAD.decode(secret.trim_end_matches('=').as_bytes()).expect("base32 secret");
+    let step = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() / 30;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&key).unwrap();
+    mac.update(&step.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let at = (digest[19] & 0x0f) as usize;
+    let n = u32::from_be_bytes([digest[at] & 0x7f, digest[at + 1], digest[at + 2], digest[at + 3]]) % 1_000_000;
+    format!("{n:06}")
+}
+
+#[tokio::test]
+async fn two_factor_and_the_recovery_address() {
+    let Ok(server) = std::env::var("RHEIN_LIVE") else {
+        eprintln!("RHEIN_LIVE not set; skipping");
+        return;
+    };
+    let http = reqwest::Client::new();
+    let doc = discover(&http, &server).await.expect("discovery");
+    let home = Api::new(http.clone(), &doc.api, None);
+    let ksf = SerenityKsf::argon2id(1, 8, 1);
+    let localpart = format!("mfa{}", std::process::id());
+    register_retrying(&home, &localpart, &ksf).await;
+
+    // A wrong password buys no proof; the right one does.
+    assert!(auth::reauth_proof(&home, "not the password", &ksf).await.is_err());
+    let proof = auth::reauth_proof(&home, "correct horse battery", &ksf).await.expect("proof");
+
+    // Two-factor: set up, enabled with a code, recovery codes handed out.
+    let setup = home.mfa_setup(&proof).await.expect("setup");
+    let secret = setup["secret"].as_str().expect("secret").to_owned();
+    assert!(setup["otpauth_uri"].as_str().unwrap().starts_with("otpauth://totp/"));
+    let enabled = home.mfa_enable(&totp(&secret)).await.expect("enable");
+    assert_eq!(enabled["recovery_codes"].as_array().map(Vec::len), Some(8));
+    assert_eq!(home.mfa_status().await.unwrap()["enabled"], true);
+
+    // Signing in now takes the code.
+    let fresh = || Api::new(http.clone(), &doc.api, None);
+    let Err(refused) = auth::login(&fresh(), &localpart, "correct horse battery", &DeviceKey::generate(), "x", &ksf).await else {
+        panic!("signed in without the code")
+    };
+    assert_eq!(refused.downcast_ref::<rhein_net::ApiError>().and_then(|e| e.code()), Some("mfa_required"), "{refused:#}");
+    auth::login_with_code(&fresh(), &localpart, "correct horse battery", &DeviceKey::generate(), "x", &ksf, Some(&totp(&secret)))
+        .await
+        .expect("sign-in with the code");
+
+    // Turned off again with a code and a fresh proof.
+    let proof = auth::reauth_proof(&home, "correct horse battery", &ksf).await.unwrap();
+    home.mfa_disable(&proof, &totp(&secret)).await.expect("disable");
+    assert_eq!(home.mfa_status().await.unwrap()["enabled"], false);
+
+    // The recovery address waits for confirmation, where the server can send mail at all.
+    let proof = auth::reauth_proof(&home, "correct horse battery", &ksf).await.unwrap();
+    let before = home.recovery_email().await.unwrap();
+    let set = home.set_recovery_email(&proof, Some("someone@example.com")).await;
+    if before["mailer"] == true {
+        let state = home.recovery_email().await.unwrap();
+        assert!(set.is_ok() && (state["pending_email"] == "someone@example.com" || state["verified_email"] == "someone@example.com"), "{state}");
+    } else {
+        assert_eq!(set.err().and_then(|e| e.status()), Some(400), "a server without mail refuses the address");
+    }
+}

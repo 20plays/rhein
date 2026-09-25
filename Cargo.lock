@@ -6513,6 +6513,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7021,6 +7027,7 @@ dependencies = [
  "image",
  "jiff",
  "log",
+ "qrcode",
  "reqwest",
  "rhein-proto",
  "rhein-store",
@@ -7070,13 +7077,16 @@ name = "rhein-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "data-encoding",
  "futures",
+ "hmac 0.12.1",
  "log",
  "reqwest",
  "rhein-auth",
  "rhein-proto",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite 0.26.2",

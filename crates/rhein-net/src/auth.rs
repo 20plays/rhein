@@ -29,6 +29,20 @@ pub async fn login(
     device_name: &str,
     ksf: &SerenityKsf,
 ) -> Result<SignedIn> {
+    login_with_code(home, user, password, device, device_name, ksf, None).await
+}
+
+/// Signs in, with the code from an authenticator app for an account with two-factor sign-in (the
+/// server answers `mfa_required` without one).
+pub async fn login_with_code(
+    home: &Api,
+    user: &str,
+    password: &str,
+    device: &DeviceKey,
+    device_name: &str,
+    ksf: &SerenityKsf,
+    mfa_code: Option<&str>,
+) -> Result<SignedIn> {
     require_opaque(home).await?;
     let start = rhein_auth::login_start(password)?;
     let answer: LoginStartResponse = home
@@ -46,7 +60,7 @@ pub async fn login(
                 finish_login_request: finished.message,
                 device_name,
                 device_pubkey: device.public_b64u(),
-                mfa_code: None,
+                mfa_code,
             },
         )
         .await?;
@@ -89,6 +103,17 @@ pub async fn register(
 /// Proves the password again inside a signed-in session (no new device session), and hands back
 /// the OPAQUE export key: how a restored session unlocks the encrypted-DM vault.
 pub async fn reauthenticate(home: &Api, password: &str, ksf: &SerenityKsf) -> Result<Vec<u8>> {
+    Ok(reauth(home, password, ksf).await?.0)
+}
+
+/// Proves the password again for a sensitive change (two-factor, the recovery address, deleting
+/// the account): the `{reauth_token}` those routes take.
+pub async fn reauth_proof(home: &Api, password: &str, ksf: &SerenityKsf) -> Result<serde_json::Value> {
+    let token = reauth(home, password, ksf).await?.1.context("the server issued no reauthentication token")?;
+    Ok(serde_json::json!({ "reauth_token": token }))
+}
+
+async fn reauth(home: &Api, password: &str, ksf: &SerenityKsf) -> Result<(Vec<u8>, Option<String>)> {
     let start = rhein_auth::login_start(password)?;
     let answer: serde_json::Value = home
         .post("/auth/opaque/reauth/start", &serde_json::json!({ "start_login_request": start.request.clone() }))
@@ -96,14 +121,14 @@ pub async fn reauthenticate(home: &Api, password: &str, ksf: &SerenityKsf) -> Re
         .context("reauthentication")?;
     let login_response = answer["login_response"].as_str().context("no login response")?;
     let finished = start.finish(password, login_response, ksf).context("That password was not accepted.")?;
-    let _: serde_json::Value = home
+    let proof: serde_json::Value = home
         .post(
             "/auth/opaque/reauth/finish",
             &serde_json::json!({ "login_id": answer["login_id"], "finish_login_request": finished.message }),
         )
         .await
         .context("That password was not accepted.")?;
-    Ok(finished.export_key)
+    Ok((finished.export_key, proof["reauth_token"].as_str().map(str::to_owned)))
 }
 
 /// Trades a short-lived, audience-bound assertion from the home server for a session on the guild

@@ -21,3 +21,7 @@ urlencoding.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# A TOTP code for the two-factor live test.
+data-encoding = "2"
+hmac = "0.12"
+sha1 = "0.10"
