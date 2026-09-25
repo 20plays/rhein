@@ -59,7 +59,14 @@ fn apply(target: &ScrollTarget, distance: f32) {
         return;
     }
     match target {
-        ScrollTarget::List(list) => list.scroll_by(px(distance)),
+        // Through the scrollbar's setter, which measures from the viewport's top as the wheel
+        // does (`scroll_by` counts from the end of the content while a bottom-aligned list sits
+        // at its end, and the list snaps straight back), and takes up following the tail again
+        // at the bottom.
+        ScrollTarget::List(list) => {
+            let y = list.scroll_px_offset_for_scrollbar().y - px(distance);
+            list.set_offset_from_scrollbar(Point::new(px(0.), y));
+        }
         ScrollTarget::Handle(handle) => {
             let max = handle.max_offset();
             let offset = handle.offset();
@@ -121,9 +128,14 @@ impl Element for SmoothScroll {
             ScrollTarget::List(_) => LIST_LINE,
             ScrollTarget::Handle(_) => f32::from(window.line_height()),
         };
-        // In the capture phase, before the container's own handler sees the step.
+        // The view this sits in: it has to render again for the glide to take its next step
+        // (a window refresh alone reuses the cached view, and nothing would move).
+        let view = window.current_view();
+        // Bubbling goes from the front to the back, and this handler comes after the container's
+        // own, so it sees the step first, and the frontmost glide takes it (an overlay over the
+        // chat, a picker over the composer).
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase != DispatchPhase::Capture || !hitbox.is_hovered(window) {
+            if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
                 return;
             }
             let ScrollDelta::Lines(lines) = event.delta else { return };
@@ -143,6 +155,7 @@ impl Element for SmoothScroll {
                 g.remaining += distance;
                 g.last = Some(Instant::now());
             }
+            cx.notify(view);
             window.refresh();
         });
     }

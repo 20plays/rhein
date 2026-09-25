@@ -1572,6 +1572,21 @@ impl Render for ChatView {
             None
         };
 
+        // Wheel glides move the list without its scroll handler, so older messages are also
+        // asked for here once the top comes near.
+        if !self.list.is_following_tail() && self.list.logical_scroll_top().item_ix <= 2
+            && let Some(id) = self.current()
+        {
+            let client = self.client.clone();
+            cx.defer(move |cx| {
+                client.update(cx, |client, cx| {
+                    if client.logs.get(&id).is_some_and(|l| l.loaded && !l.loading && !l.reached_start && l.error.is_none()) {
+                        client.load_history(id, true, cx);
+                    }
+                })
+            });
+        }
+
         let row_ctx = Rc::new(RowCtx {
             client: self.client.clone(),
             view: cx.weak_entity(),
