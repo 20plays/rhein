@@ -29,7 +29,7 @@ actions!(rhein_shell, [OpenSwitcher, OpenSettings, PrevChannel, NextChannel, Pre
 const SHELL_CONTEXT: &str = "Shell";
 
 /// The status line (40) + the composer's bottom padding (12) + the composer box (42).
-const PROFILE_STRIP_H: Pixels = px(94.);
+const PROFILE_STRIP_H: Pixels = px(88.);
 
 pub fn bindings() -> Vec<KeyBinding> {
     let ctx = Some(SHELL_CONTEXT);
@@ -1381,7 +1381,7 @@ impl Shell {
         }
 
         tree = tree.child(
-            div().pt_3().child(
+            div().mt_2().pt_2().border_t_1().border_color(t.border).child(
                 ListRow::new("tree-add", "Join or create")
                     .icon(Icon::Plus)
                     .muted(true)
@@ -1756,7 +1756,9 @@ impl Shell {
             }));
             rows.push(row.into_any_element());
             if ch.is_voice() {
-                for state in client.voice_members(gid, &ch.id) {
+                let members = client.voice_members(gid, &ch.id);
+                let occupied = !members.is_empty();
+                for state in members {
                     let name = client.display_name(Some(gid), &state.user_id);
                     let avatar = client.avatar_url(Some(gid), &state.user_id);
                     let muted = state.self_mute || state.server_mute;
@@ -1785,6 +1787,10 @@ impl Shell {
                             .when(deaf, |d| d.child(icon_sized(Icon::HeadphoneOff, px(12.)).text_color(if state.server_deaf { t.danger } else { t.text_faint })))
                             .into_any_element(),
                     );
+                }
+                // Room before the next channel, so the people in a call read as its own.
+                if occupied {
+                    rows.push(div().h(px(6.)).into_any_element());
                 }
             }
         }
