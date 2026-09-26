@@ -28,7 +28,7 @@ mod gifs;
 mod notify;
 mod signals;
 mod sound;
-pub use gifs::GifShare;
+pub use gifs::{GifShare, MediaProbe};
 pub use sound::{SoundSource, SoundView};
 pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
 pub use rhein_voice::Slot;
@@ -295,6 +295,8 @@ pub struct Client {
     gif_favorites: Vec<String>,
     /// GIF share pages (Tenor, Giphy, Klipy) and the media URL each turned out to be.
     gif_shares: HashMap<String, gifs::GifShare>,
+    /// What Telium media links serve, as their origins said.
+    media_kinds: HashMap<String, gifs::MediaProbe>,
     sync: Option<std::sync::Arc<tokio::sync::Mutex<crate::sync_store::SyncStore>>>,
     /// The sound file loaded from a message.
     sound: Option<sound::Sound>,
@@ -399,6 +401,7 @@ impl Client {
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
+            media_kinds: HashMap::new(),
             sync: None,
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,
@@ -722,6 +725,7 @@ impl Client {
         self.sound = None;
         self.gif_favorites.clear();
         self.gif_shares.clear();
+        self.media_kinds.clear();
         self.alerts = notify::Alerts::default();
         self.dm_seen.clear();
         self.read_flush = None;

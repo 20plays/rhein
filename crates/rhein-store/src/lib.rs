@@ -20,5 +20,5 @@ pub mod prefs;
 pub mod social;
 pub mod sync_store;
 
-pub use client::{ActiveCall, CallMode, CallStatus, Client, ClientEvent, Slot, SoundSource, SoundView, VoicePrefs, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
+pub use client::{ActiveCall, CallMode, CallStatus, Client, ClientEvent, MediaProbe, Slot, SoundSource, SoundView, VoicePrefs, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
 pub use io::Io;

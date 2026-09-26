@@ -482,6 +482,7 @@ impl ChatView {
         let top = self.list.logical_scroll_top().item_ix.min(count);
         let range = top.saturating_sub(ABOVE)..(top + BELOW).min(count);
         let (mut embeds, mut shares, mut pictures, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut probes = Vec::new();
         {
             let client = self.client.read(cx);
             let Some(log) = client.logs.get(&channel) else { return };
@@ -495,6 +496,7 @@ impl ChatView {
                 }
                 embeds.extend(media.embeds);
                 shares.extend(media.shares);
+                probes.extend(media.probes);
                 pictures.extend(media.pictures.into_iter().filter(|p| !self.prefetched.contains(p)));
             }
         }
@@ -515,7 +517,7 @@ impl ChatView {
             })
             .detach();
         }
-        if !embeds.is_empty() || !shares.is_empty() {
+        if !embeds.is_empty() || !shares.is_empty() || !probes.is_empty() {
             let client = self.client.clone();
             cx.defer(move |cx| {
                 client.update(cx, |client, cx| {
@@ -524,6 +526,9 @@ impl ChatView {
                     }
                     for url in &shares {
                         client.request_gif_share(url, cx);
+                    }
+                    for url in &probes {
+                        client.request_media_kind(url, cx);
                     }
                 })
             });

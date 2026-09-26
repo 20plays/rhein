@@ -8,6 +8,8 @@ use gpui::{
 use rhein_proto::{Attachment, Message};
 use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::client::GifShare;
+use rhein_store::gif_links::MediaKind;
+use rhein_store::MediaProbe;
 use rhein_store::{Client, EmbedState, gif_links, markdown};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
@@ -84,6 +86,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     // Previews: links outside code, looked up lazily.
     let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
     let mut missing = Vec::new();
+    let mut media_missing = Vec::new();
     let mut cards = Vec::new();
     for url in &links {
         if is_invite(url) {
@@ -93,6 +96,18 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         // GIFs are shown below, straight from their host, and never unfurled.
         if gif_links::is_gif(url) {
             continue;
+        }
+        // Telium media says what it is only when asked: a GIF or a picture is shown below as
+        // itself; anything else gets the usual preview.
+        if gif_links::is_telium_media(url) {
+            match client.media_kind(url) {
+                Some(MediaProbe::Known(MediaKind::Other)) => {}
+                Some(_) => continue,
+                None => {
+                    media_missing.push(url.clone());
+                    continue;
+                }
+            }
         }
         match client.embed(channel_id, url) {
             Some(EmbedState::Ready(embed)) => cards.push(embed_card(ctx, ix, cards.len(), embed, &t, cx)),
@@ -107,18 +122,25 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     // GIF links: the picture itself (a share page once its provider has named it).
     let mut shares_missing = Vec::new();
     let mut gifs = Vec::new();
-    for (n, url) in gif_links::gifs_in(&message.content).into_iter().enumerate() {
+    for (n, url) in client.gif_links_in(&message.content).into_iter().enumerate() {
         match gif_links::share(&url) {
-            None => gifs.push(gif_tile(ctx, ix, n, url.clone(), url, &t, cx)),
+            None => gifs.push(gif_tile(ctx, ix, n, url.clone(), url, true, &t, cx)),
             Some(share) => match client.gif_share(&url) {
-                Some(GifShare::Ready(media)) => gifs.push(gif_tile(ctx, ix, n, media, url, &t, cx)),
+                Some(GifShare::Ready(media)) => gifs.push(gif_tile(ctx, ix, n, media, url, true, &t, cx)),
                 Some(GifShare::Loading) => {}
                 Some(GifShare::Failed) => gifs.push(gif_share_link(ix, n, url, share.provider(), &t)),
                 None => shares_missing.push(url),
             },
         }
     }
-    let gif_only = gif_links::is_gif_only(&message.content);
+    // Telium media that proved to be a still picture: shown as one, without the GIF star.
+    for url in gif_links::telium_media_in(&message.content) {
+        if client.media_kind(&url) == Some(MediaProbe::Known(MediaKind::Image)) {
+            let n = gifs.len() + 100;
+            gifs.push(gif_tile(ctx, ix, n, url.clone(), url, false, &t, cx));
+        }
+    }
+    let gif_only = client.is_gif_only(&message.content);
 
     let reply_quote = message.reply_to.as_ref().map(|parent_id| {
         let parent = client.find_message(channel_id, parent_id);
@@ -349,6 +371,16 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         element.child(row).into_any_element()
     };
     // Unknown previews are asked for after this frame, never during it.
+    if !media_missing.is_empty() {
+        let client = ctx.client.clone();
+        cx.defer(move |cx| {
+            client.update(cx, |c, cx| {
+                for url in &media_missing {
+                    c.request_media_kind(url, cx);
+                }
+            })
+        });
+    }
     if !shares_missing.is_empty() {
         let client = ctx.client.clone();
         cx.defer(move |cx| {
@@ -485,9 +517,11 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
 /// Whether a link is a GIF (a .gif, or a GIF provider's).
 /// A GIF from a link: `media` is the picture, `link` what the message said (a share page, or the
 /// picture again).
-fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, t: &Theme, cx: &App) -> AnyElement {
+/// A picture straight from its link: a GIF (with its favourite star) or a still picture.
+#[allow(clippy::too_many_arguments)]
+fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, starred: bool, t: &Theme, cx: &App) -> AnyElement {
     let group = SharedString::from(format!("gif-group-{ix}-{n}"));
-    let star = gif_star(ctx, format!("gif-star-{ix}-{n}"), message_group(ix), media.clone(), t, cx);
+    let star = starred.then(|| gif_star(ctx, format!("gif-star-{ix}-{n}"), message_group(ix), media.clone(), t, cx));
     let view = ctx.view.clone();
     let (open, raised, faint) = (media.clone(), t.bg_raised, t.text_faint);
     div()
@@ -510,10 +544,10 @@ fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, t: &
                 .object_fit(ObjectFit::Contain)
                 .with_loading(move || div().w(px(PICTURE_UNKNOWN.0 / 2.)).h(px(PICTURE_UNKNOWN.1 / 2.)).bg(raised).into_any_element())
                 .with_fallback(move || {
-                    div().p_3().text_size(text::SM).text_color(faint).child("This GIF is no longer available").into_any_element()
+                    div().p_3().text_size(text::SM).text_color(faint).child("This picture is no longer available").into_any_element()
                 }),
         )
-        .child(star)
+        .children(star)
         .into_any_element()
 }
 
@@ -970,6 +1004,8 @@ pub fn message_key(message: &Message) -> &str {
 pub struct RowMedia {
     pub embeds: Vec<String>,
     pub shares: Vec<String>,
+    /// Telium media links whose kind is not known yet.
+    pub probes: Vec<String>,
     pub pictures: Vec<String>,
     pub progress: u64,
 }
@@ -986,6 +1022,24 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMed
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
     let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
     for url in links.iter().filter(|u| !is_invite(u) && !gif_links::is_gif(u)) {
+        if gif_links::is_telium_media(url) {
+            match client.media_kind(url) {
+                Some(MediaProbe::Known(MediaKind::Other)) => {}
+                Some(MediaProbe::Known(_)) => {
+                    5u8.hash(&mut progress);
+                    media.pictures.push(url.clone());
+                    continue;
+                }
+                Some(MediaProbe::Loading) => {
+                    4u8.hash(&mut progress);
+                    continue;
+                }
+                None => {
+                    media.probes.push(url.clone());
+                    continue;
+                }
+            }
+        }
         match client.embed(channel_id, url) {
             Some(EmbedState::Ready(embed)) => {
                 1u8.hash(&mut progress);

@@ -88,7 +88,68 @@ pub enum GifShare {
     Failed,
 }
 
+/// What a Telium media link is, once its origin has said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaProbe {
+    Loading,
+    Known(gif_links::MediaKind),
+}
+
 impl Client {
+    /// What a Telium media link serves; `None` until someone asks (`request_media_kind`).
+    pub fn media_kind(&self, url: &str) -> Option<MediaProbe> {
+        self.media_kinds.get(url).copied()
+    }
+
+    /// The links in a message to show as GIFs: GIF links, and Telium media that proved to be one.
+    pub fn gif_links_in(&self, content: &str) -> Vec<String> {
+        let mut out = gif_links::gifs_in(content);
+        out.extend(
+            gif_links::telium_media_in(content)
+                .into_iter()
+                .filter(|u| self.media_kind(u) == Some(MediaProbe::Known(gif_links::MediaKind::Gif))),
+        );
+        out
+    }
+
+    /// Whether a message is one GIF and nothing else (its text is then not shown).
+    pub fn is_gif_only(&self, content: &str) -> bool {
+        if gif_links::is_gif_only(content) {
+            return true;
+        }
+        let text = content.trim();
+        gif_links::is_telium_media(text)
+            && self.media_kind(text) == Some(MediaProbe::Known(gif_links::MediaKind::Gif))
+            && gif_links::telium_media_in(text).len() == 1
+    }
+
+    /// Asks a Telium media link's origin what it serves, once: a `HEAD`, and a one-byte `GET`
+    /// where `HEAD` is refused. The capability in the link is all it needs; no credentials go.
+    pub fn request_media_kind(&mut self, url: &str, cx: &mut Context<Self>) {
+        if self.media_kinds.contains_key(url) || !gif_links::is_telium_media(url) {
+            return;
+        }
+        self.media_kinds.insert(url.to_owned(), MediaProbe::Loading);
+        let (io, http, key) = (self.io.clone(), self.http.clone(), url.to_owned());
+        let target = key.clone();
+        cx.spawn(async move |this, cx| {
+            let found = join(io.spawn(async move { probe(&http, &target).await })).await;
+            this.update(cx, |this, cx| {
+                let kind = match found {
+                    Ok(content_type) => gif_links::media_kind(&content_type),
+                    Err(err) => {
+                        log::debug!("probing {key}: {err:#}");
+                        gif_links::MediaKind::Other
+                    }
+                };
+                this.media_kinds.insert(key, MediaProbe::Known(kind));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// What a GIF share page turned out to be; `None` until someone asks its provider
     /// (`request_gif_share`).
     pub fn gif_share(&self, url: &str) -> Option<GifShare> {
@@ -235,7 +296,25 @@ impl Client {
         self.embeds.clear();
         self.artwork.clear();
         self.gif_shares.clear();
+        self.media_kinds.clear();
         self.notice = Some("Cached data cleared.".into());
         cx.notify();
     }
+}
+
+/// The type a media link is served with.
+async fn probe(http: &reqwest::Client, url: &str) -> anyhow::Result<String> {
+    let timeout = std::time::Duration::from_secs(10);
+    let content_type = |r: &reqwest::Response| {
+        r.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned)
+    };
+    let head = http.head(url).timeout(timeout).send().await?;
+    if head.status().is_success()
+        && let Some(t) = content_type(&head)
+    {
+        return Ok(t);
+    }
+    let get = http.get(url).header(reqwest::header::RANGE, "bytes=0-0").timeout(timeout).send().await?;
+    anyhow::ensure!(get.status().is_success(), "{}", get.status());
+    content_type(&get).ok_or_else(|| anyhow::anyhow!("no content type"))
 }

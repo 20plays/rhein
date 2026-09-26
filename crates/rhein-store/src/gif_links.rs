@@ -125,19 +125,60 @@ pub fn is_gif(value: &str) -> bool {
     url.host_str().is_some_and(|h| host_matches(&h.to_ascii_lowercase(), MEDIA_HOSTS))
 }
 
-/// The GIF links in a message, in order, each once.
-pub fn gifs_in(content: &str) -> Vec<String> {
+/// The https links in a message, in order, each once.
+fn links_in(content: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in content.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'')) {
         let Some(at) = raw.find("https://") else { continue };
         let cleaned = raw[at..].trim_end_matches(|c: char| ")]}>.,;:!?'\"".contains(c));
         let Some(url) = https(cleaned) else { continue };
         let href = url.to_string();
-        if is_gif(&href) && !out.contains(&href) {
+        if !out.contains(&href) {
             out.push(href);
         }
     }
     out
+}
+
+/// The GIF links in a message, in order, each once.
+pub fn gifs_in(content: &str) -> Vec<String> {
+    links_in(content).into_iter().filter(|u| is_gif(u)).collect()
+}
+
+/// Whether a link is a file on a Telium media origin (`/_telium/v1/media/{hash}`, or a remote
+/// one's `/_telium/v1/media/remote/{origin}/{hash}`). Its name says nothing about what it is: an
+/// uploaded GIF is known as one only by the type the origin serves it with.
+pub fn is_telium_media(value: &str) -> bool {
+    let Some(url) = https(value) else { return false };
+    let segments: Vec<&str> = url.path().trim_matches('/').split('/').collect();
+    let hash = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    match segments.as_slice() {
+        ["_telium", "v1", "media", h] => hash(h),
+        ["_telium", "v1", "media", "remote", origin, h] => !origin.is_empty() && hash(h),
+        _ => false,
+    }
+}
+
+/// The Telium media links in a message that are not GIFs by their name already.
+pub fn telium_media_in(content: &str) -> Vec<String> {
+    links_in(content).into_iter().filter(|u| is_telium_media(u) && !is_gif(u)).collect()
+}
+
+/// What a media link turned out to be, from the type its origin serves it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Gif,
+    Image,
+    Other,
+}
+
+pub fn media_kind(content_type: &str) -> MediaKind {
+    let mime = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "image/gif" => MediaKind::Gif,
+        m if m.starts_with("image/") && m != "image/svg+xml" => MediaKind::Image,
+        _ => MediaKind::Other,
+    }
 }
 
 /// Whether a message is a single GIF link and nothing else (its text is then not shown).
@@ -225,6 +266,22 @@ mod tests {
         assert_eq!(share("http://tenor.com/view/x-gif-1"), None);
         assert_eq!(share("https://tenor.com/search/cats"), None);
         assert_eq!(giphy_media("GAXXHdS0zXawVLOJLY"), "https://media.giphy.com/media/GAXXHdS0zXawVLOJLY/giphy.gif");
+    }
+
+    #[test]
+    fn telium_media_links() {
+        let hash = "d33f997d4478f964774167b6fe90d42cd9829a4f31822ae68ea624043a44e341";
+        let local = format!("https://staging.telium.chat/_telium/v1/media/{hash}?cap=RO9LUT-_5XSbUJy8Hq4YU8Cac9of8BqA");
+        assert!(is_telium_media(&local));
+        assert!(!is_gif(&local));
+        assert!(is_telium_media(&format!("https://a.example/_telium/v1/media/remote/b.example/{hash}")));
+        assert!(!is_telium_media("https://a.example/_telium/v1/media/registry"));
+        assert!(!is_telium_media(&format!("http://a.example/_telium/v1/media/{hash}")));
+        assert_eq!(telium_media_in(&format!("look {local} !")), vec![local.clone()]);
+        assert_eq!(media_kind("image/gif"), MediaKind::Gif);
+        assert_eq!(media_kind("Image/PNG; charset=binary"), MediaKind::Image);
+        assert_eq!(media_kind("image/svg+xml"), MediaKind::Other);
+        assert_eq!(media_kind("video/mp4"), MediaKind::Other);
     }
 
     #[test]
