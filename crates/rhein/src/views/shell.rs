@@ -1810,7 +1810,9 @@ impl Shell {
                                 .child(div().text_size(text::SM).text_color(t.text_faint).child(user_id.clone()))
                                 .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
                         )
-                        .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| div().text_size(text::SM).child(bio)))
+                        .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| {
+                            div().flex().flex_col().gap_1().child(small_heading("about me")).child(div().text_size(text::SM).child(bio))
+                        }))
                         // The dates and roles at the bottom of the card, the space above them.
                         .child(div().flex_1())
                         .children(member.as_ref().and_then(|m| m.joined_at).map(|at| div().flex().flex_col().gap_1().child(small_heading("member since")).child(div().text_size(text::SM).child(date(at)))))
