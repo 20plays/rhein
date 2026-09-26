@@ -52,6 +52,12 @@ impl GuildSettingsView {
         cx.notify();
     }
 
+    /// Opens a channel's overwrites, starting with @everyone's.
+    pub fn focus_channel(&mut self, channel: String, cx: &mut Context<Self>) {
+        let everyone = (String::from("role"), self.guild_id.clone());
+        self.pick_overwrite(channel, everyone, cx);
+    }
+
     fn save_overwrite(&mut self, cx: &mut Context<Self>) {
         let (Some(channel), Some((kind, id))) = (self.channel_perms.channel.clone(), self.channel_perms.target.clone()) else { return };
         let (mut allow, mut deny) = (0u64, 0u64);

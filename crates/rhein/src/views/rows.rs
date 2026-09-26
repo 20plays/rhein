@@ -964,7 +964,7 @@ fn clock(z: &jiff::Zoned, h24: bool) -> String {
     if h24 { z.strftime("%H:%M").to_string() } else { z.strftime("%-I:%M %p").to_string() }
 }
 
-fn format_hm(ms: i64, h24: bool) -> String {
+pub(crate) fn format_hm(ms: i64, h24: bool) -> String {
     zoned(ms).map(|z| clock(&z, h24)).unwrap_or_default()
 }
 

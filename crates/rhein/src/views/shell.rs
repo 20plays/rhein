@@ -700,9 +700,25 @@ impl Shell {
             let (v, g) = (this.clone(), gid.clone());
             entries.push(MenuEntry::item("Create channel", move |window, cx| {
                 let g = g.clone();
-                v.update(cx, |v, cx| v.open_create_channel(g, window, cx)).ok();
+                v.update(cx, |v, cx| v.open_create_channel(g, None, window, cx)).ok();
             }).with_icon(Icon::Plus));
         }
+        if manage_channels {
+            let (v, g) = (this.clone(), gid.clone());
+            entries.push(MenuEntry::item("Create category", move |window, cx| {
+                let g = g.clone();
+                v.update(cx, |v, cx| {
+                    let client = v.client.clone();
+                    v.prompt("Create category", vec![("Name".into(), String::new())], "Create", move |values, cx| {
+                        let name = values[0].trim().to_owned();
+                        if !name.is_empty() {
+                            client.update(cx, |c, cx| c.create_channel(g.clone(), name, "category".into(), None, cx));
+                        }
+                    }, window, cx)
+                }).ok();
+            }).with_icon(Icon::Plus));
+        }
+        entries.push(self.mute_entry(gid.clone(), "guild", cx));
         if manage_guild {
             let (v, g, n) = (this.clone(), gid.clone(), name.clone());
             entries.push(MenuEntry::item("Rename guild", move |window, cx| {
@@ -733,6 +749,15 @@ impl Shell {
                 v.update(cx, |v, cx| v.open_dialog(DialogTab::Create, window, cx)).ok();
             }).with_icon(Icon::Plus));
         }
+        if owner {
+            // The owner cannot leave; deleting, with its safeguard, lives in the overview.
+            entries.push(MenuEntry::Separator);
+            let (v, g) = (this.clone(), gid.clone());
+            entries.push(MenuEntry::item("Delete guild…", move |window, cx| {
+                let g = g.clone();
+                v.update(cx, |v, cx| v.open_guild_settings(g, GuildPane::Overview, window, cx)).ok();
+            }).with_icon(Icon::Trash).danger());
+        }
         if !owner {
             entries.push(MenuEntry::Separator);
             let (v, g) = (this.clone(), gid.clone());
@@ -755,12 +780,56 @@ impl Shell {
         self.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
     }
 
+    /// "Mute …" with how long, or "Unmute …" when it already is (muted in the account's
+    /// preferences, shared with the web client).
+    fn mute_entry(&self, id: String, noun: &str, cx: &App) -> MenuEntry {
+        const DURATIONS: [(&str, Option<i64>); 6] = [
+            ("For 15 minutes", Some(15 * 60_000)),
+            ("For 1 hour", Some(60 * 60_000)),
+            ("For 3 hours", Some(3 * 60 * 60_000)),
+            ("For 8 hours", Some(8 * 60 * 60_000)),
+            ("For 24 hours", Some(24 * 60 * 60_000)),
+            ("Until I turn it back on", None),
+        ];
+        let client = self.client.clone();
+        match self.client.read(cx).muted_until(&id) {
+            Some(until) => {
+                let label = match until {
+                    Some(ms) => format!("Unmute {noun} (muted until {})", crate::views::rows::format_hm(ms, true)),
+                    None => format!("Unmute {noun}"),
+                };
+                MenuEntry::item(label, move |_, cx| client.update(cx, |c, cx| c.set_muted(&id, None, true, cx))).with_icon(Icon::Bell)
+            }
+            None => {
+                let choices = DURATIONS
+                    .iter()
+                    .map(|&(label, ms)| {
+                        let (client, id) = (client.clone(), id.clone());
+                        MenuEntry::item(label, move |_, cx| client.update(cx, |c, cx| c.set_muted(&id, ms, false, cx)))
+                    })
+                    .collect();
+                MenuEntry::expand(format!("Mute {noun}"), choices)
+                    .with_leading(|_, cx| rhein_ui::icon_sized(Icon::Bell, px(16.)).text_color(cx.theme().text).into_any_element())
+            }
+        }
+    }
+
     fn channel_menu(&mut self, channel_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let client = self.client.read(cx);
         let Some(channel) = client.channel(&channel_id).cloned() else { return };
         let manage = client.can(&channel_id, perms::MANAGE_CHANNELS);
+        let manage_roles = client.can(&channel_id, perms::MANAGE_ROLES);
+        let guild_id = client.guild_of_channel(&channel_id).map(|g| g.guild.id.clone());
+        let category = channel.is_category();
         let this = cx.weak_entity();
         let mut entries = Vec::new();
+        if category && manage && let Some(g) = guild_id.clone() {
+            let (v, cat) = (this.clone(), channel_id.clone());
+            entries.push(MenuEntry::item("Create channel here", move |window, cx| {
+                let (g, cat) = (g.clone(), cat.clone());
+                v.update(cx, |v, cx| v.open_create_channel(g, Some(cat), window, cx)).ok();
+            }).with_icon(Icon::Plus));
+        }
         if channel.is_textual() {
             let (c, id) = (self.client.clone(), channel_id.clone());
             entries.push(MenuEntry::item("Mark as read", move |_, cx| {
@@ -768,14 +837,35 @@ impl Shell {
                 c.update(cx, |c, cx| c.mark_read(id, cx));
             }).with_icon(Icon::Check));
         }
+        entries.push(self.mute_entry(channel_id.clone(), if category { "category" } else { "channel" }, cx));
         {
             let id = channel_id.clone();
-            entries.push(MenuEntry::item("Copy channel ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+            let label = if category { "Copy category ID" } else { "Copy channel ID" };
+            entries.push(MenuEntry::item(label, move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+        }
+        if manage {
+            entries.push(MenuEntry::Separator);
+            for (label, by, glyph) in [("Move up", -1, Icon::ChevronUp), ("Move down", 1, Icon::ChevronDown)] {
+                let (c, id) = (self.client.clone(), channel_id.clone());
+                entries.push(MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.move_channel(&id, by, cx))).with_icon(glyph));
+            }
+        }
+        if manage_roles && !category && let Some(g) = guild_id.clone() {
+            let (v, id) = (this.clone(), channel_id.clone());
+            entries.push(MenuEntry::item("Permissions", move |window, cx| {
+                let (g, id) = (g.clone(), id.clone());
+                v.update(cx, |v, cx| {
+                    v.open_guild_settings(g, GuildPane::Channels, window, cx);
+                    if let Some((view, _)) = &v.guild_settings {
+                        view.update(cx, |s, cx| s.focus_channel(id, cx));
+                    }
+                }).ok();
+            }).with_icon(Icon::Lock));
         }
         if manage {
             entries.push(MenuEntry::Separator);
             let (v, id, name, topic) = (this.clone(), channel_id.clone(), channel.name.clone(), channel.topic.clone().unwrap_or_default());
-            entries.push(MenuEntry::item("Edit channel", move |window, cx| {
+            entries.push(MenuEntry::item(if category { "Edit category" } else { "Edit channel" }, move |window, cx| {
                 let (id, name, topic) = (id.clone(), name.clone(), topic.clone());
                 v.update(cx, |v, cx| {
                     let client = v.client.clone();
@@ -788,13 +878,13 @@ impl Shell {
                 }).ok();
             }).with_icon(Icon::Pencil));
             let (v, id, name) = (this.clone(), channel_id.clone(), channel.name.clone());
-            entries.push(MenuEntry::item("Delete channel", move |window, cx| {
+            entries.push(MenuEntry::item(if category { "Delete category" } else { "Delete channel" }, move |window, cx| {
                 let (id, name) = (id.clone(), name.clone());
                 v.update(cx, |v, cx| {
                     let client = v.client.clone();
                     v.confirm(
-                        format!("Delete #{name}?"),
-                        "The channel and its messages are removed for everyone.".into(),
+                        if category { format!("Delete the {name} category?") } else { format!("Delete #{name}?") },
+                        if category { "The channels in it stay, without a category.".into() } else { "The channel and its messages are removed for everyone.".into() },
                         "Delete".into(),
                         true,
                         move |cx| client.update(cx, |c, cx| c.delete_channel(id.clone(), cx)),
@@ -817,6 +907,18 @@ impl Shell {
         let moderate = !myself && !target_owner && client.guild_can(&gid, perms::MODERATE_MEMBERS);
         let kick = !myself && !target_owner && client.guild_can(&gid, perms::KICK_MEMBERS);
         let ban = !myself && !target_owner && client.guild_can(&gid, perms::BAN_MEMBERS);
+        // Roles to give or take: those below our own top role, not held by a bot.
+        let role_choices: Vec<(String, String, bool)> = if client.guild_can(&gid, perms::MANAGE_ROLES) {
+            let guild = client.guild(&gid).map(|g| g.guild.clone()).unwrap_or_default();
+            let top = guild.me.as_ref().and_then(|m| m.get("top_role_position")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let owner = client.is_owner(&gid);
+            let held: Vec<String> = client.members.get(&gid).and_then(|l| l.iter().find(|m| m.user_id == user_id)).map(|m| m.roles.clone()).unwrap_or_default();
+            let mut roles: Vec<_> = guild.roles.iter().filter(|r| r.id != gid && !r.managed && (owner || r.position < top)).cloned().collect();
+            roles.sort_by_key(|r| std::cmp::Reverse(r.position));
+            roles.into_iter().map(|r| { let has = held.contains(&r.id); (r.id, r.name, has) }).collect()
+        } else {
+            Vec::new()
+        };
         let this = cx.weak_entity();
         let mut entries = Vec::new();
         {
@@ -888,6 +990,23 @@ impl Shell {
                     }).ok();
                 }));
             }
+        }
+        if !role_choices.is_empty() {
+            let choices = role_choices
+                .into_iter()
+                .map(|(role, label, has)| {
+                    let (c, g, u) = (self.client.clone(), gid.clone(), user_id.clone());
+                    MenuEntry::item(label, move |_, cx| {
+                        let (g, u, role) = (g.clone(), u.clone(), role.clone());
+                        c.update(cx, |c, cx| {
+                            c.set_member_role(g.clone(), u, role, !has, cx);
+                            c.load_members(g, cx);
+                        })
+                    })
+                    .checked(has)
+                })
+                .collect();
+            entries.push(MenuEntry::expand("Roles", choices).with_leading(|_, cx| rhein_ui::icon_sized(Icon::Users, px(16.)).text_color(cx.theme().text).into_any_element()));
         }
         for (enabled, label, verb, ban_it) in [(kick, "Kick", "kick", false), (ban, "Ban", "ban", true)] {
             if !enabled {
@@ -1139,7 +1258,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn open_create_channel(&mut self, guild_id: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_create_channel(&mut self, guild_id: String, category: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let name = cx.new(|cx| TextInput::new("new-channel", cx));
         let sub = cx.subscribe_in(&name, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::Submit => this.submit_modal(window, cx),
@@ -1148,7 +1267,7 @@ impl Shell {
         });
         self._subs.push(sub);
         window.focus(&name.focus_handle(cx), cx);
-        self.modal = Some(ShellModal::CreateChannel { guild_id, name, kind: 0, category: None });
+        self.modal = Some(ShellModal::CreateChannel { guild_id, name, kind: 0, category });
         cx.notify();
     }
 
@@ -1514,6 +1633,7 @@ impl Shell {
     /// The one sidebar: direct messages on top, then every server with its guilds, each guild
     /// unfolding into its channels.
     fn sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let menu_open = self.menu.is_open();
         let t = cx.theme().clone();
         let client = self.client.read(cx);
         let home = client.showing_home;
@@ -1606,7 +1726,8 @@ impl Shell {
                         .when(unread, |d| d.font_weight(FontWeight::SEMIBOLD))
                         .when(active && !expanded, |d| d.bg(t.bg_selected))
                         .hover(|s| s.bg(t.bg_hover).text_color(t.text))
-                        .tooltip(tooltip(format!("{} · {}", entry.guild.name, entry.server)))
+                        // Not while a menu is open: it would sit on the menu's first entry.
+                        .when(!menu_open, |d| d.tooltip(tooltip(format!("{} · {}", entry.guild.name, entry.server))))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let open = {
                                 let c = this.client.read(cx);
@@ -2014,6 +2135,10 @@ impl Shell {
                             }
                             cx.notify();
                         }))
+                        .on_mouse_down(gpui::MouseButton::Right, {
+                            let id = ch.id.clone();
+                            cx.listener(move |this, e: &gpui::MouseDownEvent, window, cx| this.channel_menu(id.clone(), e.position, window, cx))
+                        })
                         .child(icon_sized(if collapsed { Icon::ChevronRight } else { Icon::ChevronDown }, px(12.)).text_color(t.text_faint))
                         .child(ch.name.to_lowercase())
                         .into_any_element(),

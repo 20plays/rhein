@@ -1215,6 +1215,39 @@ impl Client {
         self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
     }
 
+    /// Gives a member a role, or takes it away.
+    pub fn set_member_role(&mut self, guild_id: String, user_id: String, role_id: String, give: bool, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(&guild_id) else { return };
+        let patch = if give { serde_json::json!({ "add_roles": [role_id] }) } else { serde_json::json!({ "remove_roles": [role_id] }) };
+        self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
+    }
+
+    /// Moves a channel one place up (`-1`) or down (`1`) among the channels beside it (same
+    /// category), by swapping places with its neighbour.
+    pub fn move_channel(&mut self, channel_id: &str, by: i64, cx: &mut Context<Self>) {
+        let Some(entry) = self.guild_of_channel(channel_id) else { return };
+        let Some(me) = entry.guild.channels.iter().find(|c| c.id == channel_id) else { return };
+        let (gid, parent, category) = (entry.guild.id.clone(), me.parent_id.clone(), me.is_category());
+        let mut siblings: Vec<&rhein_proto::Channel> = entry
+            .ordered_channels()
+            .into_iter()
+            .filter(|c| c.parent_id == parent && c.is_category() == category)
+            .collect();
+        siblings.sort_by_key(|c| (c.position, c.id.clone()));
+        let Some(at) = siblings.iter().position(|c| c.id == channel_id) else { return };
+        let to = at as i64 + by;
+        if to < 0 || to as usize >= siblings.len() {
+            return;
+        }
+        let other = siblings[to as usize];
+        let (mine, theirs) = (siblings[at].position, other.position);
+        // Equal positions (never reordered) still need two different places.
+        let (mine, theirs) = if mine == theirs { if by < 0 { (theirs, theirs + 1) } else { (theirs + 1, theirs) } } else { (theirs, mine) };
+        let places = vec![(channel_id.to_owned(), mine, parent.clone()), (other.id.clone(), theirs, parent)];
+        let Some(api) = self.api_for_guild(&gid) else { return };
+        self.fire(cx, async move { api.reorder_channels(&gid, &places).await.map(drop) });
+    }
+
     pub fn timeout_member(&mut self, guild_id: String, user_id: String, minutes: i64, cx: &mut Context<Self>) {
         let Some(api) = self.api_for_guild(&guild_id) else { return };
         let patch = serde_json::json!({ "timeout_until": now_ms() + minutes * 60_000 });
@@ -2225,7 +2258,54 @@ impl Client {
     }
 
     pub fn read_mark(&self, channel_id: &str) -> ReadMark {
-        self.read.get(channel_id).cloned().unwrap_or_default()
+        let mut mark = self.read.get(channel_id).cloned().unwrap_or_default();
+        // Muted here, or its category or its guild muted, in the account's preferences.
+        if !mark.muted {
+            let parent = self.channel(channel_id).and_then(|c| c.parent_id.clone());
+            let guild = self.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
+            mark.muted = [Some(channel_id.to_owned()), parent, guild].into_iter().flatten().any(|id| self.is_muted(&id));
+        }
+        mark
+    }
+
+    /// Whether a guild, category or channel is muted in the account's preferences (`muted` in
+    /// `prefs.v1`, shared with the web client): for good (`true`) or until a moment.
+    pub fn is_muted(&self, id: &str) -> bool {
+        match self.account_pref(&["muted", id]) {
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(v) => v.as_i64().is_some_and(|until| until > now_ms()),
+            None => false,
+        }
+    }
+
+    /// When a mute ends: `Some(None)` for "until turned back on", `None` when not muted.
+    pub fn muted_until(&self, id: &str) -> Option<Option<i64>> {
+        match self.account_pref(&["muted", id]) {
+            Some(serde_json::Value::Bool(true)) => Some(None),
+            Some(v) => v.as_i64().filter(|u| *u > now_ms()).map(Some),
+            None => None,
+        }
+    }
+
+    /// Mutes for `for_ms` (`None`: until turned back on), or unmutes with `unmute`.
+    pub fn set_muted(&mut self, id: &str, for_ms: Option<i64>, unmute: bool, cx: &mut Context<Self>) {
+        let value = if unmute {
+            None
+        } else {
+            Some(match for_ms {
+                Some(ms) => serde_json::json!(now_ms() + ms),
+                None => serde_json::json!(true),
+            })
+        };
+        self.set_account_pref(&["muted", id], value, cx);
+        // Draw again when a timed mute runs out.
+        if let (false, Some(ms)) = (unmute, for_ms) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(ms.max(0) as u64 + 500)).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
     }
 
     /// Whether anything in the guild is unread, and how many mentions wait there.
