@@ -195,7 +195,7 @@ impl SettingsView {
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self {
+        let mut view = Self {
             client,
             body_scroll: gpui::ScrollHandle::new(),
             section: Section::Account,
@@ -224,7 +224,11 @@ impl SettingsView {
             unlock_password,
             focus,
             _subs: subs,
-        }
+        };
+        // The profile is usually there already (fetched at sign-in, kept on disk): show it now,
+        // not at the client's next change.
+        view.load_look(cx);
+        view
     }
 
     /// Takes the banner, accent and theme from the profile once it has arrived, and whatever the
