@@ -991,6 +991,33 @@ impl Shell {
                 }).ok();
             }).with_icon(Icon::Smile));
         }
+        // With more than one activity going, which one shows first: in the member list, the
+        // strip down here and for everyone else.
+        let running = self.client.read(cx).shared_activities().to_vec();
+        if running.len() > 1 {
+            use rhein_proto::activity::Slot;
+            let chosen = prefs.primary_activity.as_deref().and_then(Slot::from_key);
+            let mut choices = Vec::new();
+            {
+                let c = self.client.clone();
+                choices.push(
+                    MenuEntry::item("Automatic", move |_, cx| c.update(cx, |c, cx| c.set_primary_activity(None, cx)))
+                        .checked(chosen.is_none()),
+                );
+            }
+            for activity in &running {
+                let (c, slot) = (self.client.clone(), activity.slot());
+                let label = format!("{} {}", activity.verb(), activity.name);
+                choices.push(
+                    MenuEntry::item(label, move |_, cx| c.update(cx, |c, cx| c.set_primary_activity(Some(slot), cx)))
+                        .checked(chosen == Some(slot)),
+                );
+            }
+            entries.push(
+                MenuEntry::expand("Primary activity", choices)
+                    .with_leading(|_, cx| rhein_ui::icon_sized(Icon::Gamepad, px(16.)).text_color(cx.theme().text).into_any_element()),
+            );
+        }
         if prefs.custom_status.is_some() {
             let c = self.client.clone();
             entries.push(MenuEntry::item("Clear custom status", move |_, cx| c.update(cx, |c, cx| {

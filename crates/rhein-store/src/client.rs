@@ -871,6 +871,11 @@ impl Client {
 
     // ---------------------------------------------------------------- rich presence
 
+    /// Puts the activity of `slot` first in what we share, or goes back to the usual order.
+    pub fn set_primary_activity(&mut self, slot: Option<rhein_proto::activity::Slot>, cx: &mut Context<Self>) {
+        self.update_prefs(cx, |p| p.primary_activity = slot.map(|s| s.key().to_owned()));
+    }
+
     /// What this client shares right now (after the sharing preferences), if anything.
     pub fn shared_activities(&self) -> &[rhein_proto::Activity] {
         self.sharing.as_deref().unwrap_or_default()
@@ -940,6 +945,8 @@ impl Client {
             .filter(|a| !prefs.hidden_activities.contains(&a.name))
             .cloned()
             .collect();
+        let primary = prefs.primary_activity.as_deref().and_then(rhein_proto::activity::Slot::from_key);
+        let shared = rhein_proto::activity::primary_first(shared, primary);
         let shared = self.with_shared_covers(shared, cx);
         // With nothing of our own we stay out of it, so another session's activity (the Telium
         // desktop app's, say) isn't erased; when ours ends, it is cleared once.

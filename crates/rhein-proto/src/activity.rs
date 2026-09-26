@@ -23,6 +23,32 @@ pub enum Slot {
     Video,
 }
 
+impl Slot {
+    pub const ALL: [Slot; 3] = [Slot::Game, Slot::Music, Slot::Video];
+
+    /// The name a preference stores it under.
+    pub fn key(self) -> &'static str {
+        match self {
+            Slot::Game => "game",
+            Slot::Music => "music",
+            Slot::Video => "video",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
+/// `list` with the activity of the `primary` slot moved to the front, the rest in their order.
+/// Viewers show the first activity where there is room for one (a member list, say).
+pub fn primary_first(mut list: Vec<Activity>, primary: Option<Slot>) -> Vec<Activity> {
+    if let Some(slot) = primary {
+        list.sort_by_key(|a| a.slot() != slot);
+    }
+    list
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Timestamps {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,13 +111,11 @@ impl Activity {
         }
     }
 
-    /// A one-line summary for lists: "Playing Factorio", "Listening to Song".
+    /// A one-line summary for lists: "Playing Factorio", "Listening to Spotify".
     pub fn summary(&self) -> String {
-        let what = match self.kind {
-            2 | 3 => self.details.as_deref().unwrap_or(&self.name),
-            _ => &self.name,
-        };
-        format!("{} {what}", self.verb())
+        // The name, whatever the kind, as the web client and Discord put it: an app chooses what
+        // it goes by (Sonora the service, the artist or the title), the song is on the card.
+        format!("{} {}", self.verb(), self.name)
     }
 
     /// Normalises untrusted input the way the web client does; `None` when nothing is left.
@@ -240,6 +264,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn the_primary_activity_goes_first() {
+        let game = Activity::normalize(&json!({ "name": "Zed" })).unwrap();
+        let music = Activity::normalize(&json!({ "name": "Title Fight", "type": 2 })).unwrap();
+        let names = |l: Vec<Activity>| l.into_iter().map(|a| a.name).collect::<Vec<_>>();
+        let both = vec![game.clone(), music.clone()];
+        assert_eq!(names(primary_first(both.clone(), None)), ["Zed", "Title Fight"]);
+        assert_eq!(names(primary_first(both.clone(), Some(Slot::Music))), ["Title Fight", "Zed"]);
+        // A chosen slot with nothing in it changes nothing.
+        assert_eq!(names(primary_first(both, Some(Slot::Video))), ["Zed", "Title Fight"]);
+        assert_eq!(Slot::from_key(Slot::Music.key()), Some(Slot::Music));
+    }
+
+    #[test]
     fn normalizes_like_the_web_client() {
         let a = Activity::normalize(&json!({
             "application_id": "123",
@@ -279,7 +316,8 @@ mod tests {
         let out = normalize_all(&list);
         let names: Vec<&str> = out.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Game A", "Spotify", "Video"]);
-        assert_eq!(out[1].summary(), "Listening to Song");
+        // The name the app goes by, as in the web client; the song is on the card.
+        assert_eq!(out[1].summary(), "Listening to Spotify");
     }
 
     #[test]

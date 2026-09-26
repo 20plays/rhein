@@ -30,6 +30,9 @@ pub struct Prefs {
     /// Incoming friend requests already looked at (`social::seen_key`), so the Direct messages
     /// row marks only new ones.
     pub seen_requests: Vec<String>,
+    /// Which activity is shown first when there are several (`Slot::key`); none: a game, then
+    /// music, then a video.
+    pub primary_activity: Option<String>,
 }
 
 /// Calls: devices, processing, push-to-talk, the gate, and what stays between calls.
@@ -78,6 +81,7 @@ impl Default for Prefs {
             hidden_activities: Vec::new(),
             voice: VoicePrefs::default(),
             seen_requests: Vec::new(),
+            primary_activity: None,
         }
     }
 }
