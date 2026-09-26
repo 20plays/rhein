@@ -158,12 +158,19 @@ pub struct IconButton {
     active: bool,
     danger: bool,
     large: bool,
+    disabled: bool,
     on_click: Option<Handler>,
 }
 
 impl IconButton {
     pub fn new(id: impl Into<ElementId>, icon: Icon) -> Self {
-        Self { id: id.into(), icon, tooltip: None, active: false, danger: false, large: false, on_click: None }
+        Self { id: id.into(), icon, tooltip: None, active: false, danger: false, large: false, disabled: false, on_click: None }
+    }
+
+    /// Dimmed and not pressable (its tooltip still says why).
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
@@ -223,9 +230,11 @@ impl RenderOnce for IconButton {
             Paint { bg: t.bg_selected, text: hover_color },
         );
         let (el, now) = hover_fade_with(el, &id, rest, lit, held, window, cx);
+        let disabled = self.disabled;
         el.when_some(self.tooltip, |d, text| d.tooltip(tooltip(text)))
+            .when(disabled, |d| d.opacity(0.45).cursor_default())
             .child(icon(self.icon).text_color(now.text))
-            .when_some(self.on_click, |d, handler| {
+            .when_some(self.on_click.filter(|_| !disabled), |d, handler| {
                 d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(move |event, window, cx| handler(event, window, cx))
             })

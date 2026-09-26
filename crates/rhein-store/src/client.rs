@@ -2062,6 +2062,22 @@ impl Client {
     }
 
     /// A friend's picture through the home server (their media is proxied when remote).
+    /// Anyone's picture, from wherever it is known: a guild's member list, the friends list,
+    /// or their fetched profile (through the home server's federation proxy).
+    pub fn person_avatar(&self, user_id: &str) -> Option<String> {
+        if let Some(url) = self.guilds.iter().find_map(|g| self.avatar_url(Some(&g.guild.id), user_id)) {
+            return Some(url);
+        }
+        if let Some(url) = self.friends.iter().find(|f| f.user_id == user_id).and_then(|f| self.friend_avatar(f)) {
+            return Some(url);
+        }
+        if let (Some(home), Some(reference)) = (self.home.as_ref(), self.cached_profile(user_id).and_then(|p| p.avatar_ref.clone()).filter(|r| !r.is_empty())) {
+            let origin = crate::media::remote_origin(user_id, &home.doc.server_name);
+            return Some(crate::media::media_url(&home.doc.api, &reference, origin));
+        }
+        self.avatar_url(None, user_id)
+    }
+
     pub fn friend_avatar(&self, friend: &rhein_proto::Friend) -> Option<String> {
         let home = self.home.as_ref()?;
         let reference = friend.avatar_ref.as_deref().filter(|r| !r.is_empty())?;

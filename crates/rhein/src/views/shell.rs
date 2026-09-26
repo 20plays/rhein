@@ -1552,9 +1552,20 @@ impl Shell {
                             })
                         })
                         .child(
-                            IconButton::new("profile-friend", if state.as_deref() == Some("accepted") { Icon::Users } else { Icon::UserPlus })
+                            IconButton::new(
+                                "profile-friend",
+                                match state.as_deref() {
+                                    Some("accepted") => Icon::UserCheck,
+                                    Some("pending_out") => Icon::Clock,
+                                    Some("pending_in") => Icon::Check,
+                                    Some("blocked") => Icon::Ban,
+                                    _ => Icon::UserPlus,
+                                },
+                            )
                                 .tooltip(label)
-                                .active(state.as_deref() == Some("accepted"))
+                                .active(matches!(state.as_deref(), Some("accepted") | Some("pending_in")))
+                                // Only sending or accepting a request does anything here.
+                                .disabled(action.is_none())
                                 .on_click(move |_, _, cx| {
                                     if let Some(a) = action {
                                         let u = u.clone();
@@ -1576,9 +1587,14 @@ impl Shell {
             let client = self.client.read(cx);
             mutual_friends.clone().unwrap_or_default().iter().map(|u| client.display_name(None, u)).collect()
         };
+        self.client.update(cx, |c, cx| {
+            for u in mutual_friends.clone().unwrap_or_default().iter().take(3) {
+                c.profile(u, cx);
+            }
+        });
         let mutual_faces: Vec<(String, String, Option<String>)> = {
             let client = self.client.read(cx);
-            mutual_friends.clone().unwrap_or_default().iter().take(3).map(|u| (u.clone(), client.display_name(None, u), client.avatar_url(None, u))).collect()
+            mutual_friends.clone().unwrap_or_default().iter().take(3).map(|u| (u.clone(), client.display_name(None, u), client.person_avatar(u))).collect()
         };
         let body = body
             // As Discord shows it: a few faces, "10 Mutual Friends • 4 Mutual Servers"; a click
@@ -1712,6 +1728,12 @@ impl Shell {
         let t = cx.theme().clone();
         let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
         let mutual_friends = self.client.update(cx, |c, cx| c.mutual_friends(&user_id, cx)).unwrap_or_default();
+        // Their pictures and names come with their profiles.
+        self.client.update(cx, |c, cx| {
+            for u in &mutual_friends {
+                c.profile(u, cx);
+            }
+        });
         let activities = {
             let client = self.client.read(cx);
             guild_id
@@ -1747,7 +1769,7 @@ impl Shell {
         let friend_since = client.friends.iter().find(|f| f.user_id == user_id && f.state == "accepted").and_then(|f| f.updated_at.or(f.created_at));
         let mutual_guilds = client.mutual_guilds(&user_id);
         let friends: Vec<(String, String, Option<String>)> =
-            mutual_friends.iter().map(|u| (u.clone(), client.display_name(None, u), client.avatar_url(None, u))).collect();
+            mutual_friends.iter().map(|u| (u.clone(), client.display_name(None, u), client.person_avatar(u))).collect();
         let guild_faces: Vec<(String, String, Option<String>)> =
             mutual_guilds.iter().map(|(id, n)| (id.clone(), n.clone(), client.guild_icon_url(id))).collect();
         let look = profile::Look {
@@ -1766,11 +1788,15 @@ impl Shell {
         let left = div()
             .w(px(360.))
             .flex_none()
+            .h_full()
+            .flex()
+            .flex_col()
             .child(profile::frame(
                 &look,
                 &t,
-                div().flex().flex_col().child(profile::header(&look, face, &t)).child(
+                div().h_full().flex().flex_col().child(profile::header(&look, face, &t)).child(
                     div()
+                        .flex_1()
                         .px_5()
                         .pb_5()
                         .flex()
@@ -1785,6 +1811,8 @@ impl Shell {
                                 .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
                         )
                         .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| div().text_size(text::SM).child(bio)))
+                        // The dates and roles at the bottom of the card, the space above them.
+                        .child(div().flex_1())
                         .children(member.as_ref().and_then(|m| m.joined_at).map(|at| div().flex().flex_col().gap_1().child(small_heading("member since")).child(div().text_size(text::SM).child(date(at)))))
                         .children(friend_since.map(|at| div().flex().flex_col().gap_1().child(small_heading("friends since")).child(div().text_size(text::SM).child(date(at)))))
                         .when(!roles.is_empty(), |d| {
@@ -1803,7 +1831,7 @@ impl Shell {
                             }))))
                         }),
                 ),
-            ));
+            ).w_full().flex_1());
 
         // Right: tabs.
         let labels = vec![
