@@ -33,6 +33,16 @@ pub struct Prefs {
     /// Which activity is shown first when there are several (`Slot::key`); none: a game, then
     /// music, then a video.
     pub primary_activity: Option<String>,
+    /// Unfold links into previews in the chat.
+    pub link_previews: bool,
+    /// Tell the others while you type.
+    pub send_typing: bool,
+    /// Leave muted channels out of the sidebar (unless open or mentioning you).
+    pub hide_muted: bool,
+    /// The coloured dot beside each server in the sidebar.
+    pub server_dots: bool,
+    /// "Copy … ID" entries in menus.
+    pub developer_mode: bool,
 }
 
 /// Calls: devices, processing, push-to-talk, the gate, and what stays between calls.
@@ -82,6 +92,11 @@ impl Default for Prefs {
             voice: VoicePrefs::default(),
             seen_requests: Vec::new(),
             primary_activity: None,
+            link_previews: true,
+            send_typing: true,
+            hide_muted: false,
+            server_dots: true,
+            developer_mode: true,
         }
     }
 }

@@ -428,6 +428,7 @@ impl Render for GuildSettingsView {
                     .py_8()
                     .child(
                         div()
+                            .mx_auto()
                             .max_w(px(if matches!(self.pane, Pane::Roles | Pane::Channels) { 980. } else { 720. }))
                             .flex()
                             .flex_col()

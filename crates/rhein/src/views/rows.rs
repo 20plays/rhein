@@ -89,7 +89,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     });
 
     // Previews: links outside code, looked up lazily.
-    let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
+    let links = if strip_embeds || !client.prefs.link_previews { Vec::new() } else { markdown::links_in(&message.content) };
     let mut missing = Vec::new();
     let mut media_missing = Vec::new();
     let mut cards = Vec::new();

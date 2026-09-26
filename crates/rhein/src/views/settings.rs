@@ -1009,10 +1009,28 @@ impl SettingsView {
             }))
             .into_any_element();
         let (c1, c2, c3) = (self.client.clone(), self.client.clone(), self.client.clone());
+        // A switch for one of this device's preferences.
+        let toggle = |id: &'static str, on: bool, set: fn(&mut rhein_store::prefs::Prefs, bool)| {
+            let client = self.client.clone();
+            Switch::new(id, on).on_toggle(move |on, _, cx| client.update(cx, |c, cx| c.update_prefs(cx, |p| set(p, on)))).into_any_element()
+        };
+        let more = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(heading("chat", t))
+            .child(row("Link previews", "Unfold links into a card with their title and picture.", toggle("link-previews", prefs.link_previews, |p, on| p.link_previews = on)))
+            .child(row("Show when I'm typing", "Others see \"… is typing\" while you write to them.", toggle("send-typing", prefs.send_typing, |p, on| p.send_typing = on)))
+            .child(heading("sidebar", t))
+            .child(row("Hide muted channels", "Muted channels leave the sidebar, unless open or mentioning you.", toggle("hide-muted", prefs.hide_muted, |p, on| p.hide_muted = on)))
+            .child(row("Server status dots", "A dot beside each server: green when connected, yellow while connecting, red when it can't be reached.", toggle("server-dots", prefs.server_dots, |p, on| p.server_dots = on)))
+            .child(heading("advanced", t))
+            .child(row("Developer mode", "\"Copy ID\" entries in the guild, channel and member menus.", toggle("developer-mode", prefs.developer_mode, |p, on| p.developer_mode = on)));
         div()
             .flex()
             .flex_col()
             .gap_2()
+            .child(heading("display", t))
             .child(row("Message text size", "How large message text is drawn.", size_control))
             .child(row(
                 "Compact messages",
@@ -1035,6 +1053,7 @@ impl SettingsView {
                     .on_toggle(move |on, _, cx| c3.update(cx, |c, cx| c.update_prefs(cx, |p| p.reduce_motion = on)))
                     .into_any_element(),
             ))
+            .child(more)
             .into_any_element()
     }
 
@@ -1933,6 +1952,8 @@ impl Render for SettingsView {
                     .py_8()
                     .child(
                         div()
+                            // In the middle of the window, not against its left edge.
+                            .mx_auto()
                             // The profile's fields and its preview side by side need more room.
                             .max_w(px(if self.section == Section::Account { 860. } else { 640. }))
                             .flex()

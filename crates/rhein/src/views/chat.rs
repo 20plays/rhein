@@ -407,7 +407,7 @@ impl ChatView {
             self.stop_typing(&channel, cx);
             return;
         }
-        if self.editing.is_some() || !grew || !self.client.read(cx).may_write(&channel) {
+        if self.editing.is_some() || !grew || !self.client.read(cx).may_write(&channel) || !self.client.read(cx).prefs.send_typing {
             return;
         }
         // In a conversation the others are told when we stop: after a while without a key.

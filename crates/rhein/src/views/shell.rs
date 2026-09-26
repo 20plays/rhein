@@ -672,6 +672,8 @@ impl Shell {
 
     /// Everything you can do with a guild; its `…` button and a right-click on its row.
     fn show_guild_menu(&mut self, gid: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Developer mode (on by default) shows the "Copy … ID" entries.
+        let dev = self.client.read(cx).prefs.developer_mode;
         let client = self.client.read(cx);
         let Some(entry) = client.guild(&gid) else { return };
         let name = entry.guild.name.clone();
@@ -737,7 +739,7 @@ impl Shell {
         entries.push(MenuEntry::Separator);
         {
             let g = gid.clone();
-            entries.push(MenuEntry::item("Copy guild ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(g.clone()))).with_icon(Icon::Copy));
+            if dev { entries.push(MenuEntry::item("Copy guild ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(g.clone()))).with_icon(Icon::Copy)); }
         }
         {
             let v = this.clone();
@@ -815,6 +817,8 @@ impl Shell {
     }
 
     fn channel_menu(&mut self, channel_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Developer mode (on by default) shows the "Copy … ID" entries.
+        let dev = self.client.read(cx).prefs.developer_mode;
         let client = self.client.read(cx);
         let Some(channel) = client.channel(&channel_id).cloned() else { return };
         let manage = client.can(&channel_id, perms::MANAGE_CHANNELS);
@@ -841,7 +845,7 @@ impl Shell {
         {
             let id = channel_id.clone();
             let label = if category { "Copy category ID" } else { "Copy channel ID" };
-            entries.push(MenuEntry::item(label, move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+            if dev { entries.push(MenuEntry::item(label, move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy)); }
         }
         if manage {
             entries.push(MenuEntry::Separator);
@@ -898,6 +902,8 @@ impl Shell {
     }
 
     fn member_menu(&mut self, user_id: String, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        // Developer mode (on by default) shows the "Copy … ID" entries.
+        let dev = self.client.read(cx).prefs.developer_mode;
         let client = self.client.read(cx);
         let Some(gid) = client.selected_guild.clone() else { return };
         let me = client.user_id().map(str::to_owned);
@@ -934,7 +940,7 @@ impl Shell {
                 v.update(cx, |v, cx| v.chat.update(cx, |c, cx| c.insert_text(&format!("<{u}> "), window, cx))).ok();
             }).with_icon(Icon::AtSign));
             let u = user_id.clone();
-            entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(u.clone()))).with_icon(Icon::Copy));
+            if dev { entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(u.clone()))).with_icon(Icon::Copy)); }
         }
         if !myself {
             let (c, u) = (self.client.clone(), user_id.clone());
@@ -1782,7 +1788,7 @@ impl Shell {
                     .font_family(FONT_MONO)
                     .text_size(text::XS)
                     .text_color(t.text_faint)
-                    .child(div().size(px(6.)).flex_none().rounded_full().bg(dot))
+                    .when(client.prefs.server_dots, |d| d.child(div().size(px(6.)).flex_none().rounded_full().bg(dot)))
                     .child(div().flex_1().min_w_0().truncate().child(server.name.clone()))
                     // A server that can't be reached can be taken off the list.
                     .when(matches!(server.status, ServerStatus::Failed | ServerStatus::Incompatible), |d| {
@@ -2269,6 +2275,9 @@ impl Shell {
             // A collapsed category still shows its open channel and anything with news.
             let hidden = ch.parent_id.as_ref().is_some_and(|p| self.collapsed.contains(p));
             if hidden && !active && !mark.is_unread() && mark.mentions == 0 {
+                continue;
+            }
+            if client.prefs.hide_muted && mark.muted && !active && mark.mentions == 0 {
                 continue;
             }
             let glyph = match ch.kind.as_str() {
