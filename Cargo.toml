@@ -57,7 +57,8 @@ opt-level = 2
 [profile.production]
 inherits = "release"
 lto = "thin"
-codegen-units = 1
+# Across all cores; one unit per crate made every rebuild a single-core crawl for a few percent.
+codegen-units = 16
 strip = true
 
 # openmls with Telium's GroupInfo external_pub encoding; see vendor/openmls/RHEIN.md.

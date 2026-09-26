@@ -100,26 +100,26 @@ check_deps() {
   read -r -a backends <<<"$(portal_backend)"
   if command -v pacman >/dev/null; then
     manager=pacman
-    build=(base-devel clang pkgconf alsa-lib libxkbcommon libxkbcommon-x11 libxcb glib2 fontconfig freetype2 wayland)
+    build=(base-devel clang mold pkgconf alsa-lib libxkbcommon libxkbcommon-x11 libxcb glib2 fontconfig freetype2 wayland)
     run=(alsa-lib pipewire pipewire-alsa vulkan-icd-loader xdg-desktop-portal)
   elif command -v apt-get >/dev/null; then
     manager=apt
-    build=(build-essential clang pkg-config libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev)
+    build=(build-essential clang mold pkg-config libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev)
     run=(pipewire pipewire-alsa libvulkan1 mesa-vulkan-drivers xdg-desktop-portal)
   elif command -v dnf >/dev/null; then
     manager=dnf
-    build=(gcc gcc-c++ clang pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype-devel wayland-devel)
+    build=(gcc gcc-c++ clang mold pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype-devel wayland-devel)
     run=(pipewire pipewire-alsa vulkan-loader mesa-vulkan-drivers xdg-desktop-portal)
   elif command -v zypper >/dev/null; then
     manager=zypper
-    build=(gcc gcc-c++ clang pkgconf-pkg-config alsa-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype2-devel wayland-devel)
+    build=(gcc gcc-c++ clang mold pkgconf-pkg-config alsa-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype2-devel wayland-devel)
     run=(pipewire pipewire-alsa libvulkan1 Mesa-vulkan-device xdg-desktop-portal)
   fi
   for b in "${backends[@]}"; do portals+=("xdg-desktop-portal-$b"); done
 
   if [[ -z $manager ]]; then
     echo "· unknown package manager: make sure these are installed (names vary by distribution):"
-    echo "  a C/C++ compiler, clang, pkg-config; headers for ALSA, xkbcommon, xcb, GLib, fontconfig,"
+    echo "  a C/C++ compiler, clang, mold, pkg-config; headers for ALSA, xkbcommon, xcb, GLib, fontconfig,"
     echo "  freetype and Wayland; PipeWire, the Vulkan loader, xdg-desktop-portal and ${portals[*]}"
     return
   fi
