@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         intents: USER_INTENTS,
         presence: PresenceState { status: "online".into(), ..Default::default() },
         voice: Vec::new(),
+        proxy: None,
     });
     let guild = api.guilds().await?.into_iter().next().ok_or_else(|| anyhow::anyhow!("in no guild"))?;
     let channel = api.channels(&guild.id).await?.into_iter().find(|c| c.is_voice()).ok_or_else(|| anyhow::anyhow!("no voice channel"))?;

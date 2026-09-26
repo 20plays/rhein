@@ -65,6 +65,7 @@ async fn member(http: &reqwest::Client, doc: &rhein_proto::Discovery, signed: &a
         intents: USER_INTENTS,
         presence: PresenceState { status: "online".into(), ..Default::default() },
         voice: Vec::new(),
+        proxy: None,
     });
     Member { user: signed.session.user_id.clone(), api, _gateway: gateway, events, mesh: None, roster: HashSet::new() }
 }
