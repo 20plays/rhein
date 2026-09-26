@@ -22,6 +22,8 @@ async fn a_game_sets_and_clears_its_activity() {
         websocket: false,
         detect_games: false,
         media: false,
+        // Not whatever an arRPC on this machine happens to be relaying.
+        bridge: false,
         ..Config::new(dir.clone())
     };
     let handle = start(config);
@@ -78,7 +80,7 @@ async fn a_game_sets_and_clears_its_activity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_must_handshake_first() {
     let dir = scratch("handshake");
-    let config = Config { ipc_dir: Some(dir.clone()), websocket: false, detect_games: false, media: false, ..Config::new(dir.clone()) };
+    let config = Config { ipc_dir: Some(dir.clone()), websocket: false, detect_games: false, media: false, bridge: false, ..Config::new(dir.clone()) };
     let handle = start(config);
     let mut status = handle.status.clone();
     let socket = tokio::time::timeout(Duration::from_secs(5), status.wait_for(|s| s.socket.is_some())).await.unwrap().unwrap().socket.clone().unwrap();

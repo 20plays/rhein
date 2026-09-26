@@ -1555,6 +1555,7 @@ impl SettingsView {
                 .child(mono(format!("rpc apps      {}", if status.clients.is_empty() { "none connected".to_owned() } else { status.clients.len().to_string() })))
                 .child(mono(format!("games         {}", if status.detected.is_empty() { "none running".to_owned() } else { status.detected.join(", ") })))
                 .child(mono(format!("media players {}", if status.players.is_empty() { "none".to_owned() } else { status.players.join(", ") })))
+                .child(mono(format!("arrpc bridge  {}", if status.bridge { "connected (127.0.0.1:1337)" } else { "not running" })))
         };
 
         // Everything found, with whether it goes out; any of it can be hidden by name.

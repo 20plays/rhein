@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::resolve::Resolver;
-use crate::{Report, SourceEvent, detect, ipc, mpris, ws};
+use crate::{Report, SourceEvent, bridge, detect, ipc, mpris, ws};
 
 /// Changes arriving together (a game starting while its RPC connects) are published once.
 const SETTLE: Duration = Duration::from_millis(750);
@@ -28,11 +28,13 @@ pub struct Config {
     pub websocket: bool,
     pub detect_games: bool,
     pub media: bool,
+    /// Also read the activities an arRPC holding `discord-ipc-0` receives.
+    pub bridge: bool,
 }
 
 impl Config {
     pub fn new(cache_dir: PathBuf) -> Config {
-        Config { cache_dir, ipc_dir: None, ipc: true, websocket: true, detect_games: true, media: true }
+        Config { cache_dir, ipc_dir: None, ipc: true, websocket: true, detect_games: true, media: true, bridge: true }
     }
 }
 
@@ -47,6 +49,8 @@ pub struct Status {
     pub detected: Vec<String>,
     /// Media players on the bus.
     pub players: Vec<String>,
+    /// Whether arRPC's bridge is connected.
+    pub bridge: bool,
 }
 
 /// Dropping it stops every source and removes the socket.
@@ -126,6 +130,9 @@ pub fn start(config: Config) -> Handle {
     if config.media {
         tasks.push(tokio::spawn(mpris::run(reports.clone())));
     }
+    if config.bridge {
+        tasks.push(tokio::spawn(bridge::run(reports.clone())));
+    }
     drop(reports);
 
     let resolver = Arc::new(Resolver::new(config.cache_dir.clone()));
@@ -188,6 +195,9 @@ pub fn start(config: Config) -> Handle {
                             s.detected = names;
                             changed
                         });
+                    }
+                    SourceEvent::Bridge(up) => {
+                        status_tx.send_if_modified(|s| std::mem::replace(&mut s.bridge, up) != up);
                     }
                     SourceEvent::Players(names) => {
                         status_tx.send_if_modified(|s| {

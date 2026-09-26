@@ -5,12 +5,14 @@
 //! - [`ws`]: the same commands over Discord's local WebSocket (ports 6463–6472);
 //! - [`detect`]: finds running games by their executables, from Discord's list of detectable
 //!   applications;
-//! - [`mpris`]: the song or video a media player is playing (D-Bus MPRIS).
+//! - [`mpris`]: the song or video a media player is playing (D-Bus MPRIS);
+//! - [`bridge`]: what an arRPC (Equibop, Vesktop) holding the first socket was told.
 //!
 //! [`service::start`] runs them together and publishes at most one game, one music and one
 //! video activity, normalised the way the Telium web client does. This crate knows nothing about
 //! Telium servers; the store decides what to share and sends it.
 
+pub mod bridge;
 pub mod commands;
 pub mod detect;
 pub mod ipc;
@@ -45,4 +47,6 @@ pub enum SourceEvent {
     Client { key: String, client_id: Option<String> },
     Detected(Vec<String>),
     Players(Vec<String>),
+    /// The arRPC bridge connected (`true`) or went away.
+    Bridge(bool),
 }
