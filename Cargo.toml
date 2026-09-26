@@ -43,6 +43,11 @@ sha2 = "0.10"
 gpui = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70fdcf0b5c6e28edb58e2fa77a7e67" }
 gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70fdcf0b5c6e28edb58e2fa77a7e67", features = ["font-kit", "wayland", "x11"] }
 
+# Our own crates: file and line in panics and backtraces, without full debug info, which
+# made every test binary hundreds of MB (libwebrtc and gpui are linked into each).
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 debug = false
 opt-level = 2
