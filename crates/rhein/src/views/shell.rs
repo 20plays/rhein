@@ -1821,7 +1821,7 @@ impl Shell {
             })
             .ok();
         });
-        let row = |id: String, label: String, face: AnyElement, cx: &mut Context<Self>, action: Box<dyn Fn(&mut Shell, &mut Context<Shell>)>| {
+        let row = |id: String, label: String, face: AnyElement, cx: &mut Context<Self>, action: RowAction| {
             div()
                 .id(SharedString::from(format!("full-row-{id}")))
                 .px_2()
@@ -2907,6 +2907,9 @@ impl Shell {
 
 /// The space between two channels in the sidebar.
 const CHANNEL_GAP: f32 = 3.;
+
+/// What a row of the full profile does when clicked.
+type RowAction = Box<dyn Fn(&mut Shell, &mut Context<Shell>)>;
 
 fn presence_of(status: &str) -> Presence {
     match status {
