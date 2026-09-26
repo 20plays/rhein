@@ -7077,6 +7077,7 @@ name = "rhein-net"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "data-encoding",
  "futures",
  "hmac 0.12.1",

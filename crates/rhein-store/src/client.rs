@@ -297,6 +297,8 @@ pub struct Client {
     gif_shares: HashMap<String, gifs::GifShare>,
     /// What Telium media links serve, as their origins said.
     media_kinds: HashMap<String, gifs::MediaProbe>,
+    /// Guild refreshes under way, and whether another change came in meanwhile.
+    guild_refreshes: HashMap<String, bool>,
     sync: Option<std::sync::Arc<tokio::sync::Mutex<crate::sync_store::SyncStore>>>,
     /// The sound file loaded from a message.
     sound: Option<sound::Sound>,
@@ -402,6 +404,7 @@ impl Client {
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
             media_kinds: HashMap::new(),
+            guild_refreshes: HashMap::new(),
             sync: None,
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,
@@ -1083,6 +1086,19 @@ impl Client {
         .detach();
     }
 
+    /// A guild's icon, from its own server's media origin.
+    pub fn guild_icon_url(&self, guild_id: &str) -> Option<String> {
+        let entry = self.guild(guild_id)?;
+        let reference = entry.guild.icon_ref.as_deref().filter(|r| !r.is_empty())?;
+        let doc = self.server(&entry.server)?.doc.as_ref()?;
+        Some(crate::media::media_url(&doc.api, reference, None))
+    }
+
+    /// The name of the server a guild lives on.
+    pub fn guild_server(&self, guild_id: &str) -> Option<&str> {
+        self.guild(guild_id).map(|g| g.server.as_str())
+    }
+
     /// The media URL for an `avatar_ref` on the home server (for previews in settings).
     pub fn home_media_url(&self, reference: &str) -> Option<String> {
         let home = self.home.as_ref()?;
@@ -1633,7 +1649,10 @@ impl Client {
                     && let Some(name) = d.get("name").and_then(|v| v.as_str()) {
                         entry.guild.name = name.to_owned();
                     }
+                // The icon, the alias, the owner: whatever changed, as the server has it now.
+                self.refresh_guild(&id, cx);
             }
+            Event::RoleChange { guild_id } => self.refresh_guild(&guild_id, cx),
             Event::GuildDelete { id } => {
                 self.guilds.retain(|g| g.guild.id != id);
                 if self.selected_guild.as_deref() == Some(id.as_str()) {
@@ -1648,6 +1667,11 @@ impl Client {
                     }
                     _ => None,
                 };
+                // Our own roles or timeout changed: so did what we may do.
+                let mine = matches!(&event, Event::MemberUpdate(d) if d.get("user_id").and_then(|v| v.as_str()) == self.user_id());
+                if mine && let Some(gid) = gid.as_deref() {
+                    self.refresh_guild(gid, cx);
+                }
                 if let Some(gid) = gid
                     && self.members.contains_key(&gid) {
                         self.load_members(gid, cx);
@@ -1763,6 +1787,63 @@ impl Client {
 
     fn server_of_channel(&self, channel_id: &str) -> Option<&str> {
         self.guild_of_channel(channel_id).map(|g| g.server.as_str())
+    }
+
+    /// A guild's server connection and the runtime to call it on, for views that talk to it
+    /// directly (the guild settings, whose answers only they need).
+    pub fn guild_api(&self, guild_id: &str) -> Option<(Api, Io)> {
+        Some((self.api_for_guild(guild_id)?, self.io.clone()))
+    }
+
+    /// Fetches a guild again (its roles, our member with our permissions, name, icon, alias)
+    /// after something changed it. One request at a time per guild; a change during one runs
+    /// it once more when it lands.
+    pub fn refresh_guild(&mut self, guild_id: &str, cx: &mut Context<Self>) {
+        if guild_id.is_empty() || self.guild(guild_id).is_none() {
+            return;
+        }
+        if let Some(again) = self.guild_refreshes.get_mut(guild_id) {
+            *again = true;
+            return;
+        }
+        let Some(api) = self.api_for_guild(guild_id) else { return };
+        self.guild_refreshes.insert(guild_id.to_owned(), false);
+        let (io, gid) = (self.io.clone(), guild_id.to_owned());
+        cx.spawn(async move |this, cx| {
+            let id = gid.clone();
+            let fetched = io.spawn(async move { api.guild(&id).await }).await;
+            this.update(cx, |this, cx| {
+                let again = this.guild_refreshes.remove(&gid).unwrap_or(false);
+                match fetched {
+                    Ok(Ok(fresh)) => {
+                        if let Some(entry) = this.guild_mut(&gid) {
+                            let g = &mut entry.guild;
+                            g.name = fresh.name;
+                            g.icon_ref = fresh.icon_ref;
+                            g.owner = fresh.owner.or(g.owner.take());
+                            g.alias = fresh.alias;
+                            g.media_expiry_limit_secs = fresh.media_expiry_limit_secs;
+                            g.created_at = fresh.created_at.or(g.created_at);
+                            g.roles = fresh.roles;
+                            if fresh.me.is_some() {
+                                g.me = fresh.me;
+                            }
+                            if fresh.member_count.is_some() {
+                                g.member_count = fresh.member_count;
+                            }
+                        }
+                        cx.notify();
+                    }
+                    Ok(Err(err)) => log::debug!("refreshing guild {gid}: {err}"),
+                    Err(err) => log::debug!("refreshing guild {gid}: {err}"),
+                }
+                if again {
+                    this.refresh_guild(&gid, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn api_for_guild(&self, guild_id: &str) -> Option<Api> {

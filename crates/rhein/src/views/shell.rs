@@ -22,6 +22,7 @@ use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::home::HomeView;
 use crate::views::{activity, profile};
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
+use crate::views::guild_settings::{GUILD_SETTINGS_CONTEXT, GuildSettingsEvent, GuildSettingsView, Pane as GuildPane};
 use crate::views::settings::{SETTINGS_CONTEXT, SettingsEvent, SettingsView};
 use crate::views::status::StatusLine;
 use crate::views::switcher::QuickSwitcher;
@@ -41,6 +42,7 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("alt-shift-up", PrevUnread, ctx),
         KeyBinding::new("alt-shift-down", NextUnread, ctx),
         KeyBinding::new("escape", rhein_ui::Dismiss, Some(SETTINGS_CONTEXT)),
+        KeyBinding::new("escape", rhein_ui::Dismiss, Some(GUILD_SETTINGS_CONTEXT)),
     ];
     for m in ["ctrl", "cmd"] {
         out.push(KeyBinding::new(&format!("{m}-k"), OpenSwitcher, ctx));
@@ -113,6 +115,7 @@ pub struct Shell {
     menu: MenuHost,
     modal: Option<ShellModal>,
     settings: Option<(Entity<SettingsView>, Subscription)>,
+    guild_settings: Option<(Entity<GuildSettingsView>, Subscription)>,
     switcher: Option<(Entity<QuickSwitcher>, Subscription)>,
     profile_card: Option<(String, Option<String>, Point<Pixels>)>,
     card_ticker: Option<gpui::Task<()>>,
@@ -208,6 +211,25 @@ impl Shell {
                     .detach();
                 }
                 "settings" => this.open_settings(window, cx),
+                // RHEIN_DEV_OPEN=guild-settings[=pane]: the selected guild's settings, once READY is in.
+                w if w.starts_with("guild-settings") || w.starts_with("guild-icon=") => {
+                    let what = w.to_owned();
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                        this.update_in(cx, |this, window, cx| {
+                            let Some(gid) = this.client.read(cx).selected_guild.clone() else { return };
+                            let pane = what.strip_prefix("guild-settings=").and_then(GuildPane::from_key).unwrap_or(GuildPane::Overview);
+                            this.open_guild_settings(gid, pane, window, cx);
+                            if let Some(path) = what.strip_prefix("guild-icon=")
+                                && let Some((view, _)) = &this.guild_settings
+                            {
+                                view.update(cx, |v, cx| v.dev_icon(path.into(), cx));
+                            }
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
                 "signout" => this.ask_sign_out(window, cx),
@@ -435,6 +457,7 @@ impl Shell {
             menu: MenuHost::default(),
             modal: None,
             settings: None,
+            guild_settings: None,
             switcher: None,
             profile_card: None,
             card_ticker: None,
@@ -657,6 +680,13 @@ impl Shell {
         let manage_guild = client.guild_can(&gid, perms::MANAGE_GUILD);
         let this = cx.weak_entity();
         let mut entries = Vec::new();
+        {
+            let (v, g) = (this.clone(), gid.clone());
+            entries.push(MenuEntry::item("Guild settings", move |window, cx| {
+                let g = g.clone();
+                v.update(cx, |v, cx| v.open_guild_settings(g, GuildPane::Overview, window, cx)).ok();
+            }).with_icon(Icon::Settings));
+        }
         {
             let (c, g) = (self.client.clone(), gid.clone());
             entries.push(MenuEntry::item("Invite people", move |_, cx| {
@@ -1421,6 +1451,24 @@ impl Shell {
             }
         });
         self.settings = Some((view, sub));
+        cx.notify();
+    }
+
+    /// A guild's settings over everything, on one of its pages.
+    pub(crate) fn open_guild_settings(&mut self, guild_id: String, pane: GuildPane, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let view = cx.new(|cx| GuildSettingsView::new(client, guild_id, pane, window, cx));
+        let sub = cx.subscribe_in(&view, window, |this, _, event: &GuildSettingsEvent, window, cx| match event {
+            GuildSettingsEvent::Close => this.close_guild_settings(window, cx),
+        });
+        self.guild_settings = Some((view, sub));
+        cx.notify();
+    }
+
+    fn close_guild_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.guild_settings = None;
+        let focus = self.chat.read(cx).composer_focus(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -2380,6 +2428,10 @@ impl Render for Shell {
             .settings
             .as_ref()
             .map(|(view, _)| motion::fade_in(div().absolute().inset_0().child(view.clone()), "settings-in", motion::FAST));
+        let guild_settings = self
+            .guild_settings
+            .as_ref()
+            .map(|(view, _)| motion::fade_in(div().absolute().inset_0().child(view.clone()), "guild-settings-in", motion::FAST));
         // Pointer input anywhere in the window counts as being here (keys are observed in `new`).
         let watch_pointer = {
             let (last, client) = (self.last_input.clone(), self.client.clone());
@@ -2458,6 +2510,7 @@ impl Render for Shell {
             .children(dialog)
             .children(sign_out)
             .children(settings)
+            .children(guild_settings)
             .children(switcher)
             .children(modal)
             .children(card)

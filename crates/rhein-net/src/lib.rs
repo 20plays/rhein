@@ -6,6 +6,6 @@ pub mod auth;
 pub mod discovery;
 pub mod gateway;
 
-pub use api::{Api, ApiError};
+pub use api::{Api, ApiError, ApiResult};
 pub use discovery::discover;
 pub use gateway::{GatewayEvent, GatewayHandle, GatewayStatus};

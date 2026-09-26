@@ -261,7 +261,11 @@ impl Render for CropDialog {
                 this.zoom_to(zoom, 0.5, 0.5, cx);
             })));
 
-        let title = if self.preset.round { "Crop your picture" } else { "Crop your banner" };
+        let title = match self.preset {
+            p if p.round => "Crop your picture",
+            p if p.width == p.height => "Crop the icon",
+            _ => "Crop your banner",
+        };
         let mut modal = Modal::new("crop-dialog")
             .title(title)
             .width(px(stage_w + 40.))

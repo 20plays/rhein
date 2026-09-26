@@ -79,6 +79,33 @@ pub struct Role {
     pub position: i64,
     pub permissions: Option<Value>,
     pub hoist: bool,
+    pub mentionable: bool,
+    /// Held by a bot for its own use; not assignable by hand.
+    pub managed: bool,
+    pub member_count: Option<i64>,
+    /// `permissions` as the server names them (`MANAGE_ROLES`, …).
+    pub permission_names: Vec<String>,
+}
+
+impl Role {
+    /// The colour as 0xRRGGBB; `None` for "no colour" (stored as 0).
+    pub fn rgb(&self) -> Option<u32> {
+        let n = match self.color.as_ref()? {
+            Value::Number(n) => n.as_u64()?,
+            Value::String(s) => s.trim_start_matches('#').parse::<u64>().ok().or_else(|| u64::from_str_radix(s.trim_start_matches('#'), 16).ok())?,
+            _ => return None,
+        };
+        (n != 0).then_some((n & 0xff_ffff) as u32)
+    }
+
+    /// The permission bits (they cross the wire as a decimal string).
+    pub fn bits(&self) -> u64 {
+        match self.permissions.as_ref() {
+            Some(Value::String(s)) => s.parse().unwrap_or(0),
+            Some(Value::Number(n)) => n.as_u64().unwrap_or(0),
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,6 +115,11 @@ pub struct Guild {
     pub name: String,
     pub icon_ref: Option<String>,
     pub owner: Option<String>,
+    /// `#name:server`, when the guild has an address of its own.
+    pub alias: Option<String>,
+    /// The longest the guild keeps media, in seconds; `None` for as long as the server does.
+    pub media_expiry_limit_secs: Option<i64>,
+    pub created_at: Option<Millis>,
     pub moved_to: Option<Value>,
     pub channels: Vec<Channel>,
     pub roles: Vec<Role>,

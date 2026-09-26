@@ -547,6 +547,26 @@ impl Api {
         self.send(req).await
     }
 
+    /// Uploads a guild's own picture (its icon) to that guild's server: a voucher from the guild
+    /// for `origin` (the guild's server name), then the bytes with it. The result's
+    /// `hash?cap=capability` becomes the `icon_ref`.
+    pub async fn upload_guild_media(&self, guild_id: &str, origin: &str, filename: &str, mime: &str, bytes: Vec<u8>) -> ApiResult<Attachment> {
+        use base64::Engine as _;
+        let answer: serde_json::Value = self
+            .post("/media/vouchers", &serde_json::json!({ "guild_id": guild_id, "origin": origin, "max_bytes": bytes.len() }))
+            .await?;
+        let voucher = serde_json::to_vec(&answer["voucher"]).unwrap_or_default();
+        let req = self
+            .http
+            .post(self.url("/media/voucher-upload"))
+            .header("Content-Type", mime)
+            .header("X-Telium-Filename", urlencoding::encode(filename).into_owned())
+            .header("X-Telium-Voucher", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(voucher))
+            .header("X-Telium-Purpose", "profile")
+            .body(bytes);
+        self.send(req).await
+    }
+
     pub async fn patch_profile(&self, patch: &serde_json::Value) -> ApiResult<serde_json::Value> {
         self.patch("/profile", patch).await
     }
@@ -747,6 +767,193 @@ impl Api {
     /// Answers the invite object; its `code` is what `join_invite` takes.
     pub async fn create_invite(&self, guild_id: &str, channel_id: Option<&str>) -> ApiResult<serde_json::Value> {
         self.post(&format!("/guilds/{guild_id}/invites"), &serde_json::json!({ "channel_id": channel_id })).await
+    }
+
+    // ---------------------------------------------------------------- guild administration
+    // One call to one server each: a guild has a single authority (web `guild-settings/*`).
+
+    pub async fn guild(&self, guild_id: &str) -> ApiResult<Guild> {
+        self.get(&format!("/guilds/{guild_id}")).await
+    }
+
+    pub async fn delete_guild(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}")).await
+    }
+
+    pub async fn set_guild_alias(&self, guild_id: &str, alias: &str) -> ApiResult<serde_json::Value> {
+        self.put(&format!("/guilds/{guild_id}/alias"), &serde_json::json!({ "alias": alias })).await
+    }
+
+    pub async fn clear_guild_alias(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/alias")).await
+    }
+
+    pub async fn transfer_ownership(&self, guild_id: &str, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/transfer-ownership"), &serde_json::json!({ "user_id": user_id })).await
+    }
+
+    pub async fn roles(&self, guild_id: &str) -> ApiResult<RoleList> {
+        self.get(&format!("/guilds/{guild_id}/roles")).await
+    }
+
+    /// `body`: `name`, and optionally `color` (0xRRGGBB), `permissions` (names), `hoist`,
+    /// `mentionable`, `position`.
+    pub async fn create_role(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/roles"), body).await
+    }
+
+    pub async fn patch_role(&self, guild_id: &str, role_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/guilds/{guild_id}/roles/{role_id}"), body).await
+    }
+
+    pub async fn delete_role(&self, guild_id: &str, role_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/roles/{role_id}")).await
+    }
+
+    /// New positions for some roles, `(id, position)`.
+    pub async fn reorder_roles(&self, guild_id: &str, places: &[(String, i64)]) -> ApiResult<serde_json::Value> {
+        let roles: Vec<serde_json::Value> = places.iter().map(|(id, position)| serde_json::json!({ "id": id, "position": position })).collect();
+        self.patch(&format!("/guilds/{guild_id}/roles"), &serde_json::json!({ "roles": roles })).await
+    }
+
+    /// New positions (and parents) for some channels, `(id, position, parent)`.
+    pub async fn reorder_channels(&self, guild_id: &str, places: &[(String, i64, Option<String>)]) -> ApiResult<serde_json::Value> {
+        let channels: Vec<serde_json::Value> = places
+            .iter()
+            .map(|(id, position, parent)| serde_json::json!({ "id": id, "position": position, "parent_id": parent }))
+            .collect();
+        self.patch(&format!("/guilds/{guild_id}/channels"), &serde_json::json!({ "channels": channels })).await
+    }
+
+    /// Sets (or, with both zero, clears) a channel overwrite for a `role` or a `member`.
+    pub async fn set_overwrite(&self, channel_id: &str, target_type: &str, target_id: &str, allow: u64, deny: u64) -> ApiResult<serde_json::Value> {
+        self.put(
+            &format!("/channels/{channel_id}/overwrites/{target_type}/{}", urlencoding::encode(target_id)),
+            &serde_json::json!({ "allow": allow.to_string(), "deny": deny.to_string() }),
+        )
+        .await
+    }
+
+    pub async fn bans(&self, guild_id: &str) -> ApiResult<BanList> {
+        self.get(&format!("/guilds/{guild_id}/bans")).await
+    }
+
+    pub async fn unban(&self, guild_id: &str, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/bans/{}", urlencoding::encode(user_id))).await
+    }
+
+    pub async fn invites(&self, guild_id: &str) -> ApiResult<InviteList> {
+        self.get(&format!("/guilds/{guild_id}/invites")).await
+    }
+
+    /// An invite that stops after `max_uses` joins or `expires_in_secs`, if given.
+    pub async fn create_invite_with(&self, guild_id: &str, channel_id: Option<&str>, max_uses: Option<i64>, expires_in_secs: Option<i64>) -> ApiResult<InviteInfo> {
+        self.post(
+            &format!("/guilds/{guild_id}/invites"),
+            &serde_json::json!({ "channel_id": channel_id, "max_uses": max_uses, "expires_in_secs": expires_in_secs }),
+        )
+        .await
+    }
+
+    pub async fn revoke_invite(&self, guild_id: &str, code: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/invites/{}", urlencoding::encode(code))).await
+    }
+
+    pub async fn audit_log(&self, guild_id: &str) -> ApiResult<AuditLog> {
+        self.get(&format!("/guilds/{guild_id}/audit-log")).await
+    }
+
+    /// `data` is the file, base64; `animated`/`format`/`mime` as the web client sends them.
+    pub async fn create_emoji(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/emojis"), body).await
+    }
+
+    pub async fn create_sticker(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/stickers"), body).await
+    }
+
+    pub async fn delete_emoji(&self, guild_id: &str, emoji_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/emojis/{emoji_id}")).await
+    }
+
+    /// Deletes one member's recent messages, in one channel or all, at most `limit`.
+    pub async fn purge_messages(&self, guild_id: &str, user_id: &str, channel_id: Option<&str>, limit: Option<i64>) -> ApiResult<serde_json::Value> {
+        self.post(
+            &format!("/guilds/{guild_id}/moderation/purge"),
+            &serde_json::json!({ "user_id": user_id, "channel_id": channel_id, "limit": limit }),
+        )
+        .await
+    }
+
+    pub async fn guild_voice_regions(&self, guild_id: &str) -> ApiResult<VoiceRegionList> {
+        self.get(&format!("/guilds/{guild_id}/voice/regions")).await
+    }
+
+    pub async fn add_guild_voice_region(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/voice/regions"), body).await
+    }
+
+    pub async fn delete_guild_voice_region(&self, guild_id: &str, name: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/voice/regions/{}", urlencoding::encode(name))).await
+    }
+
+    pub async fn set_guild_voice_region_default(&self, guild_id: &str, name: &str) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/guilds/{guild_id}/voice/regions/default"), &serde_json::json!({ "name": name })).await
+    }
+
+    /// The join gate: account age, domain and origin policies, screening questions, held first
+    /// messages. Kept as the server's JSON, which the gate page reads and writes whole.
+    pub async fn gates(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/gates")).await
+    }
+
+    pub async fn set_gates(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.put(&format!("/guilds/{guild_id}/gates"), body).await
+    }
+
+    pub async fn gate_curators(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/gates/curators")).await
+    }
+
+    pub async fn refresh_gate_feeds(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/gates/refresh-feeds"), &serde_json::json!({})).await
+    }
+
+    pub async fn applicants(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/applicants")).await
+    }
+
+    /// `decision`: `approve` or `reject`.
+    pub async fn decide_applicant(&self, guild_id: &str, user_id: &str, decision: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/applicants/{}", urlencoding::encode(user_id)), &serde_json::json!({ "decision": decision })).await
+    }
+
+    pub async fn held_messages(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/held")).await
+    }
+
+    pub async fn decide_held(&self, guild_id: &str, held_id: &str, decision: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/held/{held_id}"), &serde_json::json!({ "decision": decision })).await
+    }
+
+    pub async fn guild_bots(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/bots")).await
+    }
+
+    pub async fn preview_bot(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/bots/preview"), body).await
+    }
+
+    pub async fn install_bot(&self, guild_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/bots"), body).await
+    }
+
+    pub async fn patch_bot(&self, guild_id: &str, bot_user_id: &str, body: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.patch(&format!("/guilds/{guild_id}/bots/{}", urlencoding::encode(bot_user_id)), body).await
+    }
+
+    pub async fn uninstall_bot(&self, guild_id: &str, bot_user_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/bots/{}", urlencoding::encode(bot_user_id))).await
     }
 }
 

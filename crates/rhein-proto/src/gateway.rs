@@ -167,6 +167,8 @@ pub enum Event {
     ThreadUpsert(crate::rest::Thread),
     ThreadDelete { id: String, parent_id: Option<String> },
     EmojiUpdate { guild_id: String },
+    /// A role was created, changed, moved or deleted.
+    RoleChange { guild_id: String },
     FriendUpdate(crate::rest::Friend),
     FriendRemove { user_id: String },
     /// Something happened in a private conversation (a new frame, a request decision, a member leaving).
@@ -236,6 +238,7 @@ impl Event {
                 guild_id: d.get("guild_id").and_then(Value::as_str).map(str::to_owned),
             },
             "GUILD_UPDATE" => Event::GuildUpdate(d),
+            "ROLE_CREATE" | "ROLE_UPDATE" | "ROLE_DELETE" => Event::RoleChange { guild_id: str_of(&d, "guild_id") },
             "GUILD_DELETE" => Event::GuildDelete { id: str_of(&d, "id") },
             "MEMBER_ADD" => Event::MemberAdd(d),
             "MEMBER_UPDATE" => Event::MemberUpdate(d),

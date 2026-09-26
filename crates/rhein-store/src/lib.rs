@@ -3,6 +3,8 @@
 
 pub mod autocomplete;
 pub mod client;
+/// The server API, for views that call a server directly (the guild settings).
+pub use rhein_net;
 pub mod conversations;
 pub mod crop;
 pub mod guild_keys;

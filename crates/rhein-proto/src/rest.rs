@@ -371,3 +371,83 @@ pub struct Conversation {
 pub struct ConversationList {
     pub conversations: Vec<Conversation>,
 }
+
+// ------------------------------------------------------------------ guild administration
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RoleList {
+    pub roles: Vec<crate::model::Role>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Ban {
+    pub user_id: String,
+    pub reason: Option<String>,
+    pub created_at: Option<Millis>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct BanList {
+    pub bans: Vec<Ban>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InviteInfo {
+    pub code: String,
+    pub url: Option<String>,
+    pub channel_id: Option<String>,
+    pub creator: Option<String>,
+    pub uses: i64,
+    pub max_uses: Option<i64>,
+    pub expires_at: Option<Millis>,
+    pub created_at: Option<Millis>,
+    pub expired: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InviteList {
+    pub invites: Vec<InviteInfo>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AuditEntry {
+    pub id: String,
+    pub actor: String,
+    /// `member.ban`, `role.update`, `invite.revoke`, …
+    pub action: String,
+    pub target: Option<String>,
+    pub data: Value,
+    pub created_at: Millis,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AuditLog {
+    pub entries: Vec<AuditEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct VoiceRegion {
+    pub name: String,
+    pub sfu: Option<String>,
+    pub turn: Option<String>,
+    /// Added by this guild rather than offered by the server.
+    pub guild: bool,
+    pub default: bool,
+    pub healthy: bool,
+    pub latency_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct VoiceRegionList {
+    pub regions: Vec<VoiceRegion>,
+}
+

@@ -3,6 +3,7 @@ pub mod chat;
 pub mod crop;
 pub mod emoji_picker;
 pub mod gif_picker;
+pub mod guild_settings;
 pub mod home;
 pub mod login;
 pub mod message_text;

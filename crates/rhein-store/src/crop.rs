@@ -22,6 +22,8 @@ pub struct Preset {
 
 pub const AVATAR: Preset = Preset { width: 256, height: 256, max_bytes: 256 * 1024, round: true };
 pub const BANNER: Preset = Preset { width: 600, height: 200, max_bytes: 256 * 1024, round: false };
+/// A guild's icon: square, drawn with rounded corners.
+pub const ICON: Preset = Preset { width: 256, height: 256, max_bytes: 256 * 1024, round: false };
 
 pub const MAX_ZOOM: f64 = 4.;
 
