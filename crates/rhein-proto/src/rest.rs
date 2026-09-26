@@ -288,6 +288,8 @@ pub struct CustomEmoji {
 #[serde(default)]
 pub struct Expressions {
     pub emojis: Vec<CustomEmoji>,
+    /// Stickers carry the same fields; `animated` is a GIF.
+    pub stickers: Vec<CustomEmoji>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

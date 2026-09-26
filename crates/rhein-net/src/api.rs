@@ -703,6 +703,11 @@ impl Api {
         self.get(&path).await
     }
 
+    /// A guild's emoji and stickers.
+    pub async fn expression_pack(&self, guild_id: &str) -> ApiResult<Expressions> {
+        self.get(&format!("/guilds/{guild_id}/expressions")).await
+    }
+
     pub async fn expressions(&self, guild_id: &str) -> ApiResult<Vec<CustomEmoji>> {
         Ok(self.get::<Expressions>(&format!("/guilds/{guild_id}/expressions")).await?.emojis)
     }

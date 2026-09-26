@@ -1094,6 +1094,12 @@ impl Client {
         Some(crate::media::media_url(&doc.api, reference, None))
     }
 
+    /// The API base (`https://…`) of the server a guild lives on.
+    pub fn guild_api_base(&self, guild_id: &str) -> Option<String> {
+        let entry = self.guild(guild_id)?;
+        Some(self.server(&entry.server)?.doc.as_ref()?.api.trim_end_matches('/').to_owned())
+    }
+
     /// The name of the server a guild lives on.
     pub fn guild_server(&self, guild_id: &str) -> Option<&str> {
         self.guild(guild_id).map(|g| g.server.as_str())

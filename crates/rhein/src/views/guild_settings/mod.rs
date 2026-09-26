@@ -3,8 +3,11 @@
 //! has exactly one authority; the list only shows the pages this account may use there, and the
 //! server checks each call again.
 
+mod bots;
 mod channels;
+mod expressions;
 mod lists;
+mod moderation;
 mod overview;
 mod roles;
 
@@ -126,6 +129,9 @@ pub struct GuildSettingsView {
     pub(crate) roles: roles::State,
     pub(crate) channel_perms: channels::State,
     pub(crate) lists: lists::State,
+    pub(crate) expressions: expressions::State,
+    pub(crate) moderation: moderation::State,
+    pub(crate) bots: bots::State,
     pub(crate) crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
     pub(crate) subs: Vec<Subscription>,
@@ -151,6 +157,9 @@ impl GuildSettingsView {
         let roles = roles::State::new(cx);
         let channel_perms = channels::State::new(cx);
         let lists = lists::State::new(cx);
+        let expressions = expressions::State::new();
+        let moderation = moderation::State::new(cx);
+        let bots = bots::State::new(cx);
         let mut view = Self {
             client,
             guild_id,
@@ -162,6 +171,9 @@ impl GuildSettingsView {
             roles,
             channel_perms,
             lists,
+            expressions,
+            moderation,
+            bots,
             crop: None,
             crop_focus: false,
             subs,
@@ -197,6 +209,10 @@ impl GuildSettingsView {
             Pane::Bans => self.load_bans(cx),
             Pane::Audit => self.load_audit(cx),
             Pane::Voice => self.load_regions(cx),
+            Pane::Expressions => self.load_expressions(cx),
+            Pane::Gates => self.load_gates(cx),
+            Pane::Queue => self.load_queue(cx),
+            Pane::Bots => self.load_bots(cx),
             _ => {}
         }
     }
@@ -373,7 +389,10 @@ impl Render for GuildSettingsView {
             Pane::Audit => self.audit_page(&t, cx),
             Pane::Purge => self.purge_page(&t, cx),
             Pane::Voice => self.voice_page(&t, cx),
-            other => hint(format!("{} is on its way.", other.label()), &t).into_any_element(),
+            Pane::Expressions => self.expressions_page(&t, cx),
+            Pane::Gates => self.gates_page(&t, cx),
+            Pane::Queue => self.queue_page(&t, cx),
+            Pane::Bots => self.bots_page(&t, cx),
         };
         if let Some((dialog, _)) = &self.crop
             && std::mem::take(&mut self.crop_focus)
