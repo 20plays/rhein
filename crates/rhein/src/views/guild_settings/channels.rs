@@ -78,7 +78,7 @@ impl GuildSettingsView {
         let Some(entry) = client.guild(&self.guild_id) else { return div().into_any_element() };
         let channels: Vec<_> = entry.ordered_channels().into_iter().cloned().collect();
         let mut roles = entry.guild.roles.clone();
-        roles.sort_by(|a, b| b.position.cmp(&a.position));
+        roles.sort_by_key(|r| std::cmp::Reverse(r.position));
         let names: HashMap<String, String> = entry.guild.roles.iter().map(|r| (r.id.clone(), r.name.clone())).collect();
         let state = &self.channel_perms;
 
