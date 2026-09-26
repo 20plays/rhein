@@ -23,10 +23,10 @@ const QUICK_REACTIONS: [&str; 1] = ["👍"];
 const ACTION_BAR_W: f32 = 4. * 28. + 14.;
 /// Link previews and embed cards.
 const IMAGE_MAX_W: f32 = 400.;
-const IMAGE_MAX_H: f32 = 300.;
-/// Pictures sent as themselves are shown whole, as wide as the column allows and at most this
-/// high.
-const PICTURE_MAX_H: f32 = 420.;
+/// Every picture in the chat (an attachment, a GIF, a link to a picture, a preview's image) is
+/// shown whole and at most this high: a larger one is scaled down to it, keeping its shape, a
+/// smaller one keeps its own size.
+const PICTURE_MAX_H: f32 = 300.;
 /// A picture of unknown size, until it loads.
 const PICTURE_UNKNOWN: (f32, f32) = (400., 300.);
 
@@ -65,9 +65,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let view_state = ctx.view.upgrade().map(|v| {
         let v = v.read(cx);
         let selected = v.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range()));
-        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)), selected)
+        let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
+        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)), (selected, hovered))
     });
-    let (revealed, highlighted, fresh, selected) = view_state.unwrap_or_default();
+    let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
     let doc = markdown::parse(&message.content);
@@ -180,6 +181,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         me: me.as_deref(),
         revealed: &revealed,
         selected,
+        hovered,
         pending: pending && !failed,
     };
     let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(&doc, &text_ctx, cx));
@@ -507,9 +509,9 @@ fn gif_share_link(ix: usize, n: usize, url: String, provider: &str, t: &Theme) -
     div()
         .id(SharedString::from(format!("gif-link-{ix}-{n}")))
         .text_size(text::SM)
-        .text_color(t.accent)
+        .text_color(t.link)
         .cursor_pointer()
-        .hover(|s| s.underline())
+        .hover(|s| s.text_color(t.link_hover).underline())
         .on_click(move |_, _, cx| cx.open_url(&url))
         .child(format!("Open GIF on {provider}"))
         .into_any_element()
@@ -755,7 +757,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                     view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
                 }
             })
-            .child(img(image).max_w(px(IMAGE_MAX_W)).max_h(px(IMAGE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(image).max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
             .when(is_video, |d| {
                 d.child(
                     div().absolute().inset_0().flex().items_center().justify_center().child(
@@ -800,9 +802,9 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                     div()
                         .id(SharedString::from(format!("embed-title-{ix}-{n}")))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t.accent)
+                        .text_color(t.link)
                         .cursor_pointer()
-                        .hover(|s| s.underline())
+                        .hover(|s| s.text_color(t.link_hover).underline())
                         .on_click(move |_, _, cx| cx.open_url(&link))
                         .child(title),
                 )
