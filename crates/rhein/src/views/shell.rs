@@ -1723,7 +1723,7 @@ impl Shell {
 
     /// The whole profile, as Discord shows it: the card on the left, what they are doing and
     /// what you share on the right.
-    fn render_full_profile(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_full_profile(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (user_id, guild_id, tab) = self.full_profile.clone()?;
         let t = cx.theme().clone();
         let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
@@ -1907,7 +1907,7 @@ impl Shell {
                     list = list.child(row(
                         id,
                         n.clone(),
-                        crate::views::guild_settings::guild_face(&n, url, 32., &t),
+                        crate::views::guild_settings::guild_face(&n, url, 32., &t, window),
                         cx,
                         Box::new(move |v, cx| {
                             v.full_profile = None;
@@ -2985,7 +2985,7 @@ fn presence_dot(presence: Presence, cx: &App) -> AnyElement {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sidebar = self.sidebar(cx);
         let status = StatusLine::new(self.client.clone());
         let members = self.render_panel(cx);
@@ -2995,7 +2995,7 @@ impl Render for Shell {
         let ringing = self.ringing_card(cx);
         let modal = self.render_modal(cx);
         let card = self.render_profile_card(cx);
-        let full_profile = self.render_full_profile(cx);
+        let full_profile = self.render_full_profile(window, cx);
         let switcher = self.switcher.as_ref().map(|(view, _)| {
             motion::fade_in(
                 div()

@@ -67,7 +67,7 @@ fn alias_localpart(address: Option<&str>) -> String {
 }
 
 impl GuildSettingsView {
-    pub(crate) fn overview_page(&mut self, t: &Theme, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn overview_page(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let Some(g) = client.guild(&self.guild_id).map(|e| e.guild.clone()) else { return div().into_any_element() };
         let icon_url = client.guild_icon_url(&self.guild_id);
@@ -88,7 +88,7 @@ impl GuildSettingsView {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(guild_face(&g.name, icon_url.clone(), 64., t))
+                .child(guild_face(&g.name, icon_url.clone(), 64., t, window))
                 .child(
                     div()
                         .flex()

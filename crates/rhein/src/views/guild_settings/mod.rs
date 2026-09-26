@@ -308,7 +308,7 @@ pub(crate) fn input(placeholder: &'static str, text_: impl Into<SharedString>, c
 }
 
 /// A guild's face: its icon, or its initial on a tile.
-pub(crate) fn guild_face(name: &str, url: Option<String>, size: f32, t: &Theme) -> AnyElement {
+pub(crate) fn guild_face(name: &str, url: Option<String>, size: f32, t: &Theme, window: &Window) -> AnyElement {
     let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     let tile = div()
         .size(px(size))
@@ -323,7 +323,8 @@ pub(crate) fn guild_face(name: &str, url: Option<String>, size: f32, t: &Theme) 
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(t.text);
     match url {
-        Some(url) => tile.child(img(url).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
+        // Shrunk properly to the pixels it covers: GPUI's own sampling is jagged.
+        Some(url) => tile.child(img(rhein_ui::scaled_image::scaled(url, px(size), window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
         None => tile.child(initial).into_any_element(),
     }
 }
@@ -357,7 +358,7 @@ impl Render for GuildSettingsView {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(guild_face(&guild_name, icon_url, 24., &t))
+                .child(guild_face(&guild_name, icon_url, 24., &t, window))
                 .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(guild_name.clone())),
         );
         for pane in Pane::ALL {
