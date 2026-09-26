@@ -1807,7 +1807,23 @@ impl Shell {
                                 .flex()
                                 .flex_col()
                                 .child(div().flex().items_center().gap_2().child(div().text_size(text::XL).font_weight(FontWeight::SEMIBOLD).child(name.clone())).when(is_bot, |d| d.child(Tag("BOT"))))
-                                .child(div().text_size(text::SM).text_color(t.text_faint).child(user_id.clone()))
+                                // The address: a click copies it, as on the card.
+                                .child({
+                                    let (id, c) = (user_id.clone(), self.client.clone());
+                                    div()
+                                        .id("full-profile-address")
+                                        .text_size(text::SM)
+                                        .text_color(t.text_faint)
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(t.text_muted))
+                                        .tooltip(tooltip("Copy"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                                            let text = format!("Copied {id}");
+                                            c.update(cx, |c, cx| c.flash_notice(text, cx));
+                                        })
+                                        .child(user_id.clone())
+                                })
                                 .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
                         )
                         .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| {
