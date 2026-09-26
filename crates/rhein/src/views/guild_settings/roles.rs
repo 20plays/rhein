@@ -78,6 +78,14 @@ impl GuildSettingsView {
             }
         });
         self.subs.push(sub);
+        // The audit log's filter narrows as you type.
+        let filter = self.lists.audit_filter.clone();
+        let sub = cx.subscribe(&filter, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Changed) {
+                cx.notify();
+            }
+        });
+        self.subs.push(sub);
     }
 
     pub(crate) fn load_roles(&mut self, cx: &mut Context<Self>) {

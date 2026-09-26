@@ -4,6 +4,7 @@
 //! server checks each call again.
 
 mod channels;
+mod lists;
 mod overview;
 mod roles;
 
@@ -124,6 +125,7 @@ pub struct GuildSettingsView {
     pub(crate) overview: overview::State,
     pub(crate) roles: roles::State,
     pub(crate) channel_perms: channels::State,
+    pub(crate) lists: lists::State,
     pub(crate) crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
     pub(crate) subs: Vec<Subscription>,
@@ -148,6 +150,7 @@ impl GuildSettingsView {
         let overview = overview::State::new(&client, &guild_id, cx);
         let roles = roles::State::new(cx);
         let channel_perms = channels::State::new(cx);
+        let lists = lists::State::new(cx);
         let mut view = Self {
             client,
             guild_id,
@@ -158,6 +161,7 @@ impl GuildSettingsView {
             overview,
             roles,
             channel_perms,
+            lists,
             crop: None,
             crop_focus: false,
             subs,
@@ -189,6 +193,10 @@ impl GuildSettingsView {
         match pane {
             Pane::Overview => self.overview.reset(&self.client, &self.guild_id, cx),
             Pane::Roles => self.load_roles(cx),
+            Pane::Invites => self.load_invites(cx),
+            Pane::Bans => self.load_bans(cx),
+            Pane::Audit => self.load_audit(cx),
+            Pane::Voice => self.load_regions(cx),
             _ => {}
         }
     }
@@ -360,6 +368,11 @@ impl Render for GuildSettingsView {
             Pane::Overview => self.overview_page(&t, window, cx),
             Pane::Roles => self.roles_page(&t, cx),
             Pane::Channels => self.channels_page(&t, cx),
+            Pane::Invites => self.invites_page(&t, cx),
+            Pane::Bans => self.bans_page(&t, cx),
+            Pane::Audit => self.audit_page(&t, cx),
+            Pane::Purge => self.purge_page(&t, cx),
+            Pane::Voice => self.voice_page(&t, cx),
             other => hint(format!("{} is on its way.", other.label()), &t).into_any_element(),
         };
         if let Some((dialog, _)) = &self.crop
