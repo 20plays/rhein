@@ -107,7 +107,8 @@ impl Pane {
         })
     }
 
-    /// The pane named in a dev hook or a caller (`roles`, `audit`, …).
+    /// The pane named in the dev hook (`RHEIN_DEV_OPEN=guild-settings=roles`).
+    #[cfg(debug_assertions)]
     pub fn from_key(key: &str) -> Option<Pane> {
         Pane::ALL.into_iter().find(|p| format!("{p:?}").eq_ignore_ascii_case(key))
     }
