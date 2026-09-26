@@ -2174,6 +2174,11 @@ impl Client {
         }
     }
 
+    /// The roles this user holds in a guild, from READY.
+    pub fn my_roles(&self, guild_id: &str) -> Vec<String> {
+        self.guild(guild_id).and_then(|g| g.guild.me.as_ref()).map(roles_of).unwrap_or_default()
+    }
+
     /// This user's permissions in a channel, from READY's roles and overwrites. Threads inherit
     /// their parent's.
     pub fn permissions(&self, channel_id: &str) -> u64 {
@@ -2187,11 +2192,7 @@ impl Client {
             channel = entry.guild.channels.iter().find(|p| p.id == parent).or(channel);
         }
         let str_field = |key: &str| me.get(key).and_then(|v| v.as_str()).unwrap_or_default();
-        let roles: Vec<String> = me
-            .get("roles")
-            .and_then(|r| r.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default();
+        let roles = roles_of(me);
         let timed_out = me.get("timeout_until").and_then(|v| v.as_i64()).is_some_and(|until| until > now_ms());
         let owner = entry.guild.owner.as_deref() == Some(user_id)
             || me.get("is_owner").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3343,4 +3344,12 @@ mod tests {
         apply_reaction(&mut r, "👍", "@b:x", false, Some("@a:x"));
         assert!(r.is_empty());
     }
+}
+
+/// The role ids in a READY `me` object.
+fn roles_of(me: &serde_json::Value) -> Vec<String> {
+    me.get("roles")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
 }

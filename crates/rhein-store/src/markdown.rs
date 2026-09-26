@@ -291,16 +291,23 @@ pub fn links_in(content: &str) -> Vec<String> {
 
 /// Every user id the text mentions (for highlighting a message that mentions you).
 pub fn mentions(doc: &Document, user_id: &str) -> bool {
-    fn walk(spans: &[Span], user_id: &str) -> bool {
+    mentions_me(doc, user_id, &[])
+}
+
+/// Whether the text calls on this user: by name, through @everyone/@here, or through one of
+/// the `roles` they hold.
+pub fn mentions_me(doc: &Document, user_id: &str, roles: &[String]) -> bool {
+    fn walk(spans: &[Span], user_id: &str, roles: &[String]) -> bool {
         spans.iter().any(|s| match s {
             Span::User(u) => u == user_id,
+            Span::Role(r) => roles.contains(r),
             Span::Broadcast(_) => true,
-            Span::Bold(i) | Span::Italic(i) | Span::Strike(i) | Span::Spoiler(i) => walk(i, user_id),
+            Span::Bold(i) | Span::Italic(i) | Span::Strike(i) | Span::Spoiler(i) => walk(i, user_id, roles),
             _ => false,
         })
     }
     doc.blocks.iter().any(|b| match b {
-        Block::Text(s) | Block::Quote(s) => walk(s, user_id),
+        Block::Text(s) | Block::Quote(s) => walk(s, user_id, roles),
         Block::CodeBlock(_) => false,
     })
 }
@@ -311,6 +318,17 @@ mod tests {
 
     fn text(s: &str) -> Span {
         Span::Text(s.into())
+    }
+
+    #[test]
+    fn who_a_message_calls_on() {
+        let role = "01ABCDEFGHJKMNPQRSTVWXYZ00";
+        let me = "@me:x";
+        assert!(mentions_me(&parse("hi @me:x"), me, &[]));
+        assert!(mentions_me(&parse(&format!("ping <@&{role}>")), me, &[role.into()]));
+        assert!(!mentions_me(&parse(&format!("ping <@&{role}>")), me, &[]));
+        assert!(mentions_me(&parse("**all of you** @everyone"), me, &[]));
+        assert!(!mentions_me(&parse("`@me:x` in code"), me, &[]));
     }
 
     #[test]

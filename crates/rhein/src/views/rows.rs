@@ -72,7 +72,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
     let doc = markdown::parse(&message.content);
-    let mentions_me = me.as_deref().is_some_and(|me| !mine && markdown::mentions(&doc, me));
+    // Called on: by name, @everyone, a role we hold, or a reply to one of our messages.
+    let mentions_me = me.as_deref().is_some_and(|me| {
+        let roles = guild_id.as_deref().map(|g| client.my_roles(g)).unwrap_or_default();
+        let replied = message.reply_author.as_deref().or_else(|| {
+            message.reply_to.as_deref().and_then(|p| client.find_message(channel_id, p)).map(|p| p.author.as_str())
+        }) == Some(me);
+        !mine && (replied || markdown::mentions_me(&doc, me, &roles))
+    });
 
     // Previews: links outside code, looked up lazily.
     let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
@@ -293,7 +300,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let row_bg: Option<Hsla> = if highlighted {
         Some(t.accent_soft.into())
     } else if mentions_me {
-        Some(Hsla::from(t.warning).opacity(0.07))
+        Some(Hsla::from(t.warning).opacity(0.10))
     } else {
         None
     };
@@ -307,8 +314,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .when(grouped, |d| d.py_0p5())
         .when(!grouped, |d| if prefs.compact { d.pt_1p5().pb_0p5() } else { d.pt_3().pb_0p5() })
         .when_some(row_bg, |d, bg| d.bg(bg))
-        .when(mentions_me, |d| d.border_l_2().border_color(t.warning))
+        // The bar lies over the row's edge rather than taking room, so the text stays in line
+        // with its neighbours.
+        .when(mentions_me, |d| d.child(div().absolute().left_0().top_0().bottom_0().w(px(2.)).bg(t.warning)))
         .when(row_bg.is_none(), |d| d.hover(|s| s.bg(t.bg_hover)))
+        .when(mentions_me && !highlighted, |d| {
+            let lit = Hsla::from(t.warning).opacity(0.16);
+            d.hover(move |s| s.bg(lit))
+        })
         .children(reply_quote)
         .child(div().flex().gap_4().pr(px(ACTION_BAR_W)).child(gutter).child(body))
         .children(actions)
