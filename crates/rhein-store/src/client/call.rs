@@ -431,6 +431,11 @@ impl Client {
         self.push_voice_state(cx);
     }
 
+    /// Whether we are in the call of this voice channel.
+    pub fn in_voice_channel(&self, channel_id: &str) -> bool {
+        self.call.as_ref().is_some_and(|c| !c.conversation && c.channel_id == channel_id)
+    }
+
     pub fn voice_muted(&self) -> bool {
         self.prefs.voice.muted
     }

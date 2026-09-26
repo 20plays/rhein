@@ -2625,13 +2625,19 @@ impl Shell {
                 let (id, voice) = (ch.id.clone(), ch.is_voice());
                 let client = self.client.clone();
                 // A click opens a voice channel's window; a double click joins its call.
+                let name = ch.name.clone();
                 row = row.on_click(move |e, _, cx| {
                     let id = id.clone();
                     let join = voice && e.click_count() >= 2;
+                    let hint = voice && e.click_count() == 1;
+                    let name = name.clone();
                     client.update(cx, |c, cx| {
                         c.select_channel(id.clone(), cx);
                         if join {
                             c.join_voice(id, cx);
+                        } else if hint && !c.in_voice_channel(&id) {
+                            // A single click only opens the channel: say how to join.
+                            c.flash_notice(format!("Double-click {name} to join the call."), cx);
                         }
                     });
                 });
