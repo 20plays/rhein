@@ -47,6 +47,14 @@ gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70f
 debug = false
 opt-level = 2
 
+# What `./rheinprod` builds and installs: the release build, optimised across crates and with
+# its symbols stripped. Slower to build than `--release`, which stays quick for development.
+[profile.production]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+strip = true
+
 # openmls with Telium's GroupInfo external_pub encoding; see vendor/openmls/RHEIN.md.
 [patch.crates-io]
 openmls = { path = "vendor/openmls" }

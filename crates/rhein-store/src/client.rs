@@ -400,7 +400,7 @@ impl Client {
             gif_favorites: Vec::new(),
             gif_shares: HashMap::new(),
             sync: None,
-            null_audio: std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
+            null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,
             speaking_task: None,
             renew_ticker: None,
@@ -551,7 +551,12 @@ impl Client {
     /// gateway the current token for its next connection; a session refused in between renews
     /// itself on the spot (`Api`). As the web client does, a minute apart and on waking.
     pub fn freshen_sessions(&mut self, cx: &mut Context<Self>) {
-        let margin = std::env::var("RHEIN_RENEW_MARGIN_SECS").ok().and_then(|s| s.parse().ok()).map_or(RENEW_BEFORE, Duration::from_secs);
+        // RHEIN_RENEW_MARGIN_SECS forces early renewals in development builds, for testing.
+        let margin = std::env::var("RHEIN_RENEW_MARGIN_SECS")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|s| s.parse().ok())
+            .map_or(RENEW_BEFORE, Duration::from_secs);
         let live: Vec<(String, Api)> = self.servers.iter().filter_map(|s| s.api.clone().map(|api| (s.name.clone(), api))).collect();
         let io = self.io.clone();
         cx.spawn(async move |this, cx| {

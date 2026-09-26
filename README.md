@@ -47,7 +47,7 @@ scripts/dev-server.sh b      # Telium "b.localhost" on :8449, federates with a
 cargo run -p rhein
 ```
 
-The login form defaults to `localhost:8448` (`RHEIN_SERVER` overrides it). Saved accounts are stored in `~/.config/rhein/accounts.json` (mode 0600), or in `RHEIN_CONFIG_DIR` if that is set; a `session.json` from earlier versions is taken over as the first account.
+In debug builds the login form defaults to `localhost:8448` (`RHEIN_SERVER` overrides it); a release starts with an empty server field. Saved accounts are stored in `~/.config/rhein/accounts.json` (mode 0600), or in `RHEIN_CONFIG_DIR` if that is set; a `session.json` from earlier versions is taken over as the first account.
 
 Invites are entered as `server/CODE`, for example `localhost:8449/~abcd1234`.
 
@@ -68,6 +68,19 @@ cargo run -p rhein-rpc --example watch              # print what Rhein would sha
 ```
 
 Debug builds can start on a given screen, for screenshots: `RHEIN_DEV_OPEN=home|settings|settings=Activity|join|switcher|signout|account|switch=@user:server|profile=@user:server`.
+
+## Installing it
+
+```sh
+./rheinprod                 # check system packages, build, install into /usr (sudo when needed)
+./rheinprod --prefix ~/.local
+./rheinprod --build-only    # just target/production/rhein
+./rheinprod --uninstall
+```
+
+`rheinprod` first looks for the system packages Rhein needs and offers to install the missing ones with pacman, apt, dnf or zypper (`--yes` without asking, `--no-deps` to skip). The list covers the compilers and headers for the build, and ALSA, PipeWire and the Vulkan loader for running it. It also covers `xdg-desktop-portal` with this desktop's backend: `-wlr` on sway and other wlroots compositors, `-hyprland`, `-gnome` or `-kde`. On wlroots and Hyprland it adds `-gtk` too, since their portals share screens but have no file chooser.
+
+It then builds the `production` profile, a release build with thin LTO and stripped symbols. It installs the binary as `rhein`, the desktop entry `chat.rhein.Rhein.desktop` (which notifications refer to) and its icon. Production builds have none of the development hooks: `RHEIN_DEV_*`, `RHEIN_AUDIO`, `RHEIN_IDLE_SECS`, `RHEIN_RENEW_MARGIN_SECS` and the localhost default exist in debug builds only. Fonts, icons and sounds are compiled into the binary.
 
 ## Tests
 

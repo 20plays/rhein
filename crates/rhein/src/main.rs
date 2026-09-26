@@ -11,7 +11,9 @@ use rhein_store::{Client, Io};
 actions!(rhein, [Quit]);
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // A release says only what went wrong; RUST_LOG still asks for more.
+    let level = if cfg!(debug_assertions) { "info" } else { "warn" };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
 
     let io = match Io::new() {
         Ok(io) => io,

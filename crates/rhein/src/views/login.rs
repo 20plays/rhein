@@ -23,7 +23,12 @@ pub struct LoginView {
 
 impl LoginView {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let default_server = std::env::var("RHEIN_SERVER").unwrap_or_else(|_| "localhost:8448".into());
+        // Development builds point at the local dev server; a release starts empty.
+        let default_server = if cfg!(debug_assertions) {
+            std::env::var("RHEIN_SERVER").unwrap_or_else(|_| "localhost:8448".into())
+        } else {
+            String::new()
+        };
         let server = cx.new(|cx| TextInput::new("chat.example.com", cx).with_text(default_server));
         let user = cx.new(|cx| TextInput::new("Username", cx));
         let password = cx.new(|cx| TextInput::new("Password", cx).masked());
@@ -39,7 +44,9 @@ impl LoginView {
             })
             .collect();
         let focus = cx.focus_handle();
-        window.focus(&user.focus_handle(cx), cx);
+        // The first empty field: the server in a release, the username with the dev default.
+        let first = if server.read(cx).text().is_empty() { &server } else { &user };
+        window.focus(&first.focus_handle(cx), cx);
         Self { client, server, user, password, code, pending: None, code_focused: false, register: false, focus, _subs: subs }
     }
 

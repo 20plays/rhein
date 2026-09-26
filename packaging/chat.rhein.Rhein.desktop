@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rhein
+GenericName=Chat
+Comment=Native desktop client for Telium
+Exec=rhein
+Icon=chat.rhein.Rhein
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=Telium;chat;messages;voice;
+StartupWMClass=chat.rhein.Rhein

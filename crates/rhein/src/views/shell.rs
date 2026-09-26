@@ -139,7 +139,12 @@ impl Shell {
         let dialog_input = cx.new(|cx| TextInput::new("", cx));
         let home = cx.new(|cx| HomeView::new(client.clone(), window, cx));
         let last_input = Rc::new(Cell::new(Instant::now()));
-        let idle_after = std::env::var("RHEIN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).map_or(IDLE_AFTER, std::time::Duration::from_secs);
+        // RHEIN_IDLE_SECS shortens the wait in development builds, to watch it happen.
+        let idle_after = std::env::var("RHEIN_IDLE_SECS")
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .and_then(|s| s.parse().ok())
+            .map_or(IDLE_AFTER, std::time::Duration::from_secs);
         let idle_watch = {
             let (last, client) = (last_input.clone(), client.clone());
             cx.spawn(async move |_, cx| {

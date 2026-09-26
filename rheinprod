@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# Builds Rhein for production and installs it system-wide:
+#
+#   ./rheinprod               build, then install into /usr (asks for sudo when needed)
+#   ./rheinprod --build-only  build only; the binary is target/production/rhein
+#   ./rheinprod --test        run the offline test suite before building
+#   ./rheinprod --prefix DIR  install under DIR instead of /usr (e.g. ~/.local)
+#   ./rheinprod --uninstall   remove what an install put there
+#   ./rheinprod --yes         install missing system packages without asking
+#   ./rheinprod --no-deps     skip the system package check
+#
+# First it checks the system packages Rhein needs to build and to run, and offers to install the
+# missing ones with the distribution's package manager (pacman, apt, dnf or zypper): compilers
+# and headers; ALSA, PipeWire and the Vulkan loader; and xdg-desktop-portal with the backend for
+# this desktop (screen sharing) plus the GTK one where that backend has no file chooser.
+#
+# The production build is the release build, optimised across crates and stripped (the
+# `production` profile in Cargo.toml). It carries none of the development hooks: those exist in
+# debug builds only (RHEIN_DEV_*, RHEIN_AUDIO, the localhost sign-in default...). Fonts, icons and
+# sounds are compiled in, so the one binary is the whole program.
+#
+# Installed: <prefix>/bin/rhein, the desktop entry (menus, notifications) and the icon.
+# DESTDIR is honoured, for packaging.
+set -euo pipefail
+root="$(cd "$(dirname "$0")" && pwd)"
+cd "$root"
+
+prefix=/usr install=1 test=0 uninstall=0 deps=1 yes=0
+while (($#)); do
+  case "$1" in
+    --build-only) install=0 ;;
+    --test) test=1 ;;
+    --prefix)
+      [[ $# -ge 2 ]] || { echo "--prefix needs a directory" >&2; exit 2; }
+      prefix="${2%/}"
+      shift
+      ;;
+    --prefix=*) prefix="${1#--prefix=}" prefix="${prefix%/}" ;;
+    --uninstall) uninstall=1 ;;
+    --yes|-y) yes=1 ;;
+    --no-deps) deps=0 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+app_id=chat.rhein.Rhein
+dest="${DESTDIR:-}$prefix"
+bin="$dest/bin/rhein"
+desktop="$dest/share/applications/$app_id.desktop"
+icon="$dest/share/icons/hicolor/scalable/apps/$app_id.svg"
+
+# Runs a command as root only when the target is not writable by us.
+as_owner() {
+  local probe="$dest"
+  while [[ ! -e $probe ]]; do probe="$(dirname "$probe")"; done
+  if [[ -w $probe ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+refresh_caches() {
+  [[ -n ${DESTDIR:-} ]] && return
+  if command -v update-desktop-database >/dev/null; then
+    as_owner update-desktop-database -q "$dest/share/applications" || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null && [[ -f $dest/share/icons/hicolor/index.theme ]]; then
+    as_owner gtk-update-icon-cache -q -t "$dest/share/icons/hicolor" || true
+  fi
+}
+
+if ((uninstall)); then
+  echo "· removing Rhein from $dest"
+  as_owner rm -f "$bin" "$desktop" "$icon"
+  refresh_caches
+  echo "done"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- system packages
+
+# The screen capture portal for this desktop, as crates/rhein-voice/src/screen.rs names it, and
+# whether it also needs the GTK portal for the file chooser.
+portal_backend() {
+  local desktop="${XDG_CURRENT_DESKTOP,,}"
+  has() { [[ ":$desktop:" == *":$1:"* ]]; }
+  if has hyprland; then echo "hyprland gtk"
+  elif has kde; then echo "kde"
+  elif has gnome || has niri; then echo "gnome"
+  elif has sway || has wlroots || has river || has labwc || has wayfire; then echo "wlr gtk"
+  else echo "gtk"
+  fi
+}
+
+check_deps() {
+  local manager="" build=() run=() portals=() missing=()
+  read -r -a backends <<<"$(portal_backend)"
+  if command -v pacman >/dev/null; then
+    manager=pacman
+    build=(base-devel clang pkgconf alsa-lib libxkbcommon libxkbcommon-x11 libxcb glib2 fontconfig freetype2 wayland)
+    run=(alsa-lib pipewire pipewire-alsa vulkan-icd-loader xdg-desktop-portal)
+  elif command -v apt-get >/dev/null; then
+    manager=apt
+    build=(build-essential clang pkg-config libasound2-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev)
+    run=(pipewire pipewire-alsa libvulkan1 mesa-vulkan-drivers xdg-desktop-portal)
+  elif command -v dnf >/dev/null; then
+    manager=dnf
+    build=(gcc gcc-c++ clang pkgconf-pkg-config alsa-lib-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype-devel wayland-devel)
+    run=(pipewire pipewire-alsa vulkan-loader mesa-vulkan-drivers xdg-desktop-portal)
+  elif command -v zypper >/dev/null; then
+    manager=zypper
+    build=(gcc gcc-c++ clang pkgconf-pkg-config alsa-devel libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel glib2-devel fontconfig-devel freetype2-devel wayland-devel)
+    run=(pipewire pipewire-alsa libvulkan1 Mesa-vulkan-device xdg-desktop-portal)
+  fi
+  for b in "${backends[@]}"; do portals+=("xdg-desktop-portal-$b"); done
+
+  if [[ -z $manager ]]; then
+    echo "· unknown package manager: make sure these are installed (names vary by distribution):"
+    echo "  a C/C++ compiler, clang, pkg-config; headers for ALSA, xkbcommon, xcb, GLib, fontconfig,"
+    echo "  freetype and Wayland; PipeWire, the Vulkan loader, xdg-desktop-portal and ${portals[*]}"
+    return
+  fi
+
+  local wanted=("${build[@]}" "${run[@]}" "${portals[@]}")
+  for p in "${wanted[@]}"; do
+    case $manager in
+      pacman) pacman -Q "$p" >/dev/null 2>&1 || pacman -Qg "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+      apt) dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || missing+=("$p") ;;
+      dnf|zypper) rpm -q "$p" >/dev/null 2>&1 || rpm -q --whatprovides "$p" >/dev/null 2>&1 || missing+=("$p") ;;
+    esac
+  done
+  if ((${#missing[@]} == 0)); then
+    echo "· system packages: all there (portal: ${portals[*]})"
+    return
+  fi
+
+  echo "· missing system packages: ${missing[*]}"
+  if ((!yes)) && [[ ! -t 0 ]]; then
+    echo "  not a terminal, so not installing; run with --yes to install them"
+    return
+  fi
+  if ((!yes)); then
+    read -r -p "  install them with $manager now? [Y/n] " answer
+    if [[ ${answer,,} == n* ]]; then
+      echo "  skipped; the build or screen sharing may fail without them"
+      return
+    fi
+  fi
+  case $manager in
+    pacman) sudo pacman -S --needed --noconfirm "${missing[@]}" ;;
+    apt) sudo apt-get update && sudo apt-get install -y "${missing[@]}" ;;
+    dnf) sudo dnf install -y "${missing[@]}" ;;
+    zypper) sudo zypper --non-interactive install "${missing[@]}" ;;
+  esac
+  if printf '%s\n' "${missing[@]}" | grep -q '^xdg-desktop-portal'; then
+    # A running portal only picks up new backends when it starts again.
+    systemctl --user restart xdg-desktop-portal.service 2>/dev/null \
+      || echo "  log out and in again so the desktop portal finds its new backend"
+  fi
+}
+
+if ((deps)); then
+  check_deps
+fi
+
+command -v cargo >/dev/null || { echo "cargo is not installed: get Rust from https://rustup.rs" >&2; exit 1; }
+# Edition 2024 needs Rust 1.85 or newer.
+rust_minor="$(rustc --version | sed -E 's/^rustc 1\.([0-9]+).*/\1/')"
+if [[ $rust_minor =~ ^[0-9]+$ ]] && ((rust_minor < 85)); then
+  echo "Rust $(rustc --version | cut -d' ' -f2) is too old; 1.85 or newer is needed (rustup update)" >&2
+  exit 1
+fi
+
+if ((test)); then
+  echo "· running the offline tests"
+  # The live tests skip themselves without a dev server; one at a time, as they share it.
+  cargo test --workspace --locked -- --test-threads=1
+fi
+
+echo "· building the production profile (this takes a while the first time)"
+cargo build -p rhein --profile production --locked
+built="$root/target/production/rhein"
+[[ -x $built ]] || { echo "the build left no binary at $built" >&2; exit 1; }
+echo "  $(du -h "$built" | cut -f1) → ${built#"$root/"}"
+
+if ((!install)); then
+  exit 0
+fi
+
+echo "· installing into $dest"
+as_owner install -Dm755 "$built" "$bin"
+as_owner install -Dm644 "packaging/$app_id.desktop" "$desktop"
+as_owner install -Dm644 "packaging/$app_id.svg" "$icon"
+refresh_caches
+
+echo "done: $bin"
+case ":$PATH:" in
+  *":$prefix/bin:"*) echo "start it with: rhein" ;;
+  *) echo "note: $prefix/bin is not on your PATH" ;;
+esac

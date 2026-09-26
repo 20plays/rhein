@@ -4,7 +4,7 @@
 #   ./rheinrun              dev servers a and b, the dev SFU, then the client
 #   ./rheinrun --demo       the same, signed in as the demo account (.dev/config-demo)
 #   ./rheinrun --no-sfu     no SFU: calls on server a are peer to peer
-#   ./rheinrun --null-audio calls open no real microphone or speakers
+#   ./rheinrun --null-audio calls open no real microphone or speakers (debug builds only)
 #   ./rheinrun --release    build the client in release mode
 #
 # Anything already running (a server on its port, the SFU) is reused and left alone. What this
