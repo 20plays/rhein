@@ -2014,6 +2014,7 @@ impl Shell {
 
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
+        self.client.update(cx, |c, cx| c.stop_mic_test(cx));
         let focus = self.chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
         cx.notify();

@@ -123,6 +123,8 @@ impl Default for AudioConfig {
 /// What the UI reads and flips without going through the DSP thread.
 #[derive(Default)]
 struct Shared {
+    /// The microphone to your own speakers, for hearing how you sound (the settings' mic test).
+    loopback: AtomicBool,
     muted: AtomicBool,
     deafened: AtomicBool,
     push_to_talk: AtomicBool,
@@ -260,6 +262,12 @@ impl AudioEngine {
         let _ = self.commands.send(Command::Devices { input, output });
     }
 
+    /// Plays the microphone, as processed for sending (suppression, gain, gate), back through
+    /// your own speakers, muted or deafened or not: the mic test.
+    pub fn set_loopback(&self, on: bool) {
+        self.shared.loopback.store(on, Ordering::Relaxed);
+    }
+
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
     }
@@ -372,6 +380,8 @@ struct Dsp {
     voices: HashMap<String, Voice>,
     gate_open_until: Option<Instant>,
     tap: Option<mpsc::Sender<Vec<i16>>>,
+    /// Processed microphone frames waiting to be heard in the mic test.
+    loopback: std::collections::VecDeque<i16>,
     /// Where playback is paced by the clock (no output device).
     next_render: Instant,
 }
@@ -395,6 +405,7 @@ impl Dsp {
             voices: HashMap::new(),
             gate_open_until: None,
             tap: None,
+            loopback: std::collections::VecDeque::new(),
             next_render: Instant::now(),
         }
     }
@@ -506,6 +517,20 @@ impl Dsp {
             }
             self.gate_open_until.is_none_or(|until| now >= until)
         };
+        // The mic test hears what the others would, before mute and deafen silence it.
+        if self.shared.loopback.load(Ordering::Relaxed) {
+            if gated {
+                self.loopback.extend(std::iter::repeat_n(0, frame.len()));
+            } else {
+                self.loopback.extend(frame.iter().copied());
+            }
+            // Never more than 100 ms behind.
+            while self.loopback.len() > FRAME * 10 {
+                self.loopback.pop_front();
+            }
+        } else {
+            self.loopback.clear();
+        }
         let live = self.shared.transmitting() && !gated;
         if !live {
             frame.fill(0);
@@ -584,7 +609,13 @@ impl Dsp {
             self.shared.mark_loud(&key);
         }
         if deafened {
-            return vec![0; FRAME];
+            sum = [0i32; FRAME];
+        }
+        // The mic test, heard even while deafened (the call's voices are not).
+        if self.loopback.len() >= FRAME {
+            for slot in sum.iter_mut() {
+                *slot += self.loopback.pop_front().unwrap_or(0) as i32;
+            }
         }
         sum.iter().map(|&s| s.clamp(i16::MIN as i32, i16::MAX as i32) as i16).collect()
     }

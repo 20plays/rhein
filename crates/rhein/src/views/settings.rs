@@ -272,13 +272,17 @@ impl SettingsView {
             self.reload_security(cx);
         }
         self.meter = None;
+        // Leaving the voice settings ends the mic test.
+        if section != Section::Voice {
+            self.client.update(cx, |c, cx| c.stop_mic_test(cx));
+        }
         if section == Section::Voice {
             self.load_audio_devices(cx);
             // The level meter moves while a call is up.
             self.meter = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(std::time::Duration::from_millis(50)).await;
-                    if this.update(cx, |v, cx| if v.client.read(cx).call().is_some() { cx.notify() }).is_err() {
+                    if this.update(cx, |v, cx| if v.client.read(cx).call().is_some() || v.client.read(cx).mic_testing() { cx.notify() }).is_err() {
                         return;
                     }
                 }
@@ -399,6 +403,28 @@ impl SettingsView {
                 .child(div().absolute().left_0().top_0().h_full().rounded_full().w(gpui::relative(at(db))).bg(if open { t.success } else { t.text_faint }))
                 .children(voice.gate.map(|g| div().absolute().top_0().h_full().w(px(2.)).left(gpui::relative(at(g))).bg(t.text)))
         });
+        // Hear yourself as the others would; in a call it deafens you meanwhile.
+        let testing = client.mic_testing();
+        let in_call = client.call().is_some();
+        let mic_test = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                Button::new("mic-test", if testing { "Stop" } else { "Let me hear myself" })
+                    .kind(if testing { rhein_ui::ButtonKind::Danger } else { rhein_ui::ButtonKind::Secondary })
+                    .icon(if testing { Icon::MicOff } else { Icon::Mic })
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        v.client.update(cx, |c, cx| if testing { c.stop_mic_test(cx) } else { c.start_mic_test(cx) });
+                    })),
+            )
+            .child(div().text_size(text::SM).text_color(t.text_faint).child(if testing {
+                if in_call { "You hear your microphone; the call is deafened until you stop." } else { "You hear your microphone as the others would." }
+            } else if in_call {
+                "You'll be deafened in the call while you listen to yourself."
+            } else {
+                "Plays your microphone back, with noise suppression and the gate."
+            }));
         let sensitivity = div()
             .flex()
             .flex_col()
@@ -406,8 +432,9 @@ impl SettingsView {
             .child(gate_pills)
             .child(match meter {
                 Some(meter) => meter.into_any_element(),
-                None => div().text_size(text::SM).text_color(t.text_faint).child("Join a call to see your microphone's level here.").into_any_element(),
-            });
+                None => div().text_size(text::SM).text_color(t.text_faint).child("Start the mic test or join a call to see your microphone's level here.").into_any_element(),
+            })
+            .child(mic_test);
         let (c1, c2) = (self.client.clone(), self.client.clone());
         // Call privacy in conversations: the copy is the web client's (`POSTURE_COPY`).
         let postures = [

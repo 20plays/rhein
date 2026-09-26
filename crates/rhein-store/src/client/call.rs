@@ -116,6 +116,12 @@ enum Update {
 
 pub use crate::prefs::VoicePrefs;
 
+/// The settings' mic test: its own audio when not in a call, and whether it deafened you.
+pub(crate) struct MicTest {
+    own: Option<Arc<AudioEngine>>,
+    deafened_here: bool,
+}
+
 trait AudioConfigOf {
     fn audio_config(&self) -> AudioConfig;
 }
@@ -487,7 +493,69 @@ impl Client {
 
     /// The microphone's level, 0..1, while in a call.
     pub fn input_level(&self) -> Option<f32> {
-        self.call.as_ref().and_then(|c| c.engine.as_ref()).map(|e| e.input_level())
+        self.call.as_ref().and_then(|c| c.engine.as_ref()).or(self.mic_test.as_ref().and_then(|t| t.own.as_ref())).map(|e| e.input_level())
+    }
+
+    /// Whether the mic test is on (you hear yourself as the others would).
+    pub fn mic_testing(&self) -> bool {
+        self.mic_test.is_some()
+    }
+
+    /// Starts hearing yourself. In a call this uses the call's audio and deafens you meanwhile,
+    /// so the call doesn't drown it out; outside one it opens the microphone for the test alone.
+    pub fn start_mic_test(&mut self, cx: &mut Context<Self>) {
+        if self.mic_test.is_some() {
+            return;
+        }
+        if let Some(engine) = self.call.as_ref().and_then(|c| c.engine.clone()) {
+            let deafened_here = !self.prefs.voice.deafened;
+            if deafened_here {
+                self.set_voice_deafened(true, cx);
+            }
+            engine.set_loopback(true);
+            self.mic_test = Some(MicTest { own: None, deafened_here });
+            cx.notify();
+            return;
+        }
+        let voice = self.voice_prefs();
+        let io = self.io.clone();
+        self.mic_test = Some(MicTest { own: None, deafened_here: false });
+        cx.spawn(async move |this, cx| {
+            let config = voice.audio_config();
+            let started = join(io.spawn(async move { tokio::task::spawn_blocking(move || AudioEngine::start(config)).await? })).await;
+            this.update(cx, |this, cx| {
+                match (started, this.mic_test.as_mut()) {
+                    (Ok(engine), Some(test)) => {
+                        engine.set_gate(voice.gate);
+                        engine.set_input_gain(voice.input_gain.unwrap_or(100));
+                        engine.set_loopback(true);
+                        test.own = Some(Arc::new(engine));
+                    }
+                    (Err(err), _) => {
+                        this.mic_test = None;
+                        this.error = Some(format!("Couldn't open the microphone: {err:#}").into());
+                    }
+                    // Stopped while it was opening.
+                    (Ok(_), None) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Stops hearing yourself, and undeafens if the test deafened you.
+    pub fn stop_mic_test(&mut self, cx: &mut Context<Self>) {
+        let Some(test) = self.mic_test.take() else { return };
+        if let Some(engine) = self.call.as_ref().and_then(|c| c.engine.as_ref()) {
+            engine.set_loopback(false);
+        }
+        if test.deafened_here && self.prefs.voice.deafened {
+            self.set_voice_deafened(false, cx);
+        }
+        cx.notify();
     }
 
     fn push_voice_state(&mut self, cx: &mut Context<Self>) {

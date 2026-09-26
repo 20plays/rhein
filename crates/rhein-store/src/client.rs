@@ -308,6 +308,8 @@ pub struct Client {
     direct_once: HashSet<String>,
     /// Servers whose last connection through the relay failed (they may be offered directly).
     pub relay_failed: HashSet<String>,
+    /// The mic test, while it runs.
+    mic_test: Option<call::MicTest>,
     /// A call to start once the conversation being opened is there (`call_user`).
     call_when_open: Option<String>,
     /// Guild refreshes under way, and whether another change came in meanwhile.
@@ -423,6 +425,7 @@ impl Client {
             direct_once: HashSet::new(),
             relay_failed: HashSet::new(),
             call_when_open: None,
+            mic_test: None,
             sync: None,
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,
