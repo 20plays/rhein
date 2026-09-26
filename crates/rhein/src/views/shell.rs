@@ -1634,26 +1634,17 @@ impl Shell {
             // Activities sit close together, one block.
             .when(!activity_cards.is_empty(), |d| d.child(div().flex().flex_col().gap_1p5().children(activity_cards)));
         let more = {
-            let (v, uid, link, guild_for_full) = (cx.weak_entity(), user_id.clone(), link.clone(), guild_id.clone());
+            let (v, uid, link) = (cx.weak_entity(), user_id.clone(), link.clone());
             div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
                 IconButton::new("profile-more", Icon::Ellipsis).tooltip("More").on_click(move |e, window, cx| {
                     let uid = uid.clone();
                     let at = e.position();
                     let link = link.clone();
-                    let guild_for_full = guild_for_full.clone();
                     v.update(cx, |v, cx| {
                         if v.menu.toggle(&format!("profile-more-{uid}"), cx) {
                             return;
                         }
                         let mut entries = Vec::new();
-                        {
-                            let (u, g) = (uid.clone(), guild_for_full.clone());
-                            let v2 = cx.weak_entity();
-                            entries.push(MenuEntry::item("View full profile", move |_, cx| {
-                                let (u, g) = (u.clone(), g.clone());
-                                v2.update(cx, |v, cx| v.open_full_profile(u, g, 0, cx)).ok();
-                            }).with_icon(Icon::User));
-                        }
                         let id = uid.clone();
                         entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
                         if let Some(link) = link {
@@ -1693,9 +1684,18 @@ impl Shell {
                 }),
             )
         };
+        // Bottom right: the whole profile.
+        let expand = {
+            let (v, u, g) = (cx.weak_entity(), user_id.clone(), guild_id.clone());
+            div().absolute().bottom_2().right_2().child(IconButton::new("profile-expand", Icon::Maximize).tooltip("View full profile").on_click(move |_, _, cx| {
+                let (u, g) = (u.clone(), g.clone());
+                v.update(cx, |v, cx| v.open_full_profile(u, g, 0, cx)).ok();
+            }))
+        };
         let card = profile::frame(&look, &t, div().flex().flex_col().child(profile::header(&look, face, &t)).child(body))
             .relative()
             .child(more)
+            .child(expand)
             .occlude()
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| {
@@ -1852,11 +1852,17 @@ impl Shell {
             ).w_full().flex_1());
 
         // Right: tabs.
-        let labels = vec![
+        let myself = self.client.read(cx).user_id() == Some(user_id.as_str());
+        let tab = if myself { 0 } else { tab };
+        let mut labels = vec![
             "Activity".to_owned(),
             format!("{} Mutual {}", friends.len(), if friends.len() == 1 { "Friend" } else { "Friends" }),
             format!("{} Mutual {}", guild_faces.len(), if guild_faces.len() == 1 { "Server" } else { "Servers" }),
         ];
+        // Nothing is mutual with yourself.
+        if myself {
+            labels.truncate(1);
+        }
         let this = cx.weak_entity();
         let tabs = Tabs::new("full-profile-tabs", labels).selected(tab).on_select(move |i, _, cx| {
             this.update(cx, |v, cx| {

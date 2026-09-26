@@ -1847,6 +1847,10 @@ impl Render for ChatView {
             None => channel.as_ref().and_then(|c| c.topic.clone()),
         };
 
+        let guild_face = (!is_dm && self.fixed.is_none())
+            .then(|| client.guild_of_channel(&channel_id))
+            .flatten()
+            .map(|g| crate::views::guild_settings::guild_face(&g.guild.name, client.guild_icon_url(&g.guild.id), 24., &t));
         let header = div()
             .h(size::HEADER)
             .flex_none()
@@ -1856,6 +1860,8 @@ impl Render for ChatView {
             .gap_2()
             .border_b_1()
             .border_color(t.border)
+            // The guild's face, in its square, before the channel.
+            .children(guild_face)
             .child(
                 icon(match (&conversation, self.fixed.is_some()) {
                     (Some(c), _) if c.kind == "gc" => Icon::Users,
