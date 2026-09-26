@@ -1850,7 +1850,21 @@ impl Render for ChatView {
         let guild_face = (!is_dm && self.fixed.is_none())
             .then(|| client.guild_of_channel(&channel_id))
             .flatten()
-            .map(|g| crate::views::guild_settings::guild_face(&g.guild.name, client.guild_icon_url(&g.guild.id), 24., &t));
+            .map(|g| {
+                // A square filling the header's height, flush with the sidebar's edge and the
+                // header's bottom line (the header's padding is taken back on the left).
+                let side = size::HEADER - px(1.);
+                let tile = div().size(side).flex_none().ml(px(-16.)).mr_1().overflow_hidden().bg(t.bg_selected).flex().items_center().justify_center();
+                match client.guild_icon_url(&g.guild.id) {
+                    Some(url) => tile.child(gpui::img(url).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
+                    None => tile
+                        .text_size(text::LG)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.text)
+                        .child(g.guild.name.chars().next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default())
+                        .into_any_element(),
+                }
+            });
         let header = div()
             .h(size::HEADER)
             .flex_none()
