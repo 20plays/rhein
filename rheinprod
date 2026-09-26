@@ -49,7 +49,9 @@ app_id=chat.rhein.Rhein
 dest="${DESTDIR:-}$prefix"
 bin="$dest/bin/rhein"
 desktop="$dest/share/applications/$app_id.desktop"
-icon="$dest/share/icons/hicolor/scalable/apps/$app_id.svg"
+icon="$dest/share/icons/hicolor/512x512/apps/$app_id.png"
+# An icon from an older install, before the logo.
+old_icon="$dest/share/icons/hicolor/scalable/apps/$app_id.svg"
 
 # Runs a command as root only when the target is not writable by us.
 as_owner() {
@@ -74,7 +76,7 @@ refresh_caches() {
 
 if ((uninstall)); then
   echo "· removing Rhein from $dest"
-  as_owner rm -f "$bin" "$desktop" "$icon"
+  as_owner rm -f "$bin" "$desktop" "$icon" "$old_icon"
   refresh_caches
   echo "done"
   exit 0
@@ -193,7 +195,8 @@ fi
 echo "· installing into $dest"
 as_owner install -Dm755 "$built" "$bin"
 as_owner install -Dm644 "packaging/$app_id.desktop" "$desktop"
-as_owner install -Dm644 "packaging/$app_id.svg" "$icon"
+as_owner install -Dm644 "packaging/$app_id.png" "$icon"
+[[ -e $old_icon ]] && as_owner rm -f "$old_icon"
 refresh_caches
 
 echo "done: $bin"
