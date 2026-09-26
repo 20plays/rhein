@@ -519,6 +519,11 @@ impl Api {
         self.post("/assertions", &AssertionRequest { audience }).await
     }
 
+    /// The friends you share with someone (asked on your home server).
+    pub async fn mutual_friends(&self, user_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/friends/mutual/{}", urlencoding::encode(user_id))).await
+    }
+
     pub async fn profile(&self, user_id: &str) -> ApiResult<Profile> {
         self.get(&format!("/users/{}/profile", urlencoding::encode(user_id))).await
     }

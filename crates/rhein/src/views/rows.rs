@@ -54,6 +54,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
 
     let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
     let author_name = client.display_name(guild_id.as_deref(), &message.author);
+    let author_bot = guild_id
+        .as_deref()
+        .and_then(|g| client.members.get(g))
+        .and_then(|l| l.iter().find(|m| m.user_id == message.author))
+        .is_some_and(|m| m.is_bot);
     let me = client.user_id().map(str::to_owned);
     let mine = me.as_deref() == Some(message.author.as_str());
     let pending = message.id.starts_with("pending:");
@@ -248,6 +253,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                             })
                             .child(author_name.clone())
                     })
+                    .when(author_bot, |d| d.child(rhein_ui::Tag("BOT")))
                     .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
             )
         })

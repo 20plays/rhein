@@ -21,6 +21,7 @@ use crate::io::{Io, join};
 
 mod call;
 mod dm_view;
+mod people;
 mod account;
 mod account_prefs;
 mod covers;
@@ -297,6 +298,10 @@ pub struct Client {
     gif_shares: HashMap<String, gifs::GifShare>,
     /// What Telium media links serve, as their origins said.
     media_kinds: HashMap<String, gifs::MediaProbe>,
+    /// Mutual friends by person, as their home server answered (`None` while asking).
+    mutual_friends: HashMap<String, Option<Vec<String>>>,
+    /// A call to start once the conversation being opened is there (`call_user`).
+    call_when_open: Option<String>,
     /// Guild refreshes under way, and whether another change came in meanwhile.
     guild_refreshes: HashMap<String, bool>,
     sync: Option<std::sync::Arc<tokio::sync::Mutex<crate::sync_store::SyncStore>>>,
@@ -405,6 +410,8 @@ impl Client {
             gif_shares: HashMap::new(),
             media_kinds: HashMap::new(),
             guild_refreshes: HashMap::new(),
+            mutual_friends: HashMap::new(),
+            call_when_open: None,
             sync: None,
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,

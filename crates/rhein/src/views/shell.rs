@@ -1438,6 +1438,11 @@ impl Shell {
             _ => Vec::new(),
         };
         let presence = member.as_ref().map(|m| rhein_ui::Presence::parse(m.status()));
+        let is_bot = member.as_ref().is_some_and(|m| m.is_bot);
+        let myself = client.user_id() == Some(user_id.as_str());
+        let blocked = client.friend_state(&user_id) == Some("blocked");
+        let mutual_guilds = if myself { Vec::new() } else { client.mutual_guilds(&user_id) };
+        let link = client.profile_link(&user_id);
         let look = profile::Look {
             banner: profile.as_ref().and_then(|p| p.banner_ref.as_deref()).and_then(|r| client.banner_url(&user_id, r)),
             accent: profile.as_ref().and_then(|p| p.accent_color),
@@ -1456,8 +1461,24 @@ impl Shell {
             .gap_3()
             .child(
                 div().flex().flex_col()
-                    .child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name))
-                    .child(div().text_size(text::SM).text_color(t.text_faint).child(user_id.clone()))
+                    .child(div().flex().items_center().gap_2().child(div().text_size(text::LG).font_weight(FontWeight::SEMIBOLD).child(name)).when(is_bot, |d| d.child(Tag("BOT"))))
+                    // The address: a click copies it.
+                    .child({
+                        let (id, c) = (user_id.clone(), self.client.clone());
+                        div()
+                            .id("profile-address")
+                            .text_size(text::SM)
+                            .text_color(t.text_faint)
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(t.text_muted))
+                            .tooltip(tooltip("Copy"))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()));
+                                let text = format!("Copied {id}");
+                                c.update(cx, |c, cx| c.flash_notice(text, cx));
+                            })
+                            .child(user_id.clone())
+                    })
                     .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
             )
             .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| {
@@ -1485,6 +1506,7 @@ impl Shell {
                     let (c2, u2, v) = (self.client.clone(), user_id.clone(), cx.weak_entity());
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             Button::new("profile-message", "Message")
@@ -1500,6 +1522,18 @@ impl Shell {
                                     c2.update(cx, |c, cx| c.message_user(u, cx));
                                 }),
                         )
+                        .child({
+                            let (c3, u3, v3) = (self.client.clone(), user_id.clone(), cx.weak_entity());
+                            Button::new("profile-call", "Call").icon(Icon::Phone).on_click(move |_, _, cx| {
+                                let u = u3.clone();
+                                v3.update(cx, |v, cx| {
+                                    v.profile_card = None;
+                                    cx.notify();
+                                })
+                                .ok();
+                                c3.update(cx, |c, cx| c.call_user(u, cx));
+                            })
+                        })
                         .child(
                             Button::new("profile-friend", label)
                                 .icon(Icon::UserPlus)
@@ -1520,15 +1554,74 @@ impl Shell {
                         div().px_2().py_0p5().rounded(radius::SM).bg(t.bg_raised).text_size(text::XS).child(r)
                     }))))
             });
-        let body = body.children(activity_cards);
+        let mutual_friends = if myself { None } else { self.client.update(cx, |c, cx| c.mutual_friends(&user_id, cx)) };
+        let mutual_names: Vec<String> = {
+            let client = self.client.read(cx);
+            mutual_friends.clone().unwrap_or_default().iter().map(|u| client.display_name(None, u)).collect()
+        };
+        let body = body
+            .when(!mutual_guilds.is_empty() || !mutual_names.is_empty(), |d| {
+                let line = |label: String, names: Vec<String>| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(label))
+                        .child(div().text_size(text::SM).text_color(t.text_muted).child(names.join(", ")))
+                };
+                d.when(!mutual_guilds.is_empty(), |d| {
+                    let n = mutual_guilds.len();
+                    d.child(line(format!("{n} mutual {}", if n == 1 { "guild" } else { "guilds" }), mutual_guilds.iter().map(|(_, g)| g.clone()).collect()))
+                })
+                .when(!mutual_names.is_empty(), |d| {
+                    let n = mutual_names.len();
+                    d.child(line(format!("{n} mutual {}", if n == 1 { "friend" } else { "friends" }), mutual_names.clone()))
+                })
+            })
+            // Activities sit close together, one block.
+            .when(!activity_cards.is_empty(), |d| d.child(div().flex().flex_col().gap_1p5().children(activity_cards)));
         let more = {
-            let (v, uid) = (cx.weak_entity(), user_id.clone());
+            let (v, uid, link) = (cx.weak_entity(), user_id.clone(), link.clone());
             div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
                 IconButton::new("profile-more", Icon::Ellipsis).tooltip("More").on_click(move |e, window, cx| {
                     let uid = uid.clone();
                     let at = e.position();
+                    let link = link.clone();
                     v.update(cx, |v, cx| {
-                        let entries = vec![MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(uid.clone()))).with_icon(Icon::Copy)];
+                        let mut entries = Vec::new();
+                        let id = uid.clone();
+                        entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
+                        if let Some(link) = link {
+                            entries.push(MenuEntry::item("Copy profile link", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))).with_icon(Icon::Link));
+                        }
+                        if !myself {
+                            entries.push(MenuEntry::Separator);
+                            let (c, u) = (v.client.clone(), uid.clone());
+                            if blocked {
+                                entries.push(MenuEntry::item("Unblock", move |_, cx| {
+                                    let u = u.clone();
+                                    c.update(cx, |c, cx| c.friend_action(rhein_store::FriendAction::Unblock, u, cx));
+                                }).with_icon(Icon::Ban));
+                            } else {
+                                let this = cx.weak_entity();
+                                entries.push(MenuEntry::item("Block", move |window, cx| {
+                                    let (c, u) = (c.clone(), u.clone());
+                                    this.update(cx, |v, cx| {
+                                        v.profile_card = None;
+                                        v.confirm(
+                                            "Block them?".into(),
+                                            "They can't message you or send you a friend request, and a friendship ends.".into(),
+                                            "Block".into(),
+                                            true,
+                                            move |cx| c.update(cx, |c, cx| c.friend_action(rhein_store::FriendAction::Block, u.clone(), cx)),
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .ok();
+                                }).with_icon(Icon::Ban).danger());
+                            }
+                        }
                         v.menu.show(at, entries, |v: &mut Shell| &mut v.menu, window, cx);
                     })
                     .ok();

@@ -338,7 +338,11 @@ impl Client {
                             this.notice = Some(format!("Some devices couldn't be added: {}.", parts.join("; ")).into());
                         }
                         this.load_conversations(cx);
-                        this.open_conversation(Some(id), cx);
+                        this.open_conversation(Some(id.clone()), cx);
+                        // Opened to call them (`call_user`): ring now.
+                        if this.call_when_open.take().is_some() {
+                            this.join_dm_call(id, cx);
+                        }
                     }
                     Err(err) => this.error = Some(friendly(&err).into()),
                 }
