@@ -3320,6 +3320,14 @@ fn friendly(err: &anyhow::Error) -> String {
     format!("{err:#}")
 }
 
+/// The role ids in a READY `me` object.
+fn roles_of(me: &serde_json::Value) -> Vec<String> {
+    me.get("roles")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3348,12 +3356,4 @@ mod tests {
         apply_reaction(&mut r, "👍", "@b:x", false, Some("@a:x"));
         assert!(r.is_empty());
     }
-}
-
-/// The role ids in a READY `me` object.
-fn roles_of(me: &serde_json::Value) -> Vec<String> {
-    me.get("roles")
-        .and_then(|r| r.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
-        .unwrap_or_default()
 }
