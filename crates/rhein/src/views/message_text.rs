@@ -39,6 +39,8 @@ pub struct Context<'a> {
     pub pending: bool,
     /// What is selected in this message: the block and the byte range.
     pub selected: Option<(usize, Range<usize>)>,
+    /// The clickable range under the pointer in this message: the block and the byte range.
+    pub hovered: Option<(usize, Range<usize>)>,
 }
 
 struct Flat {
@@ -91,7 +93,7 @@ pub fn render(doc: &Document, ctx: &Context, cx: &App) -> AnyElement {
                         .font_family(FONT_MONO)
                         .text_size(text::SM)
                         .text_color(t.text)
-                        .child(select::selectable(ctx.message_id, i, code, layout, ctx.view.clone(), styled.into_any_element())),
+                        .child(select::selectable(ctx.message_id, i, code, layout, Vec::new(), ctx.view.clone(), styled.into_any_element())),
                 );
             }
         }
@@ -114,10 +116,12 @@ fn inline(
     // Font overrides must be sorted and must not overlap (code spans hold no emoji ranges).
     flat.mono.sort_by_key(|(r, _)| r.start);
     let text: SharedString = flat.text.into();
-    let highlights = selection_marks(ctx, id.1, flat.highlights, t);
+    let highlights = hover_marks(ctx, id.1, flat.highlights, &flat.clicks, t);
+    let highlights = selection_marks(ctx, id.1, highlights, t);
     let styled = StyledText::new(text.clone()).with_highlights(highlights).with_font_family_overrides(flat.mono);
     let layout = styled.layout().clone();
-    let wrap = |el: AnyElement| select::selectable(id.0, id.1, text.clone(), layout.clone(), ctx.view.clone(), el).into_any_element();
+    let click_ranges: Vec<Range<usize>> = flat.clicks.iter().map(|(r, _)| r.clone()).collect();
+    let wrap = |el: AnyElement| select::selectable(id.0, id.1, text.clone(), layout.clone(), click_ranges.clone(), ctx.view.clone(), el).into_any_element();
     if flat.clicks.is_empty() {
         return (wrap(styled.into_any_element()), used);
     }
@@ -141,6 +145,26 @@ fn inline(
         }
     });
     (wrap(interactive.into_any_element()), used)
+}
+
+/// The block's highlights with the clickable range under the pointer brightened: a link takes
+/// its hover colour, a channel a stronger background.
+fn hover_marks(ctx: &Context, block: usize, highlights: Vec<(Range<usize>, HighlightStyle)>, clicks: &[(Range<usize>, Action)], t: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some((b, range)) = &ctx.hovered else { return highlights };
+    if *b != block {
+        return highlights;
+    }
+    let style = match clicks.iter().find(|(r, _)| r == range).map(|(_, a)| a) {
+        Some(Action::Open(_)) => HighlightStyle { color: Some(t.link_hover.into()), ..Default::default() },
+        Some(Action::Channel(_)) => HighlightStyle { background_color: Some(t.selection.into()), ..Default::default() },
+        Some(Action::Spoiler(_)) | None => return highlights,
+    };
+    let mut sorted = highlights;
+    sorted.sort_by_key(|(r, _)| r.start);
+    // Keep what the range had (a channel's own colour, a link's underline) under the hover.
+    let own = sorted.iter().find(|(r, _)| r.start <= range.start && range.end <= r.end).map(|(_, s)| *s).unwrap_or_default();
+    let style = HighlightStyle { background_color: style.background_color.or(own.background_color), ..style };
+    select::overlay(sorted, range.clone(), style)
 }
 
 /// The block's highlights with the selection, if it is in this block, laid over them.
@@ -304,7 +328,7 @@ fn flatten(
                 let s = merge(
                     style,
                     HighlightStyle {
-                        color: Some(t.accent.into()),
+                        color: Some(t.link.into()),
                         underline: Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }),
                         ..Default::default()
                     },

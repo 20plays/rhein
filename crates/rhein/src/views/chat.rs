@@ -65,6 +65,8 @@ pub struct ChatView {
     pub(crate) revealed: HashSet<(String, usize)>,
     /// Text selected in one message's block (`views::select`).
     pub(crate) selection: Option<crate::views::select::TextSelection>,
+    /// The link (or channel, or spoiler) under the pointer: message, text block, byte range.
+    pub(crate) hovered_link: Option<(String, usize, std::ops::Range<usize>)>,
     /// Takes the keyboard while text is selected, so Ctrl+C reaches the selection and not the
     /// composer.
     pub(crate) select_focus: FocusHandle,
@@ -217,6 +219,7 @@ impl ChatView {
             glide: None,
             voice_chat: None,
             selection: None,
+            hovered_link: None,
             select_focus: cx.focus_handle(),
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
@@ -592,6 +595,20 @@ impl ChatView {
     pub(crate) fn set_selection(&mut self, selection: Option<crate::views::select::TextSelection>, cx: &mut Context<Self>) {
         if self.selection != selection {
             self.selection = selection;
+            cx.notify();
+        }
+    }
+
+    /// The pointer is over a clickable range of a text block (`Some`), or over none of that
+    /// block's (`None`, which only clears the hover if it was this block's).
+    pub(crate) fn hover_link(&mut self, message: &str, block: usize, range: Option<std::ops::Range<usize>>, cx: &mut Context<Self>) {
+        let next = match range {
+            Some(r) => Some((message.to_owned(), block, r)),
+            None if self.hovered_link.as_ref().is_some_and(|(m, b, _)| m == message && *b == block) => None,
+            None => return,
+        };
+        if self.hovered_link != next {
+            self.hovered_link = next;
             cx.notify();
         }
     }

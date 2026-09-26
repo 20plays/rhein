@@ -58,6 +58,7 @@ fn compact_message(
         revealed: &revealed,
         pending: false,
         selected: None,
+        hovered: None,
     };
     let body = message_text::render(&doc, &text_ctx, cx);
     let (jump_client, chan, mid) = (client.clone(), m.channel_id.clone(), m.id.clone());

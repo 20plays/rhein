@@ -86,17 +86,21 @@ pub struct Selectable {
     block: usize,
     text: SharedString,
     layout: TextLayout,
+    /// The block's clickable ranges (links, channels, spoilers): the pointer over one is
+    /// reported to the view, which draws it hovered.
+    clicks: Vec<Range<usize>>,
     view: WeakEntity<ChatView>,
     child: Option<AnyElement>,
 }
 
-pub fn selectable(message: &str, block: usize, text: SharedString, layout: TextLayout, view: WeakEntity<ChatView>, child: AnyElement) -> Selectable {
+pub fn selectable(message: &str, block: usize, text: SharedString, layout: TextLayout, clicks: Vec<Range<usize>>, view: WeakEntity<ChatView>, child: AnyElement) -> Selectable {
     Selectable {
         id: ElementId::Name(format!("select-{message}-{block}").into()),
         message: message.to_owned(),
         block,
         text,
         layout,
+        clicks,
         view,
         child: Some(child),
     }
@@ -134,8 +138,23 @@ impl Element for Selectable {
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, child: &mut Self::RequestLayoutState, hitbox: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
-        child.paint(window, cx);
+        // The text cursor first: a link's hand, set by the text inside, then wins over it.
         window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        child.paint(window, cx);
+        if !self.clicks.is_empty() {
+            let (view, message, block, clicks, layout, hit) = (self.view.clone(), self.message.clone(), self.block, self.clicks.clone(), self.layout.clone(), hitbox.clone());
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let under = hit
+                    .is_hovered(window)
+                    .then(|| layout.index_for_position(e.position).ok())
+                    .flatten()
+                    .and_then(|i| clicks.iter().find(|r| r.contains(&i)).cloned());
+                view.update(cx, |v, cx| v.hover_link(&message, block, under, cx)).ok();
+            });
+        }
         let index = {
             let layout = self.layout.clone();
             move |position| match layout.index_for_position(position) {

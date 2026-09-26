@@ -2,7 +2,8 @@
 //! they read `cx.theme()` or one of the constants here.
 //!
 //! The look: pure black surfaces separated by 1px lines, three grey text levels, white as the only
-//! accent, and colour reserved for status (success, warning, danger).
+//! accent, and colour reserved for status (success, warning, danger) and for links, which must
+//! stand apart from white text and brighten under the pointer.
 
 use gpui::{App, Global, Hsla, Pixels, Rgba, px};
 
@@ -29,6 +30,9 @@ pub struct Theme {
     pub accent: Rgba,
     pub accent_hover: Rgba,
     pub accent_soft: Rgba,
+    /// Links in text, and the same links under the pointer.
+    pub link: Rgba,
+    pub link_hover: Rgba,
     pub danger: Rgba,
     pub danger_soft: Rgba,
     pub success: Rgba,
@@ -63,6 +67,8 @@ impl Theme {
             accent: rgb(0xededed),
             accent_hover: rgb(0xffffff),
             accent_soft: rgba(0xffffff14),
+            link: rgb(0x6cb2ff),
+            link_hover: rgb(0xb3d7ff),
             danger: rgb(0xee4444),
             danger_soft: rgba(0xee444426),
             success: rgb(0x3ecf8e),
