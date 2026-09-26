@@ -613,10 +613,16 @@ impl Client {
         }));
         let home_name = home.doc.server_name.clone();
         let home_input = home.input.clone();
+        let me = home.user_id.clone();
         self.home = Some(home);
         self.phase = Phase::SignedIn;
         self.error = None;
         self.persist();
+        // Our own profile at once: the one saved last time, then the server's.
+        if let Some(saved) = own_profile_load(&me) {
+            self.profiles.insert(me.clone(), Some(saved));
+        }
+        self.refresh_profile(&me, cx);
         self.sync_rpc(cx);
         self.bring_up_dm(cx);
         self.sync_rpc(cx);
@@ -1004,23 +1010,40 @@ impl Client {
         if let Some(cached) = self.profiles.get(user_id) {
             return cached.clone();
         }
-        self.profiles.insert(user_id.to_owned(), None);
-        let api = self.home.as_ref().map(|h| h.api.clone())?;
+        self.refresh_profile(user_id, cx);
+        None
+    }
+
+    /// Asks the home server for a profile (again), keeping what is known meanwhile. A failed
+    /// request is forgotten, so the next look asks again instead of waiting forever.
+    pub fn refresh_profile(&mut self, user_id: &str, cx: &mut Context<Self>) {
+        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
+        self.profiles.entry(user_id.to_owned()).or_insert(None);
         let io = self.io.clone();
         let uid = user_id.to_owned();
         cx.spawn(async move |this, cx| {
             let asked = uid.clone();
             let result = join(io.spawn(async move { Ok(api.profile(&asked).await?) })).await;
             this.update(cx, |this, cx| {
-                if let Ok(profile) = result {
-                    this.profiles.insert(uid, Some(profile));
-                    cx.notify();
+                match result {
+                    Ok(profile) => {
+                        if this.user_id() == Some(uid.as_str()) {
+                            own_profile_save(&uid, &profile);
+                        }
+                        this.profiles.insert(uid, Some(profile));
+                    }
+                    Err(err) => {
+                        log::debug!("profile {uid}: {err:#}");
+                        if this.profiles.get(&uid).is_some_and(Option::is_none) {
+                            this.profiles.remove(&uid);
+                        }
+                    }
                 }
+                cx.notify();
             })
             .ok();
         })
         .detach();
-        None
     }
 
     /// A profile already fetched, without asking for it.
@@ -3591,6 +3614,22 @@ fn friendly(err: &anyhow::Error) -> String {
         };
     }
     format!("{err:#}")
+}
+
+/// Our own profile as last fetched, kept beside the session so settings show it at once.
+fn own_profile_path(user_id: &str) -> std::path::PathBuf {
+    let safe: String = user_id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    crate::persist::path().with_file_name(format!("profile-{safe}.json"))
+}
+
+fn own_profile_load(user_id: &str) -> Option<rhein_proto::Profile> {
+    serde_json::from_str(&std::fs::read_to_string(own_profile_path(user_id)).ok()?).ok()
+}
+
+fn own_profile_save(user_id: &str, profile: &rhein_proto::Profile) {
+    if let Ok(text) = serde_json::to_string(profile) {
+        let _ = std::fs::write(own_profile_path(user_id), text);
+    }
 }
 
 /// The role ids in a READY `me` object.
