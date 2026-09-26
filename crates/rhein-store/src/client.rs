@@ -2477,6 +2477,18 @@ impl Client {
         }
     }
 
+    /// The colour a member's name is drawn in: that of their highest role with a colour, as
+    /// the web client and Discord draw it (0xRRGGBB).
+    pub fn name_color(&self, guild_id: &str, user_id: &str) -> Option<u32> {
+        let entry = self.guild(guild_id)?;
+        let held: Vec<String> = if self.user_id() == Some(user_id) {
+            self.my_roles(guild_id)
+        } else {
+            self.members.get(guild_id)?.iter().find(|m| m.user_id == user_id)?.roles.clone()
+        };
+        entry.guild.roles.iter().filter(|r| held.contains(&r.id) && r.rgb().is_some()).max_by_key(|r| r.position).and_then(|r| r.rgb())
+    }
+
     /// The roles this user holds in a guild, from READY.
     pub fn my_roles(&self, guild_id: &str) -> Vec<String> {
         self.guild(guild_id).and_then(|g| g.guild.me.as_ref()).map(roles_of).unwrap_or_default()

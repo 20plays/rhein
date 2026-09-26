@@ -105,6 +105,8 @@ pub struct ListRow {
     icon: Option<Icon>,
     leading: Option<AnyElement>,
     label: SharedString,
+    /// The label's own colour (a member's top role), instead of the row's.
+    label_color: Option<gpui::Hsla>,
     subtitle: Option<SharedString>,
     selected: bool,
     strong: bool,
@@ -122,6 +124,7 @@ impl ListRow {
             icon: None,
             leading: None,
             label: label.into(),
+            label_color: None,
             subtitle: None,
             selected: false,
             strong: false,
@@ -151,6 +154,12 @@ impl ListRow {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Draws the label in its own colour.
+    pub fn label_color(mut self, color: Option<gpui::Hsla>) -> Self {
+        self.label_color = color;
         self
     }
 
@@ -229,7 +238,7 @@ impl RenderOnce for ListRow {
                     .flex_col()
                     // Two lines sit close together around the row's middle, not a full line
                     // height apart.
-                    .child(div().truncate().when(two_lines, |d| d.line_height(px(16.))).child(self.label))
+                    .child(div().truncate().when(two_lines, |d| d.line_height(px(16.))).when_some(self.label_color, |d, c| d.text_color(c)).child(self.label))
                     .when_some(subtitle, |d, sub| {
                         d.child(
                             div()

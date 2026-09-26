@@ -2720,6 +2720,7 @@ impl Shell {
                 .map(str::to_owned)
                 .or_else(|| m.activities().first().map(|a| a.summary()));
             ListRow::new(SharedString::from(format!("member-{}", m.user_id)), name.clone())
+                .label_color(client.name_color(&gid, &m.user_id).map(|c| gpui::rgb(c).into()))
                 .subtitle(subtitle)
                 .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).image(client.avatar_url(Some(&gid), &m.user_id).map(Into::into)).presence(Some(presence)))
                 .muted(presence == Presence::Offline)
