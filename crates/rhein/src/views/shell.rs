@@ -1783,7 +1783,27 @@ impl Shell {
                     .text_size(text::XS)
                     .text_color(t.text_faint)
                     .child(div().size(px(6.)).flex_none().rounded_full().bg(dot))
-                    .child(div().min_w_0().truncate().child(server.name.clone())),
+                    .child(div().flex_1().min_w_0().truncate().child(server.name.clone()))
+                    // A server that can't be reached can be taken off the list.
+                    .when(matches!(server.status, ServerStatus::Failed | ServerStatus::Incompatible), |d| {
+                        let (v, name) = (cx.weak_entity(), server.name.clone());
+                        d.child(IconButton::new(SharedString::from(format!("server-remove-{name}")), Icon::X).tooltip("Remove this server").on_click(move |_, window, cx| {
+                            let name = name.clone();
+                            v.update(cx, |v, cx| {
+                                let client = v.client.clone();
+                                v.confirm(
+                                    format!("Remove {name}?"),
+                                    "Its guilds leave the sidebar. Add it again in Settings › Servers.".into(),
+                                    "Remove".into(),
+                                    true,
+                                    move |cx| client.update(cx, |c, cx| c.remove_server(&name, cx)),
+                                    window,
+                                    cx,
+                                )
+                            })
+                            .ok();
+                        }))
+                    }),
             );
             if server.status != ServerStatus::Ready {
                 tree = tree.child(
@@ -1829,6 +1849,12 @@ impl Shell {
                             if open {
                                 this.toggle_guild(&select_id, cx);
                             } else {
+                                // Choosing another guild leaves the one open before open: only
+                                // its arrow folds a guild.
+                                let previous = this.client.read(cx).selected_guild.clone();
+                                if let Some(prev) = previous.filter(|p| this.guild_expanded(p, cx)) {
+                                    this.unfolded_guilds.insert(prev);
+                                }
                                 this.folded_guilds.remove(&select_id);
                                 let id = select_id.clone();
                                 this.client.update(cx, |c, cx| c.select_guild(id, cx));

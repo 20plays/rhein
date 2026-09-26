@@ -57,6 +57,9 @@ pub struct ChatView {
     picker: Option<OpenPicker>,
     /// The GIF favourites menu, where it is anchored, its subscriptions.
     gif_picker: Option<(Entity<GifPicker>, Point<Pixels>, Vec<Subscription>)>,
+    /// When a composer picker (GIF or emoji) last closed by a click outside it: the click on
+    /// its own button that closed it must not open it again.
+    picker_closed: Option<std::time::Instant>,
     suggest: Option<Suggest>,
     menu: MenuHost,
     confirm_delete: Option<Message>,
@@ -207,6 +210,7 @@ impl ChatView {
             fixed,
             picker: None,
             gif_picker: None,
+            picker_closed: None,
             suggest: None,
             menu: MenuHost::default(),
             confirm_delete: None,
@@ -710,6 +714,18 @@ impl ChatView {
     // ---------------------------------------------------------------- emoji picker
 
     fn open_picker(&mut self, at: Point<Pixels>, target: PickerTarget, window: &mut Window, cx: &mut Context<Self>) {
+        // The composer's emoji button toggles its picker.
+        if matches!(target, PickerTarget::Composer) {
+            let open = self.picker.as_ref().is_some_and(|p| matches!(p.2, PickerTarget::Composer));
+            if open {
+                self.picker = None;
+                cx.notify();
+                return;
+            }
+            if self.just_closed() {
+                return;
+            }
+        }
         let guild = self.current().and_then(|c| self.client.read(cx).guild_of_channel(&c).map(|g| g.guild.id.clone()));
         let client = self.client.clone();
         let picker = cx.new(|cx| EmojiPicker::new(client, guild, window, cx));
@@ -729,6 +745,9 @@ impl ChatView {
             cx.notify();
         });
         let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
+            if this.picker.as_ref().is_some_and(|p| matches!(p.2, PickerTarget::Composer)) {
+                this.picker_closed = Some(std::time::Instant::now());
+            }
             this.picker = None;
             let focus = this.composer_focus(cx);
             window.focus(&focus, cx);
@@ -739,7 +758,16 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Whether a click on a picker's button only closed it (a second click on the button).
+    fn just_closed(&mut self) -> bool {
+        self.picker_closed.take().is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400))
+    }
+
     pub(crate) fn open_gif_picker(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.gif_picker.take().is_some() || self.just_closed() {
+            cx.notify();
+            return;
+        }
         let picker = cx.new(|cx| GifPicker::new(self.client.clone(), window, cx));
         let pick = cx.subscribe_in(&picker, window, |this, _, picked: &PickedGif, window, cx| {
             this.gif_picker = None;
@@ -754,6 +782,7 @@ impl ChatView {
         });
         let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
             this.gif_picker = None;
+            this.picker_closed = Some(std::time::Instant::now());
             let focus = this.composer_focus(cx);
             window.focus(&focus, cx);
             cx.notify();
