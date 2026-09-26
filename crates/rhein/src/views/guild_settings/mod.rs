@@ -3,6 +3,7 @@
 //! has exactly one authority; the list only shows the pages this account may use there, and the
 //! server checks each call again.
 
+mod channels;
 mod overview;
 mod roles;
 
@@ -122,6 +123,7 @@ pub struct GuildSettingsView {
     pub(crate) status: Option<(bool, SharedString)>,
     pub(crate) overview: overview::State,
     pub(crate) roles: roles::State,
+    pub(crate) channel_perms: channels::State,
     pub(crate) crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
     pub(crate) subs: Vec<Subscription>,
@@ -145,6 +147,7 @@ impl GuildSettingsView {
         client.update(cx, |c, cx| c.refresh_guild(&guild_id, cx));
         let overview = overview::State::new(&client, &guild_id, cx);
         let roles = roles::State::new(cx);
+        let channel_perms = channels::State::new(cx);
         let mut view = Self {
             client,
             guild_id,
@@ -154,6 +157,7 @@ impl GuildSettingsView {
             status: None,
             overview,
             roles,
+            channel_perms,
             crop: None,
             crop_focus: false,
             subs,
@@ -355,6 +359,7 @@ impl Render for GuildSettingsView {
         let body = match self.pane {
             Pane::Overview => self.overview_page(&t, window, cx),
             Pane::Roles => self.roles_page(&t, cx),
+            Pane::Channels => self.channels_page(&t, cx),
             other => hint(format!("{} is on its way.", other.label()), &t).into_any_element(),
         };
         if let Some((dialog, _)) = &self.crop
@@ -390,7 +395,7 @@ impl Render for GuildSettingsView {
                     .py_8()
                     .child(
                         div()
-                            .max_w(px(if self.pane == Pane::Roles { 980. } else { 720. }))
+                            .max_w(px(if matches!(self.pane, Pane::Roles | Pane::Channels) { 980. } else { 720. }))
                             .flex()
                             .flex_col()
                             .gap_5()
