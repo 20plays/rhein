@@ -1856,7 +1856,8 @@ impl Render for ChatView {
                 let side = size::HEADER - px(1.);
                 let tile = div().size(side).flex_none().ml(px(-16.)).mr_1().overflow_hidden().bg(t.bg_selected).flex().items_center().justify_center();
                 match client.guild_icon_url(&g.guild.id) {
-                    Some(url) => tile.child(gpui::img(url).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
+                    // Shrunk properly to the pixels it covers: GPUI's own sampling is jagged.
+                    Some(url) => tile.child(gpui::img(rhein_ui::scaled_image::scaled(url, side, window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
                     None => tile
                         .text_size(text::LG)
                         .font_weight(FontWeight::SEMIBOLD)
