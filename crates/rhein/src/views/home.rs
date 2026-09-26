@@ -2,13 +2,13 @@
 //! An open private conversation is shown by the chat view instead.
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Window, div, prelude::*, px,
 };
 use rhein_proto::Friend;
 use rhein_store::{Client, FriendAction};
 use rhein_ui::theme::{radius, size, text};
-use rhein_ui::{ActiveTheme as _, Avatar, Button, Icon, InputEvent, Presence, Tabs, TextInput, Theme, icon};
+use rhein_ui::{ActiveTheme as _, Avatar, Button, Icon, IconButton, InputEvent, Presence, Tabs, TextInput, Theme, icon};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -110,6 +110,13 @@ impl HomeView {
         self.client.update(cx, |c, cx| c.friend_action(FriendAction::Request, id, cx));
     }
 
+    /// Puts a friend's full address on the clipboard and says so.
+    fn copy_address(&self, user_id: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(user_id.to_owned()));
+        let text = format!("Copied {user_id}");
+        self.client.update(cx, |c, cx| c.flash_notice(text, cx));
+    }
+
     fn friend_row(&self, i: usize, f: &Friend, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let name = f.display_name.clone().unwrap_or_else(|| client.friend_or_local_name(&f.user_id));
@@ -130,7 +137,14 @@ impl HomeView {
             }))
         };
         let id = f.user_id.clone();
-        let mut actions = div().flex().flex_none().gap_2();
+        // The full address, in every state: to pass on, or to add them elsewhere.
+        let copy = {
+            let id = id.clone();
+            IconButton::new(SharedString::from(format!("copy-{i}")), Icon::Copy)
+                .tooltip(format!("Copy {id}"))
+                .on_click(cx.listener(move |this, _, _, cx| this.copy_address(&id, cx)))
+        };
+        let mut actions = div().flex().flex_none().items_center().gap_2().child(copy);
         actions = match f.state.as_str() {
             "pending_in" => actions
                 .child(action("Accept", id.clone(), FriendAction::Accept, true, cx))
@@ -141,6 +155,10 @@ impl HomeView {
                 .child(action("Remove", id.clone(), FriendAction::Remove, false, cx))
                 .child(action("Block", id, FriendAction::Block, false, cx)),
         };
+        let right_click = {
+            let id = f.user_id.clone();
+            cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| this.copy_address(&id, cx))
+        };
         div()
             .px_3()
             .py_2()
@@ -149,6 +167,7 @@ impl HomeView {
             .items_center()
             .gap_3()
             .hover(|s| s.bg(t.bg_hover))
+            .on_mouse_down(gpui::MouseButton::Right, right_click)
             .child(Avatar::new(f.user_id.clone(), name.clone()).size(px(36.)).image(avatar.map(Into::into)).presence(Some(presence)))
             .child(
                 div()
