@@ -126,7 +126,31 @@ impl HomeView {
             "pending_in" => "Incoming friend request".to_owned(),
             "pending_out" => "Outgoing friend request".to_owned(),
             "blocked" => "Blocked".to_owned(),
-            _ => f.activities().first().map(|a| a.summary()).unwrap_or_else(|| f.user_id.clone()),
+            _ => f.activities().first().map(|a| a.summary()).unwrap_or_else(|| {
+                match f.status() {
+                    "online" => "Online",
+                    "idle" => "Idle",
+                    "dnd" => "Do not disturb",
+                    _ => "Offline",
+                }
+                .to_owned()
+            }),
+        };
+        // The address beside the name: a click copies it.
+        let address = {
+            let id = f.user_id.clone();
+            div()
+                .id(SharedString::from(format!("address-{i}")))
+                .flex_shrink(1.)
+                .min_w_0()
+                .truncate()
+                .text_size(text::SM)
+                .text_color(t.text_faint)
+                .cursor_pointer()
+                .hover(|s| s.text_color(t.text_muted))
+                .tooltip(rhein_ui::tooltip("Copy"))
+                .on_click(cx.listener(move |this, _, _, cx| this.copy_address(&id, cx)))
+                .child(f.user_id.clone())
         };
         let action = |label: &'static str, id: String, what: FriendAction, primary: bool, cx: &mut Context<Self>| {
             let b = Button::new(SharedString::from(format!("{label}-{i}")), label).small();
@@ -175,7 +199,15 @@ impl HomeView {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(name))
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .min_w_0()
+                            .child(div().flex_none().font_weight(FontWeight::MEDIUM).child(name))
+                            .child(address),
+                    )
                     .child(div().text_size(text::SM).text_color(t.text_faint).truncate().child(detail)),
             )
             .child(actions)
