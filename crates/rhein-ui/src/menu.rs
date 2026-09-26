@@ -230,6 +230,10 @@ pub struct MenuHost {
     open: Option<(Place, Entity<Menu>, Subscription)>,
     /// The menu that just closed, fading out.
     closing: Option<(Place, Entity<Menu>, Task<()>)>,
+    /// What opened the menu (a button's key), so a second press on it closes it.
+    owner: Option<String>,
+    /// The owner named by `toggle` for the menu about to open.
+    next_owner: Option<String>,
 }
 
 /// Where a menu opens: the point and which of its corners sits there.
@@ -301,12 +305,30 @@ impl MenuHost {
             cx.notify();
         });
         window.focus(&menu.focus_handle(cx), cx);
+        // A menu opened without `toggle` (a right click) has no owner.
+        self.owner = self.next_owner.take();
         self.open = Some((place, menu, sub));
         cx.notify();
     }
 
     pub fn is_open(&self) -> bool {
         self.open.is_some()
+    }
+
+    /// For a button that opens a menu: whether this press should only close it. True when the
+    /// menu `owner` opened is open (it is closed now) or has just closed (the press outside it
+    /// that closed it is this same press). Otherwise `owner` is noted for the menu about to open.
+    pub fn toggle<V: 'static>(&mut self, owner: &str, cx: &mut Context<V>) -> bool {
+        let mine = self.owner.as_deref() == Some(owner);
+        if mine && self.open.is_some() {
+            self.close(cx);
+            return true;
+        }
+        if mine && self.closing.is_some() {
+            return true;
+        }
+        self.next_owner = Some(owner.to_owned());
+        false
     }
 
     /// Whether a menu has just closed and is still fading out (a click that closed it by

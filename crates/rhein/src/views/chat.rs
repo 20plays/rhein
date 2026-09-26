@@ -59,9 +59,9 @@ pub struct ChatView {
     gif_picker: Option<(Entity<GifPicker>, Point<Pixels>, Vec<Subscription>)>,
     /// When a composer picker (GIF or emoji) last closed by a click outside it: the click on
     /// its own button that closed it must not open it again.
-    picker_closed: Option<std::time::Instant>,
+    picker_closed: Option<(String, std::time::Instant)>,
     suggest: Option<Suggest>,
-    menu: MenuHost,
+    pub(crate) menu: MenuHost,
     confirm_delete: Option<Message>,
     modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
@@ -714,17 +714,15 @@ impl ChatView {
     // ---------------------------------------------------------------- emoji picker
 
     fn open_picker(&mut self, at: Point<Pixels>, target: PickerTarget, window: &mut Window, cx: &mut Context<Self>) {
-        // The composer's emoji button toggles its picker.
-        if matches!(target, PickerTarget::Composer) {
-            let open = self.picker.as_ref().is_some_and(|p| matches!(p.2, PickerTarget::Composer));
-            if open {
-                self.picker = None;
-                cx.notify();
-                return;
-            }
-            if self.just_closed() {
-                return;
-            }
+        // Each emoji button toggles its own picker (the composer's, a message's reactions).
+        let key = picker_key(&target);
+        if self.picker.as_ref().is_some_and(|p| picker_key(&p.2) == key) {
+            self.picker = None;
+            cx.notify();
+            return;
+        }
+        if self.just_closed(&key) {
+            return;
         }
         let guild = self.current().and_then(|c| self.client.read(cx).guild_of_channel(&c).map(|g| g.guild.id.clone()));
         let client = self.client.clone();
@@ -745,10 +743,9 @@ impl ChatView {
             cx.notify();
         });
         let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
-            if this.picker.as_ref().is_some_and(|p| matches!(p.2, PickerTarget::Composer)) {
-                this.picker_closed = Some(std::time::Instant::now());
+            if let Some(p) = this.picker.take() {
+                this.picker_closed = Some((picker_key(&p.2), std::time::Instant::now()));
             }
-            this.picker = None;
             let focus = this.composer_focus(cx);
             window.focus(&focus, cx);
             cx.notify();
@@ -759,12 +756,12 @@ impl ChatView {
     }
 
     /// Whether a click on a picker's button only closed it (a second click on the button).
-    fn just_closed(&mut self) -> bool {
-        self.picker_closed.take().is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400))
+    fn just_closed(&mut self, key: &str) -> bool {
+        self.picker_closed.take().is_some_and(|(k, at)| k == key && at.elapsed() < std::time::Duration::from_millis(400))
     }
 
     pub(crate) fn open_gif_picker(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.gif_picker.take().is_some() || self.just_closed() {
+        if self.gif_picker.take().is_some() || self.just_closed("gif") {
             cx.notify();
             return;
         }
@@ -782,7 +779,7 @@ impl ChatView {
         });
         let dismiss = cx.subscribe_in(&picker, window, |this, _, _: &DismissEvent, window, cx| {
             this.gif_picker = None;
-            this.picker_closed = Some(std::time::Instant::now());
+            this.picker_closed = Some(("gif".into(), std::time::Instant::now()));
             let focus = this.composer_focus(cx);
             window.focus(&focus, cx);
             cx.notify();
@@ -2069,5 +2066,13 @@ pub fn typing_label(names: &[String]) -> Option<String> {
         [one] => Some(format!("{one} is typing…")),
         [a, b] => Some(format!("{a} and {b} are typing…")),
         _ => Some("Several people are typing…".into()),
+    }
+}
+
+/// Which button a picker belongs to, to tell a second press on it.
+fn picker_key(target: &PickerTarget) -> String {
+    match target {
+        PickerTarget::Composer => "composer".into(),
+        PickerTarget::React { message_id, .. } => format!("react-{message_id}"),
     }
 }

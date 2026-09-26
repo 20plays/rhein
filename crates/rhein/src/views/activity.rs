@@ -100,7 +100,6 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
         let url = b.url.clone();
         Button::new(SharedString::from(format!("{id}-button-{i}")), b.label.clone())
             .small()
-            .full_width()
             .on_click(move |_, _, cx: &mut App| cx.open_url(&url))
     });
 
@@ -110,8 +109,10 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
         .gap_2()
         .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(activity.verb().to_lowercase()))
         .child(
+            // Everything beside the cover: names, time and buttons.
             div()
                 .flex()
+                .items_center()
                 .gap_3()
                 .child(art)
                 .child(
@@ -124,10 +125,10 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
                         .child(div().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).truncate().child(activity.name.clone()))
                         .children(line(&activity.details))
                         .children(line(&state))
-                        .children(clock),
+                        .children(clock)
+                        .when(!activity.buttons.is_empty(), |d| d.child(div().pt_1().flex().flex_wrap().gap_1().children(buttons))),
                 ),
         )
-        .when(!activity.buttons.is_empty(), |d| d.child(div().flex().flex_col().gap_1().children(buttons)))
         .into_any_element()
 }
 

@@ -116,6 +116,10 @@ pub struct Shell {
     modal: Option<ShellModal>,
     settings: Option<(Entity<SettingsView>, Subscription)>,
     guild_settings: Option<(Entity<GuildSettingsView>, Subscription)>,
+    /// Whose profile card a press outside it just closed, and when.
+    card_closed: Option<(String, std::time::Instant)>,
+    /// The whole profile over the window: whose, from which guild, which tab.
+    full_profile: Option<(String, Option<String>, usize)>,
     switcher: Option<(Entity<QuickSwitcher>, Subscription)>,
     profile_card: Option<(String, Option<String>, Point<Pixels>)>,
     card_ticker: Option<gpui::Task<()>>,
@@ -458,6 +462,8 @@ impl Shell {
             modal: None,
             settings: None,
             guild_settings: None,
+            card_closed: None,
+            full_profile: None,
             switcher: None,
             profile_card: None,
             card_ticker: None,
@@ -1380,6 +1386,10 @@ impl Shell {
     // ---------------------------------------------------------------- profile card
 
     fn show_profile(&mut self, user_id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
+        // The press that closed this person's card (outside it, on their name) opens nothing.
+        if self.card_closed.take().is_some_and(|(u, at)| u == user_id && at.elapsed() < std::time::Duration::from_millis(400)) {
+            return;
+        }
         let guild = self.client.read(cx).selected_guild.clone();
         let uid = user_id.clone();
         self.client.update(cx, |c, cx| {
@@ -1512,11 +1522,12 @@ impl Shell {
                     let (c2, u2, v) = (self.client.clone(), user_id.clone(), cx.weak_entity());
                     div()
                         .flex()
-                        .flex_wrap()
-                        .gap_2()
+                        .items_center()
+                        .gap_1p5()
                         .child(
                             Button::new("profile-message", "Message")
                                 .primary()
+                                .small()
                                 .icon(Icon::MessageSquare)
                                 .on_click(move |_, _, cx| {
                                     let u = u2.clone();
@@ -1530,7 +1541,7 @@ impl Shell {
                         )
                         .child({
                             let (c3, u3, v3) = (self.client.clone(), user_id.clone(), cx.weak_entity());
-                            Button::new("profile-call", "Call").icon(Icon::Phone).on_click(move |_, _, cx| {
+                            IconButton::new("profile-call", Icon::Phone).tooltip("Call").on_click(move |_, _, cx| {
                                 let u = u3.clone();
                                 v3.update(cx, |v, cx| {
                                     v.profile_card = None;
@@ -1541,9 +1552,9 @@ impl Shell {
                             })
                         })
                         .child(
-                            Button::new("profile-friend", label)
-                                .icon(Icon::UserPlus)
-                                .disabled(action.is_none())
+                            IconButton::new("profile-friend", if state.as_deref() == Some("accepted") { Icon::Users } else { Icon::UserPlus })
+                                .tooltip(label)
+                                .active(state.as_deref() == Some("accepted"))
                                 .on_click(move |_, _, cx| {
                                     if let Some(a) = action {
                                         let u = u.clone();
@@ -1565,36 +1576,68 @@ impl Shell {
             let client = self.client.read(cx);
             mutual_friends.clone().unwrap_or_default().iter().map(|u| client.display_name(None, u)).collect()
         };
+        let mutual_faces: Vec<(String, String, Option<String>)> = {
+            let client = self.client.read(cx);
+            mutual_friends.clone().unwrap_or_default().iter().take(3).map(|u| (u.clone(), client.display_name(None, u), client.avatar_url(None, u))).collect()
+        };
         let body = body
+            // As Discord shows it: a few faces, "10 Mutual Friends • 4 Mutual Servers"; a click
+            // opens the whole profile on that list.
             .when(!mutual_guilds.is_empty() || !mutual_names.is_empty(), |d| {
-                let line = |label: String, names: Vec<String>| {
+                let (nf, ns) = (mutual_names.len(), mutual_guilds.len());
+                let mut faces = div().flex().flex_none();
+                for (i, (id, name, url)) in mutual_faces.iter().enumerate() {
+                    faces = faces.child(
+                        div().when(i > 0, |d| d.ml(px(-6.))).rounded_full().border_2().border_color(t.bg_panel).child(Avatar::new(id.clone(), name.clone()).size(px(18.)).image(url.clone().map(Into::into))),
+                    );
+                }
+                let part = |label: String, tab: usize, cx: &mut Context<Self>| {
+                    let (v, u, g) = (cx.weak_entity(), user_id.clone(), guild_id.clone());
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(label))
-                        .child(div().text_size(text::SM).text_color(t.text_muted).child(names.join(", ")))
+                        .id(SharedString::from(format!("mutual-{tab}")))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(t.text).underline())
+                        .on_click(move |_, _, cx| {
+                            let (u, g) = (u.clone(), g.clone());
+                            v.update(cx, |v, cx| v.open_full_profile(u, g, tab, cx)).ok();
+                        })
+                        .child(label)
                 };
-                d.when(!mutual_guilds.is_empty(), |d| {
-                    let n = mutual_guilds.len();
-                    d.child(line(format!("{n} mutual {}", if n == 1 { "guild" } else { "guilds" }), mutual_guilds.iter().map(|(_, g)| g.clone()).collect()))
-                })
-                .when(!mutual_names.is_empty(), |d| {
-                    let n = mutual_names.len();
-                    d.child(line(format!("{n} mutual {}", if n == 1 { "friend" } else { "friends" }), mutual_names.clone()))
-                })
+                let mut line = div().flex().items_center().gap_1p5().text_size(text::SM).text_color(t.text_muted).child(faces);
+                if nf > 0 {
+                    line = line.child(part(format!("{nf} Mutual {}", if nf == 1 { "Friend" } else { "Friends" }), 1, cx));
+                }
+                if nf > 0 && ns > 0 {
+                    line = line.child(div().text_color(t.text_faint).child("•"));
+                }
+                if ns > 0 {
+                    line = line.child(part(format!("{ns} Mutual {}", if ns == 1 { "Server" } else { "Servers" }), 2, cx));
+                }
+                d.child(line)
             })
             // Activities sit close together, one block.
             .when(!activity_cards.is_empty(), |d| d.child(div().flex().flex_col().gap_1p5().children(activity_cards)));
         let more = {
-            let (v, uid, link) = (cx.weak_entity(), user_id.clone(), link.clone());
+            let (v, uid, link, guild_for_full) = (cx.weak_entity(), user_id.clone(), link.clone(), guild_id.clone());
             div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
                 IconButton::new("profile-more", Icon::Ellipsis).tooltip("More").on_click(move |e, window, cx| {
                     let uid = uid.clone();
                     let at = e.position();
                     let link = link.clone();
+                    let guild_for_full = guild_for_full.clone();
                     v.update(cx, |v, cx| {
+                        if v.menu.toggle(&format!("profile-more-{uid}"), cx) {
+                            return;
+                        }
                         let mut entries = Vec::new();
+                        {
+                            let (u, g) = (uid.clone(), guild_for_full.clone());
+                            let v2 = cx.weak_entity();
+                            entries.push(MenuEntry::item("View full profile", move |_, cx| {
+                                let (u, g) = (u.clone(), g.clone());
+                                v2.update(cx, |v, cx| v.open_full_profile(u, g, 0, cx)).ok();
+                            }).with_icon(Icon::User));
+                        }
                         let id = uid.clone();
                         entries.push(MenuEntry::item("Copy user ID", move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))).with_icon(Icon::Copy));
                         if let Some(link) = link {
@@ -1640,7 +1683,9 @@ impl Shell {
             .occlude()
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|v, _, _, cx| {
-                v.profile_card = None;
+                if let Some((user, _, _)) = v.profile_card.take() {
+                    v.card_closed = Some((user, std::time::Instant::now()));
+                }
                 cx.notify();
             }));
         // Over the whole window, behind the card: whatever is under it neither scrolls nor
@@ -1650,6 +1695,231 @@ impl Shell {
             deferred(backdrop.child(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card, "profile-card-in"))))
                 .with_priority(2)
                 .into_any_element(),
+        )
+    }
+
+    /// Opens someone's whole profile, on a tab: 0 activity, 1 mutual friends, 2 mutual servers.
+    fn open_full_profile(&mut self, user_id: String, guild_id: Option<String>, tab: usize, cx: &mut Context<Self>) {
+        self.profile_card = None;
+        self.full_profile = Some((user_id, guild_id, tab));
+        cx.notify();
+    }
+
+    /// The whole profile, as Discord shows it: the card on the left, what they are doing and
+    /// what you share on the right.
+    fn render_full_profile(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (user_id, guild_id, tab) = self.full_profile.clone()?;
+        let t = cx.theme().clone();
+        let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
+        let mutual_friends = self.client.update(cx, |c, cx| c.mutual_friends(&user_id, cx)).unwrap_or_default();
+        let activities = {
+            let client = self.client.read(cx);
+            guild_id
+                .as_deref()
+                .and_then(|g| client.members.get(g))
+                .and_then(|l| l.iter().find(|m| m.user_id == user_id))
+                .map(|m| m.activities())
+                .filter(|a| !a.is_empty())
+                .or_else(|| client.friends.iter().find(|f| f.user_id == user_id).map(|f| f.activities()))
+                .unwrap_or_default()
+        };
+        let now_ms = rhein_store::client::now_ms().max(0) as u64;
+        let activity_cards: Vec<AnyElement> = activities
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                let assets = a.assets.clone().unwrap_or_default();
+                let (large, small) = self.client.update(cx, |c, cx| {
+                    (assets.large_image.as_deref().and_then(|u| c.artwork_url(u, cx)), assets.small_image.as_deref().and_then(|u| c.artwork_url(u, cx)))
+                });
+                activity::card(&format!("full-activity-{i}"), a, large, small, now_ms, &t)
+            })
+            .collect();
+        let client = self.client.read(cx);
+        let name = client.display_name(guild_id.as_deref(), &user_id);
+        let avatar = client.avatar_url(guild_id.as_deref(), &user_id);
+        let member = guild_id.as_deref().and_then(|g| client.members.get(g)).and_then(|l| l.iter().find(|m| m.user_id == user_id)).cloned();
+        let is_bot = member.as_ref().is_some_and(|m| m.is_bot);
+        let roles: Vec<(String, Option<u32>)> = match (&member, guild_id.as_deref().and_then(|g| client.guild(g))) {
+            (Some(m), Some(g)) => g.guild.roles.iter().filter(|r| m.roles.contains(&r.id)).map(|r| (r.name.clone(), r.rgb())).collect(),
+            _ => Vec::new(),
+        };
+        let friend_since = client.friends.iter().find(|f| f.user_id == user_id && f.state == "accepted").and_then(|f| f.updated_at.or(f.created_at));
+        let mutual_guilds = client.mutual_guilds(&user_id);
+        let friends: Vec<(String, String, Option<String>)> =
+            mutual_friends.iter().map(|u| (u.clone(), client.display_name(None, u), client.avatar_url(None, u))).collect();
+        let guild_faces: Vec<(String, String, Option<String>)> =
+            mutual_guilds.iter().map(|(id, n)| (id.clone(), n.clone(), client.guild_icon_url(id))).collect();
+        let look = profile::Look {
+            banner: profile.as_ref().and_then(|p| p.banner_ref.as_deref()).and_then(|r| client.banner_url(&user_id, r)),
+            accent: profile.as_ref().and_then(|p| p.accent_color),
+            theme: profile.as_ref().and_then(|p| p.theme_colors),
+        };
+        let presence = member.as_ref().map(|m| rhein_ui::Presence::parse(m.status()));
+        let face = Avatar::new(user_id.clone(), name.clone()).size(px(profile::FACE_SIZE)).image(avatar.map(Into::into)).presence(presence).into_any_element();
+        let date = |ms: i64| {
+            jiff::Timestamp::from_millisecond(ms).ok().map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()).strftime("%-d %b %Y").to_string()).unwrap_or_default()
+        };
+        let small_heading = |label: &'static str| div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(label);
+
+        // Left: the card, larger.
+        let left = div()
+            .w(px(360.))
+            .flex_none()
+            .child(profile::frame(
+                &look,
+                &t,
+                div().flex().flex_col().child(profile::header(&look, face, &t)).child(
+                    div()
+                        .px_5()
+                        .pb_5()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(div().flex().items_center().gap_2().child(div().text_size(text::XL).font_weight(FontWeight::SEMIBOLD).child(name.clone())).when(is_bot, |d| d.child(Tag("BOT"))))
+                                .child(div().text_size(text::SM).text_color(t.text_faint).child(user_id.clone()))
+                                .children(profile.as_ref().and_then(|p| p.pronouns.clone()).filter(|p| !p.is_empty()).map(|p| div().text_size(text::SM).text_color(t.text_muted).child(p))),
+                        )
+                        .children(profile.as_ref().and_then(|p| p.bio.clone()).filter(|b| !b.is_empty()).map(|bio| div().text_size(text::SM).child(bio)))
+                        .children(member.as_ref().and_then(|m| m.joined_at).map(|at| div().flex().flex_col().gap_1().child(small_heading("member since")).child(div().text_size(text::SM).child(date(at)))))
+                        .children(friend_since.map(|at| div().flex().flex_col().gap_1().child(small_heading("friends since")).child(div().text_size(text::SM).child(date(at)))))
+                        .when(!roles.is_empty(), |d| {
+                            d.child(div().flex().flex_col().gap_1().child(small_heading("roles")).child(div().flex().flex_wrap().gap_1().children(roles.into_iter().map(|(r, colour)| {
+                                div()
+                                    .px_2()
+                                    .py_0p5()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .rounded(radius::SM)
+                                    .bg(t.bg_raised)
+                                    .text_size(text::XS)
+                                    .child(div().size(px(8.)).rounded_full().bg(colour.map(|c| gpui::rgb(c).into()).unwrap_or(gpui::Hsla::from(t.text_faint))))
+                                    .child(r)
+                            }))))
+                        }),
+                ),
+            ));
+
+        // Right: tabs.
+        let labels = vec![
+            "Activity".to_owned(),
+            format!("{} Mutual {}", friends.len(), if friends.len() == 1 { "Friend" } else { "Friends" }),
+            format!("{} Mutual {}", guild_faces.len(), if guild_faces.len() == 1 { "Server" } else { "Servers" }),
+        ];
+        let this = cx.weak_entity();
+        let tabs = Tabs::new("full-profile-tabs", labels).selected(tab).on_select(move |i, _, cx| {
+            this.update(cx, |v, cx| {
+                if let Some(fp) = v.full_profile.as_mut() {
+                    fp.2 = i;
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        let row = |id: String, label: String, face: AnyElement, cx: &mut Context<Self>, action: Box<dyn Fn(&mut Shell, &mut Context<Shell>)>| {
+            div()
+                .id(SharedString::from(format!("full-row-{id}")))
+                .px_2()
+                .h(px(44.))
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded(radius::MD)
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .on_click(cx.listener(move |v, _, _, cx| action(v, cx)))
+                .child(face)
+                .child(div().flex_1().min_w_0().truncate().child(label))
+        };
+        let content: AnyElement = match tab {
+            1 if friends.is_empty() => div().text_color(t.text_faint).child("No friends in common.").into_any_element(),
+            1 => {
+                let mut list = div().flex().flex_col();
+                for (id, n, url) in friends {
+                    let target = id.clone();
+                    let g = guild_id.clone();
+                    list = list.child(row(id.clone(), n.clone(), Avatar::new(id, n).size(px(32.)).image(url.map(Into::into)).into_any_element(), cx, Box::new(move |v, cx| v.open_full_profile(target.clone(), g.clone(), 0, cx))));
+                }
+                list.into_any_element()
+            }
+            2 if guild_faces.is_empty() => div().text_color(t.text_faint).child("No servers in common.").into_any_element(),
+            2 => {
+                let mut list = div().flex().flex_col();
+                for (id, n, url) in guild_faces {
+                    let target = id.clone();
+                    list = list.child(row(
+                        id,
+                        n.clone(),
+                        crate::views::guild_settings::guild_face(&n, url, 32., &t),
+                        cx,
+                        Box::new(move |v, cx| {
+                            v.full_profile = None;
+                            let g = target.clone();
+                            v.client.update(cx, |c, cx| c.select_guild(g, cx));
+                        }),
+                    ));
+                }
+                list.into_any_element()
+            }
+            _ if activity_cards.is_empty() => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(t.text_faint)
+                .child(format!("{name} isn't sharing any activity right now."))
+                .into_any_element(),
+            _ => div().flex().flex_col().gap_4().children(activity_cards).into_any_element(),
+        };
+        let right = div().flex_1().min_w_0().flex().flex_col().gap_4().child(tabs).child(div().id("full-profile-list").flex_1().overflow_y_scroll().child(content));
+
+        let close = cx.listener(|v, _, _, cx| {
+            v.full_profile = None;
+            cx.notify();
+        });
+        let dialog = div()
+            .id("full-profile")
+            .relative()
+            .w(px(920.))
+            .h(px(620.))
+            .p_6()
+            .flex()
+            .gap_6()
+            .rounded(radius::LG)
+            .bg(t.bg_panel)
+            .border_1()
+            .border_color(t.border_strong)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(close)
+            .child(left)
+            .child(right)
+            .child(
+                div().absolute().top_3().right_3().child(IconButton::new("full-profile-close", Icon::X).tooltip("Close").on_click(cx.listener(|v, _, _, cx| {
+                    v.full_profile = None;
+                    cx.notify();
+                }))),
+            );
+        Some(
+            deferred(
+                div()
+                    .id("full-profile-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(t.overlay)
+                    .occlude()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(motion::pop_in(dialog, "full-profile-in")),
+            )
+            .with_priority(2)
+            .into_any_element(),
         )
     }
 
@@ -1931,7 +2201,9 @@ impl Shell {
                                 .hover(|s| s.text_color(t.text).bg(t.bg_selected))
                                 .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
                                     cx.stop_propagation();
-                                    this.show_guild_menu(more_id.clone(), e.position(), window, cx)
+                                    if !this.menu.toggle(&format!("guild-more-{more_id}"), cx) {
+                                        this.show_guild_menu(more_id.clone(), e.position(), window, cx)
+                                    }
                                 }))
                                 .child(icon_sized(Icon::Ellipsis, px(14.)).text_color(t.text_muted)),
                                 ),
@@ -2069,9 +2341,7 @@ impl Shell {
             // A second click closes it: the press already has (as a click outside the menu), so
             // the menu is on its way out and is not opened again.
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.menu.is_open() || this.menu.is_closing() {
-                    this.menu.close(cx);
-                } else {
+                if !this.menu.toggle("account", cx) {
                     this.account_menu(window, cx);
                 }
             }))
@@ -2670,6 +2940,7 @@ impl Render for Shell {
         let ringing = self.ringing_card(cx);
         let modal = self.render_modal(cx);
         let card = self.render_profile_card(cx);
+        let full_profile = self.render_full_profile(cx);
         let switcher = self.switcher.as_ref().map(|(view, _)| {
             motion::fade_in(
                 div()
@@ -2774,6 +3045,7 @@ impl Render for Shell {
             .children(switcher)
             .children(modal)
             .children(card)
+            .children(full_profile)
             .children(self.menu.element())
     }
 }

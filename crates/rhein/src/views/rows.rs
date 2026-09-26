@@ -253,7 +253,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                             })
                             .child(author_name.clone())
                     })
-                    .when(author_bot, |d| d.child(rhein_ui::Tag("BOT")))
+                    // Centred on the name, not on its baseline: the tag's padding would drop it.
+                    .when(author_bot, |d| d.child(div().self_center().flex().child(rhein_ui::Tag("BOT"))))
                     .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
             )
         })
@@ -470,7 +471,13 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
     bar = bar.child(IconButton::new(SharedString::from(format!("more-{ix}")), Icon::Ellipsis).tooltip("More").on_click(
         move |e, window, cx| {
             let (m, at) = (for_menu.clone(), e.position());
-            view.update(cx, |v, cx| v.open_message_menu(m, at, window, cx)).ok();
+            view.update(cx, |v, cx| {
+                // A second press on the same button closes its menu.
+                if !v.menu.toggle(&format!("more-{}", m.id), cx) {
+                    v.open_message_menu(m, at, window, cx);
+                }
+            })
+            .ok();
         },
     ));
     bar.into_any_element()
