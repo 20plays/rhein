@@ -79,6 +79,7 @@ impl Person {
             intents: USER_INTENTS,
             presence: PresenceState { status: "online".into(), ..Default::default() },
             voice: Vec::new(),
+            proxy: None,
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = events.recv().await {

@@ -1820,7 +1820,14 @@ impl Shell {
                         .text_size(text::XS)
                         .text_color(if matches!(server.status, ServerStatus::Failed | ServerStatus::Incompatible) { t.danger } else { t.warning })
                         .child(server.status.label().to_lowercase())
-                        .children(server.error.clone().map(|e| div().text_color(t.danger).child(e))),
+                        .children(server.error.clone().map(|e| div().text_color(t.danger).child(e)))
+                        // Protected, and the relay failed: offer the direct way, this once.
+                        .when(client.relay_failed.contains(&server.input) && server.status == ServerStatus::Failed, |d| {
+                            let (c, key) = (self.client.clone(), server.input.clone());
+                            d.child(div().pt_1().child(Button::new(SharedString::from(format!("direct-{key}")), "Connect directly this time").small().on_click(move |_, _, cx| {
+                                c.update(cx, |c, cx| c.connect_directly(&key, cx));
+                            })))
+                        }),
                 );
             }
             for entry in client.guilds.iter().filter(|g| g.server == server.name) {

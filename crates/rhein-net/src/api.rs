@@ -125,6 +125,11 @@ impl Api {
         Ok(Some(session.session_token))
     }
 
+    /// The bearer token this API sends, if signed in.
+    pub async fn bearer(&self) -> Option<String> {
+        self.token.read().await.clone()
+    }
+
     pub fn base(&self) -> &str {
         &self.base
     }

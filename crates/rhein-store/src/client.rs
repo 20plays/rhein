@@ -4,7 +4,8 @@
 //! Views read fields and call methods; every method that talks to a server hands its future to
 //! [`Io`] and applies the answer in `this.update`, ending with `cx.notify()`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -300,6 +301,13 @@ pub struct Client {
     media_kinds: HashMap<String, gifs::MediaProbe>,
     /// Mutual friends by person, as their home server answered (`None` while asking).
     mutual_friends: HashMap<String, Option<Vec<String>>>,
+    /// The relay proxies of servers reached through "Protect my IP", by server key.
+    relays: HashMap<String, Arc<rhein_net::tunnel::RelayProxy>>,
+    /// Servers the person chose to reach directly this session although protected, after the
+    /// relay failed.
+    direct_once: HashSet<String>,
+    /// Servers whose last connection through the relay failed (they may be offered directly).
+    pub relay_failed: HashSet<String>,
     /// A call to start once the conversation being opened is there (`call_user`).
     call_when_open: Option<String>,
     /// Guild refreshes under way, and whether another change came in meanwhile.
@@ -411,6 +419,9 @@ impl Client {
             media_kinds: HashMap::new(),
             guild_refreshes: HashMap::new(),
             mutual_friends: HashMap::new(),
+            relays: HashMap::new(),
+            direct_once: HashSet::new(),
+            relay_failed: HashSet::new(),
             call_when_open: None,
             sync: None,
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
@@ -1392,11 +1403,56 @@ impl Client {
         self.servers.iter().find(|s| s.name == name)
     }
 
+    /// Whether "Protect my IP" covers a server: for every server, or per guild (then the
+    /// strictest of its guilds, since one connection serves them all).
+    pub fn protected(&self, key: &str) -> bool {
+        match self.account_pref(&["network", "mode"]).and_then(|v| v.as_str()) {
+            Some("protected") => true,
+            Some("per-guild") => self.guilds.iter().filter(|g| g.server == key || self.server(&g.server).is_some_and(|s| s.input == key)).any(|g| {
+                self.account_pref(&["network", "guilds", &g.guild.id]).and_then(|v| v.as_str()) == Some("protected")
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the home server runs a relay for its users.
+    pub fn relay_available(&self) -> bool {
+        self.home.as_ref().is_some_and(|h| h.doc.relay.as_ref().is_some_and(|r| !r.is_null()))
+    }
+
+    /// Reconnects every server, after the network privacy choice changed.
+    pub fn reconnect_all(&mut self, cx: &mut Context<Self>) {
+        self.relays.clear();
+        let keys: Vec<String> = self.servers.iter().map(|s| s.input.clone()).collect();
+        for key in keys {
+            self.connect_server(key, cx);
+        }
+    }
+
+    /// Connects a protected server directly this once, after its relay failed.
+    pub fn connect_directly(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.direct_once.insert(key.to_owned());
+        self.relay_failed.remove(key);
+        self.connect_server(key.to_owned(), cx);
+    }
+
     /// Discovery, assertion → guild session, then the gateway.
     fn connect_server(&mut self, key: String, cx: &mut Context<Self>) {
         if self.home.is_none() {
             return;
         }
+        // Protected: through the home's relay, or not at all (unless allowed to fall back).
+        let fallback = self.account_flag(&["network", "autoFallback"], false);
+        let relayed = self.protected(&key) && !self.direct_once.contains(&key);
+        if relayed && !self.relay_available() && !fallback {
+            if let Some(server) = self.server_mut(&key) {
+                server.status = ServerStatus::Failed;
+                server.error = Some("\"Protect my IP\" is on, but your home server offers no relay.".into());
+            }
+            cx.notify();
+            return;
+        }
+        let relayed = relayed && self.relay_available();
         let presence = self.presence_state();
         let Some(server) = self.server_mut(&key) else { return };
         server.status = ServerStatus::Connecting;
@@ -1410,6 +1466,19 @@ impl Client {
         let task = cx.spawn(async move |this, cx| {
             let key = task_key;
             let result = join(io.spawn(async move {
+                // Through the relay, discovery included: the guild never sees our address.
+                let (http, proxy) = if relayed {
+                    let host = rhein_net::discovery::normalise(&input).split(':').next().unwrap_or_default().to_owned();
+                    let proxy = Arc::new(rhein_net::tunnel::RelayProxy::start(home_api.clone(), host).await?);
+                    let http = reqwest::Client::builder()
+                        .user_agent(concat!("Rhein/", env!("CARGO_PKG_VERSION")))
+                        .connect_timeout(Duration::from_secs(20))
+                        .proxy(proxy.reqwest_proxy()?)
+                        .build()?;
+                    (http, Some(proxy))
+                } else {
+                    (http, None)
+                };
                 let doc = discover(&http, &input).await?;
                 let api = Api::new(http, &doc.api, None);
                 let session = auth::guild_session(&home_api, &api, &doc.server_name).await?;
@@ -1424,14 +1493,28 @@ impl Client {
                     intents: USER_INTENTS,
                     presence,
                     voice: Vec::new(),
+                    proxy: proxy.as_ref().map(|p| p.addr()),
                 });
-                Ok((doc, api, handle, events))
+                Ok((doc, api, handle, events, proxy))
             }))
             .await;
             let Ok(Some(mut events)) = this.update(cx, |this, cx| {
+                match &result {
+                    Ok((.., Some(proxy))) => {
+                        this.relays.insert(key.clone(), proxy.clone());
+                        this.relay_failed.remove(&key);
+                    }
+                    Ok(_) => {
+                        this.relays.remove(&key);
+                    }
+                    Err(_) if relayed => {
+                        this.relay_failed.insert(key.clone());
+                    }
+                    Err(_) => {}
+                }
                 let server = this.server_mut(&key)?;
                 match result {
-                    Ok((doc, api, handle, events)) => {
+                    Ok((doc, api, handle, events, _)) => {
                         let real = doc.server_name.clone();
                         server.name = real.clone();
                         server.doc = Some(doc);

@@ -7,5 +7,6 @@ pub mod discovery;
 pub mod gateway;
 
 pub use api::{Api, ApiError, ApiResult};
+pub mod tunnel;
 pub use discovery::discover;
 pub use gateway::{GatewayEvent, GatewayHandle, GatewayStatus};

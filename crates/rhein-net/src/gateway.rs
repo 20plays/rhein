@@ -88,6 +88,8 @@ pub struct GatewayConfig {
     pub intents: u64,
     pub presence: PresenceState,
     pub voice: Vec<rhein_proto::VoiceClaim>,
+    /// Through the relay (`tunnel::RelayProxy`): the proxy to CONNECT through.
+    pub proxy: Option<std::net::SocketAddr>,
 }
 
 /// Starts the connection task on the current tokio runtime. Events arrive on the returned
@@ -172,13 +174,31 @@ fn jitter(max_ms: u64) -> u64 {
     if max_ms == 0 { 0 } else { nanos % max_ms }
 }
 
+/// The gateway's WebSocket, directly or through the relay proxy (TLS to the guild inside it).
+// The error type is tungstenite's own.
+#[allow(clippy::result_large_err)]
+async fn open_socket(
+    url: &str,
+    proxy: Option<std::net::SocketAddr>,
+) -> Result<
+    (tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::handshake::client::Response),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    let Some(proxy) = proxy else { return tokio_tungstenite::connect_async(url).await };
+    let parsed = url::Url::parse(url).map_err(|e| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(e)))?;
+    let host = parsed.host_str().unwrap_or_default().to_owned();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let stream = crate::tunnel::connect_via(proxy, &host, port).await.map_err(|e| tokio_tungstenite::tungstenite::Error::Io(std::io::Error::other(e)))?;
+    tokio_tungstenite::client_async_tls(url, stream).await
+}
+
 async fn session(
     config: &mut GatewayConfig,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     events: &mpsc::UnboundedSender<GatewayEvent>,
     failures: &mut u32,
 ) -> Outcome {
-    let (socket, _) = match timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(&config.url)).await {
+    let (socket, _) = match timeout(Duration::from_secs(15), open_socket(&config.url, config.proxy)).await {
         Ok(Ok(ok)) => ok,
         Ok(Err(err)) => {
             log::warn!("gateway {}: {err}", config.url);

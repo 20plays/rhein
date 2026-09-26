@@ -71,6 +71,7 @@ async fn register_login_session_gateway_message() {
         intents: USER_INTENTS,
         presence: online(),
         voice: Vec::new(),
+        proxy: None,
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -155,6 +156,7 @@ async fn guild_on_foreign_server() {
         intents: USER_INTENTS,
         presence: online(),
         voice: Vec::new(),
+        proxy: None,
     });
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -363,6 +365,7 @@ async fn rich_presence_reaches_guild_members() {
         intents: USER_INTENTS,
         presence: online(),
         voice: Vec::new(),
+        proxy: None,
     });
     let game = rhein_proto::Activity::normalize(&serde_json::json!({
         "name": "Factorio",
@@ -376,6 +379,7 @@ async fn rich_presence_reaches_guild_members() {
         intents: USER_INTENTS,
         presence: online(),
         voice: Vec::new(),
+        proxy: None,
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while !matches!(play_events.recv().await, Some(GatewayEvent::Ready(_))) {}

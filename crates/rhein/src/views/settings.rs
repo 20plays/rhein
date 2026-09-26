@@ -11,7 +11,7 @@ use rhein_store::{Client, ServerStatus};
 use crate::views::crop::{self, CropDialog, CropEvent};
 use crate::views::profile;
 use rhein_ui::theme::{FONT_MONO, radius, text};
-use rhein_ui::{ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, ListRow, Switch, TextInput, Theme, icon};
+use rhein_ui::{ActiveTheme as _, Avatar, Button, Dismiss, Icon, IconButton, InputEvent, ListRow, Switch, Tabs, TextInput, Theme, icon};
 
 pub const SETTINGS_CONTEXT: &str = "Settings";
 
@@ -1453,13 +1453,6 @@ impl SettingsView {
     fn extras(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let client = self.client.read(cx);
         let (count, ready) = (client.gif_favorites().len(), client.gif_favorites_ready());
-        let mode = client.account_pref(&["network", "mode"]).and_then(|v| v.as_str()).unwrap_or("direct").to_owned();
-        let overrides = client.account_pref(&["network", "guilds"]).and_then(|v| v.as_object()).map_or(0, |m| m.values().filter(|v| v.as_str() == Some("protected")).count());
-        let mode_label = match mode.as_str() {
-            "protected" => "Protect my IP".to_owned(),
-            "per-guild" => format!("Choose per guild ({overrides} protected)"),
-            _ => "Direct".to_owned(),
-        };
         let c1 = self.client.clone();
         div()
             .flex()
@@ -1514,18 +1507,78 @@ impl SettingsView {
                     .into_any_element(),
             ))
             .child(heading("Network privacy", t))
+            .child(self.network_privacy(t, cx))
+            .into_any_element()
+    }
+
+    /// How connections to guild servers are made: directly, or through the home's relay so
+    /// guild servers don't learn this address (`prefs.network`, shared with the web client).
+    fn network_privacy(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        const MODES: [(&str, &str); 3] = [("direct", "Direct"), ("protected", "Protect my IP"), ("per-guild", "Choose per guild")];
+        let client = self.client.read(cx);
+        let mode = client.account_pref(&["network", "mode"]).and_then(|v| v.as_str()).unwrap_or("direct").to_owned();
+        let fallback = client.account_flag(&["network", "autoFallback"], false);
+        let relay = client.relay_available();
+        let guilds: Vec<(String, String, bool)> = client
+            .guilds
+            .iter()
+            .map(|g| {
+                let on = client.account_pref(&["network", "guilds", &g.guild.id]).and_then(|v| v.as_str()) == Some("protected");
+                (g.guild.id.clone(), format!("{} · {}", g.guild.name, g.server), on)
+            })
+            .collect();
+        let chosen = MODES.iter().position(|(m, _)| *m == mode).unwrap_or(0);
+        let this = self.client.clone();
+        let set = move |path: Vec<String>, value: serde_json::Value, cx: &mut gpui::App| {
+            this.update(cx, |c, cx| {
+                let path: Vec<&str> = path.iter().map(String::as_str).collect();
+                c.set_account_pref(&path, Some(value), cx);
+                // Every connection is made again the way now chosen.
+                c.reconnect_all(cx);
+            });
+        };
+        let set_mode = set.clone();
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
             .child(setting_row(
                 t,
                 "How connections are made",
-                "Set in the web client. \"Protect my IP\" sends guild traffic through your account server so guild servers don't see your address.",
-                div().font_family(FONT_MONO).text_size(text::SM).child(mode_label).into_any_element(),
-            ))
-            .when(mode != "direct" || overrides > 0, |d| {
-                d.child(div().text_size(text::SM).text_color(t.warning).child(
-                    "Rhein can't relay through your account server yet, so it still connects to guild servers directly and they see your IP address.",
-                ))
-            })
-            .into_any_element()
+                "\"Protect my IP\" sends guild traffic through your account server's relay, so guild servers see its address instead of yours. The relay only passes encrypted bytes; it can't read them. Calls are not covered.",
+                Tabs::new("network-mode", MODES.iter().map(|(_, l)| *l))
+                    .selected(chosen)
+                    .on_select(move |i, _, cx| set_mode(vec!["network".into(), "mode".into()], MODES[i].0.into(), cx))
+                    .into_any_element(),
+            ));
+        if !relay {
+            block = block.child(div().text_size(text::SM).text_color(t.warning).child(
+                "Your account server doesn't run a relay, so protected guilds can't be reached (unless connecting directly is allowed below).",
+            ));
+        }
+        if mode == "per-guild" {
+            for (id, label, on) in guilds {
+                let set = set.clone();
+                block = block.child(setting_row_owned(
+                    t,
+                    label,
+                    if on { "Through the relay." } else { "Direct." },
+                    Switch::new(SharedString::from(format!("net-{id}")), on)
+                        .on_toggle(move |on, _, cx| set(vec!["network".into(), "guilds".into(), id.clone()], if on { "protected" } else { "direct" }.into(), cx))
+                        .into_any_element(),
+                ));
+            }
+        }
+        let set_fallback = set.clone();
+        block = block.child(setting_row(
+            t,
+            "Connect directly if the relay is down",
+            "Off, a protected guild waits until the relay works (or you choose to connect directly that once). On, it connects directly without asking.",
+            Switch::new("net-fallback", fallback)
+                .on_toggle(move |on, _, cx| set_fallback(vec!["network".into(), "autoFallback".into()], on.into(), cx))
+                .into_any_element(),
+        ));
+        block.into_any_element()
     }
 
     /// Rich presence: what is shared, from which sources, and what is being shared right now.
@@ -1849,6 +1902,10 @@ fn qr_code(data: &str) -> AnyElement {
 
 /// One setting: its name and what it does on the left, its control on the right.
 fn setting_row(t: &Theme, title: &'static str, detail: &'static str, control: AnyElement) -> gpui::Div {
+    setting_row_owned(t, title.to_owned(), detail, control)
+}
+
+fn setting_row_owned(t: &Theme, title: String, detail: &'static str, control: AnyElement) -> gpui::Div {
     div()
         .p_3()
         .rounded(radius::MD)
