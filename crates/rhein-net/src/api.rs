@@ -756,6 +756,11 @@ impl Api {
         self.get(&format!("/guilds/{guild_id}/read-state")).await
     }
 
+    /// The members holding a role.
+    pub async fn role_members(&self, guild_id: &str, role_id: &str, limit: u32) -> ApiResult<MemberList> {
+        self.get(&format!("/guilds/{guild_id}/members?role={}&limit={limit}", urlencoding::encode(role_id))).await
+    }
+
     pub async fn members(&self, guild_id: &str, offset: u32, limit: u32) -> ApiResult<MemberList> {
         self.get(&format!("/guilds/{guild_id}/members?offset={offset}&limit={limit}")).await
     }

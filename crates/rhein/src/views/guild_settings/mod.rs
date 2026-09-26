@@ -4,6 +4,7 @@
 //! server checks each call again.
 
 mod overview;
+mod roles;
 
 use std::future::Future;
 
@@ -120,9 +121,10 @@ pub struct GuildSettingsView {
     /// The last outcome to report: `(worked, what)`.
     pub(crate) status: Option<(bool, SharedString)>,
     pub(crate) overview: overview::State,
+    pub(crate) roles: roles::State,
     pub(crate) crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
-    _subs: Vec<Subscription>,
+    pub(crate) subs: Vec<Subscription>,
 }
 
 impl EventEmitter<GuildSettingsEvent> for GuildSettingsView {}
@@ -142,6 +144,7 @@ impl GuildSettingsView {
         // What the list from READY leaves out (when it was made, its address): ask for it.
         client.update(cx, |c, cx| c.refresh_guild(&guild_id, cx));
         let overview = overview::State::new(&client, &guild_id, cx);
+        let roles = roles::State::new(cx);
         let mut view = Self {
             client,
             guild_id,
@@ -150,10 +153,12 @@ impl GuildSettingsView {
             body_scroll: gpui::ScrollHandle::new(),
             status: None,
             overview,
+            roles,
             crop: None,
             crop_focus: false,
-            _subs: subs,
+            subs,
         };
+        view.roles_subscriptions(cx);
         view.open(pane, cx);
         view
     }
@@ -177,8 +182,10 @@ impl GuildSettingsView {
 
     /// Fetches what a page shows, each time it is opened.
     fn load(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        if pane == Pane::Overview {
-            self.overview.reset(&self.client, &self.guild_id, cx);
+        match pane {
+            Pane::Overview => self.overview.reset(&self.client, &self.guild_id, cx),
+            Pane::Roles => self.load_roles(cx),
+            _ => {}
         }
     }
 
@@ -347,6 +354,7 @@ impl Render for GuildSettingsView {
 
         let body = match self.pane {
             Pane::Overview => self.overview_page(&t, window, cx),
+            Pane::Roles => self.roles_page(&t, cx),
             other => hint(format!("{} is on its way.", other.label()), &t).into_any_element(),
         };
         if let Some((dialog, _)) = &self.crop
@@ -382,7 +390,7 @@ impl Render for GuildSettingsView {
                     .py_8()
                     .child(
                         div()
-                            .max_w(px(720.))
+                            .max_w(px(if self.pane == Pane::Roles { 980. } else { 720. }))
                             .flex()
                             .flex_col()
                             .gap_5()
