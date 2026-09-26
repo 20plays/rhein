@@ -1287,8 +1287,9 @@ impl ChatView {
                     .on_click(move |_, _, cx| c2.update(cx, |c, cx| c.set_voice_deafened(!deafened, cx))),
             )
             .child(
-                IconButton::new(id("screen"), Icon::ScreenShare)
-                    .active(sharing)
+                // While sharing, the crossed-out screen: a press stops it.
+                IconButton::new(id("screen"), if sharing { Icon::ScreenShareOff } else { Icon::ScreenShare })
+                    .danger(sharing)
                     .tooltip(if sharing { "Stop sharing your screen" } else { "Share your screen" })
                     .on_click(move |_, _, cx| c3.update(cx, |c, cx| if sharing { c.stop_screen_share(cx) } else { c.start_screen_share(cx) })),
             )
