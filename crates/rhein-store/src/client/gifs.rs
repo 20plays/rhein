@@ -118,10 +118,6 @@ impl Client {
             return true;
         }
         let text = content.trim();
-        // A lone link to a page that turned out to name a GIF.
-        if gif_links::is_page_link(text) && matches!(self.gif_share(text), Some(GifShare::Ready(_))) {
-            return crate::markdown::links_in(text).len() == 1;
-        }
         gif_links::is_telium_media(text)
             && self.media_kind(text) == Some(MediaProbe::Known(gif_links::MediaKind::Gif))
             && gif_links::telium_media_in(text).len() == 1
@@ -154,8 +150,8 @@ impl Client {
         .detach();
     }
 
-    /// What a GIF share page (or any web page, see `gif_links::page_gif`) turned out to be;
-    /// `None` until someone asks (`request_gif_share`).
+    /// What a GIF share page turned out to be; `None` until someone asks its provider
+    /// (`request_gif_share`).
     pub fn gif_share(&self, url: &str) -> Option<GifShare> {
         if let Some(gif_links::Share::Giphy(id)) = gif_links::share(url) {
             return Some(GifShare::Ready(gif_links::giphy_media(&id)));
@@ -163,27 +159,18 @@ impl Client {
         self.gif_shares.get(url).cloned()
     }
 
-    /// Asks a share page's provider for its GIF, once; any other web page is read for one.
+    /// Asks a share page's provider for its GIF, once.
     pub fn request_gif_share(&mut self, url: &str, cx: &mut Context<Self>) {
         if self.gif_share(url).is_some() {
             return;
         }
-        let share = gif_links::share(url);
-        if share.is_none() && !gif_links::is_page_link(url) {
-            return;
-        }
+        let Some(share) = gif_links::share(url) else { return };
         self.gif_shares.insert(url.to_owned(), GifShare::Loading);
         let (io, http, api) = (self.io.clone(), self.http.clone(), self.home.as_ref().map(|h| h.api.clone()));
         let key = url.to_owned();
         cx.spawn(async move |this, cx| {
             let page = key.clone();
-            let found = join(io.spawn(async move {
-                match share {
-                    Some(share) => resolve_share(&http, api, &page, &share).await,
-                    None => Ok(gif_links::page_gif(&read_page(&http, &page).await?)),
-                }
-            }))
-            .await;
+            let found = join(io.spawn(async move { resolve_share(&http, api, &page, &share).await })).await;
             this.update(cx, |this, cx| {
                 let state = match found {
                     Ok(Some(media)) => GifShare::Ready(media),
@@ -202,31 +189,13 @@ impl Client {
     }
 }
 
-/// The start of a web page, where its tags are: at most `PAGE_MAX` bytes, and only HTML.
-async fn read_page(http: &reqwest::Client, url: &str) -> anyhow::Result<String> {
-    const PAGE_MAX: usize = 1 << 20;
-    let mut response = http.get(url).header("Accept", "text/html").send().await?.error_for_status()?;
-    let html = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.to_ascii_lowercase().contains("html"));
-    anyhow::ensure!(html, "not a web page");
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        body.extend_from_slice(&chunk);
-        if body.len() >= PAGE_MAX {
-            body.truncate(PAGE_MAX);
-            break;
-        }
-    }
-    Ok(String::from_utf8_lossy(&body).into_owned())
-}
-
 /// A share page's GIF: Klipy's from the page's own Open Graph tags (as Discord embeds it), then
 /// its search API; Tenor's from its API, then the page.
 async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, url: &str, share: &gif_links::Share) -> anyhow::Result<Option<String>> {
-    let from_page = async { anyhow::Ok(gif_links::page_media(&read_page(http, url).await?)) };
+    let from_page = async {
+        let page = http.get(url).header("Accept", "text/html").send().await?.error_for_status()?.text().await?;
+        anyhow::Ok(gif_links::page_media(&page))
+    };
     match share {
         gif_links::Share::Klipy(_) => match from_page.await {
             Ok(Some(media)) => Ok(Some(media)),
