@@ -25,10 +25,13 @@ use crate::views::message_text;
 
 /// Messages from the same author this close together share one header.
 const GROUP_WINDOW_MS: i64 = 7 * 60 * 1000;
-const QUICK_REACTIONS: [&str; 1] = ["👍"];
+/// How many emoji the hover bar offers to react with in one click: the most recently used,
+/// topped up from `DEFAULT_REACTIONS` while there are fewer.
+const QUICK_REACTIONS: usize = 4;
+const DEFAULT_REACTIONS: [&str; QUICK_REACTIONS] = ["👍", "❤️", "😂", "🎉"];
 /// Room kept free on the right of every message for the hover action bar, so the bar never
-/// covers text: one quick reaction, add reaction, reply and "more", at 28 px each, plus padding.
-const ACTION_BAR_W: f32 = 4. * 28. + 14.;
+/// covers text: the quick reactions, add reaction, reply and "more", at 28 px each, plus padding.
+const ACTION_BAR_W: f32 = (QUICK_REACTIONS + 3) as f32 * 28. + 14.;
 /// Link previews and embed cards.
 const IMAGE_MAX_W: f32 = 400.;
 /// Every picture in the chat (an attachment, a GIF, a link to a picture, a preview's image) is
@@ -392,7 +395,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .into_any_element()
     };
 
-    let actions = (!pending).then(|| hover_actions(ctx, ix, &message, &group, &t));
+    let actions = (!pending).then(|| hover_actions(ctx, ix, &message, &group, client, guild_id.as_deref(), &t));
 
     let row_bg: Option<Hsla> = if highlighted {
         Some(t.accent_soft.into())
@@ -480,7 +483,22 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     element
 }
 
-fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedString, t: &Theme) -> AnyElement {
+/// The emoji the hover bar reacts with: the most recently used first.
+fn quick_reactions(store: &Client) -> Vec<String> {
+    let mut quick: Vec<String> = store.recent_emoji.iter().take(QUICK_REACTIONS).cloned().collect();
+    for emoji in DEFAULT_REACTIONS {
+        if quick.len() == QUICK_REACTIONS {
+            break;
+        }
+        if !quick.iter().any(|e| e == emoji) {
+            quick.push(emoji.to_owned());
+        }
+    }
+    quick
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedString, store: &Client, guild_id: Option<&str>, t: &Theme) -> AnyElement {
     // Astride the row's top edge, as in Discord, so it covers a short message's neighbours
     // least; the first row keeps it inside, where the list would clip it.
     let mut bar = div()
@@ -497,9 +515,14 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
         .shadow_md()
         .opacity(0.)
         .group_hover(group.clone(), |s| s.opacity(1.));
-    for (i, emoji) in QUICK_REACTIONS.iter().enumerate() {
+    for (i, emoji) in quick_reactions(store).into_iter().enumerate() {
         let client = ctx.client.clone();
         let (chan, mid) = (ctx.channel_id.clone(), message.id.clone());
+        let label = match markdown::spans(&emoji).as_slice() {
+            [markdown::Span::Emoji { name, .. }] => format!(":{name}:"),
+            _ => emoji.clone(),
+        };
+        let picture = reaction_emoji(&emoji, (ix, 100 + i), store, guild_id);
         bar = bar.child(
             div()
                 .id(SharedString::from(format!("qr-{ix}-{i}")))
@@ -510,12 +533,15 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
                 .rounded(radius::MD)
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_hover))
-                .tooltip(tooltip(format!("React with {emoji}")))
+                .tooltip(tooltip(format!("React with {label}")))
                 .on_click(move |_, _, cx| {
-                    let (chan, mid) = (chan.clone(), mid.clone());
-                    client.update(cx, |c, cx| c.toggle_reaction(chan, mid, emoji.to_string(), cx));
+                    let (chan, mid, emoji) = (chan.clone(), mid.clone(), emoji.clone());
+                    client.update(cx, |c, cx| {
+                        c.use_emoji(emoji.clone());
+                        c.toggle_reaction(chan, mid, emoji, cx);
+                    });
                 })
-                .child(div().font_family(FONT_EMOJI).child(*emoji)),
+                .child(picture),
         );
     }
     let view = ctx.view.clone();
