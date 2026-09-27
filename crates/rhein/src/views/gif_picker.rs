@@ -295,6 +295,7 @@ impl Render for GifPicker {
             .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .w(px(picker_w(cols)))
             .h(px(PICKER_H))
+            .relative()
             .flex()
             .flex_col()
             .pt_3()
@@ -305,6 +306,17 @@ impl Render for GifPicker {
             .shadow_lg()
             .child(div().px_3().pb_2().child(self.search.clone()))
             .child(body)
-            .child(div().flex().px_2().py_1().border_t_1().border_color(t.border).child(toggle))
+            .child(
+                div()
+                    .absolute()
+                    .bottom_2()
+                    .left_2()
+                    .rounded(radius::MD)
+                    .bg(t.bg_base)
+                    .border_1()
+                    .border_color(t.border_strong)
+                    .shadow_md()
+                    .child(toggle),
+            )
     }
 }
