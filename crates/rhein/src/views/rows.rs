@@ -554,6 +554,7 @@ fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, star
         })
         .child(
             img(media)
+                .id("pic")
                 .max_w_full()
                 .max_h(px(PICTURE_MAX_H))
                 .object_fit(ObjectFit::Contain)
@@ -637,6 +638,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
         })
         .child(
             img(url)
+                .id("pic")
                 .map(|i| if aspect.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
                 .object_fit(ObjectFit::Contain)
                 .with_loading(move || {
@@ -791,7 +793,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                 let (open, name) = (open.clone(), name.clone());
                 view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
             })
-            .child(img(image).max_w_full().max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(image).id("pic").max_w_full().max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
             .children(star)
             .into_any_element();
     }
@@ -819,7 +821,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                     view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
                 }
             })
-            .child(img(image).max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(image).id("pic").max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
             .when(is_video, |d| {
                 d.child(
                     div().absolute().inset_0().flex().items_center().justify_center().child(
