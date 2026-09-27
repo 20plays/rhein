@@ -93,6 +93,8 @@ pub struct ChatView {
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
+    /// The reaction under the pointer (message ID, its index), which shows who reacted.
+    pub(crate) hovered_reaction: Option<(String, usize)>,
     /// The pixel size of each picture that has arrived, for the rows to lay it out whole.
     picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
@@ -236,6 +238,7 @@ impl ChatView {
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
             arrived: HashSet::new(),
+            hovered_reaction: None,
             picture_sizes: Rc::default(),
             row_progress: HashMap::new(),
             _subs: subs,

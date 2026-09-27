@@ -322,7 +322,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     })),
             )
         })
-        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t)))
+        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t, cx)))
         .children(thread_chip);
 
     let group = message_group(ix);
@@ -511,7 +511,7 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
     bar.into_any_element()
 }
 
-fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_id: Option<&str>, t: &Theme) -> AnyElement {
+fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_id: Option<&str>, t: &Theme, cx: &App) -> AnyElement {
     div()
         .flex()
         .flex_wrap()
@@ -519,12 +519,24 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
         .children(message.reactions.iter().enumerate().map(|(i, r)| {
             let client = ctx.client.clone();
             let (chan, mid, emoji) = (ctx.channel_id.clone(), message.id.clone(), r.emoji.clone());
-            let group = SharedString::from(format!("react-group-{ix}-{i}"));
-            let who = reactors(r, store, guild_id, group.clone(), t);
+            let hovered = ctx.view.upgrade().is_some_and(|v| v.read(cx).hovered_reaction.as_ref().is_some_and(|(m, n)| *m == message.id && *n == i));
+            let who = hovered.then(|| reactors(r, store, guild_id, t)).flatten();
+            let (view, hover_id) = (ctx.view.clone(), message.id.clone());
             div()
                 .id(SharedString::from(format!("react-{ix}-{i}")))
-                .group(group)
                 .relative()
+                .on_hover(move |hovered, _, cx| {
+                    let key = (hover_id.clone(), i);
+                    view.update(cx, |v, cx| {
+                        if *hovered {
+                            v.hovered_reaction = Some(key);
+                        } else if v.hovered_reaction.as_ref() == Some(&key) {
+                            v.hovered_reaction = None;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
                 .px_2()
                 .py_0p5()
                 .rounded(radius::MD)
@@ -550,7 +562,7 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
 
 /// Who reacted, shown to the left of the reaction while it is hovered: the first three, and how
 /// many more under them.
-fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, group: SharedString, t: &Theme) -> Option<AnyElement> {
+fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, t: &Theme) -> Option<AnyElement> {
     const SHOWN: usize = 3;
     if r.users.is_empty() {
         return None;
@@ -561,7 +573,8 @@ fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, g
         let label = if others == 1 { "and 1 other".to_owned() } else { format!("and {others} others") };
         div().text_color(t.text_faint).child(label)
     });
-    // Painted after the rows, so the messages below don't cover it.
+    // Painted after the rows, so the messages below don't cover it. (Not with `group_hover`: a
+    // deferred element is painted outside its group, so that never shows it.)
     Some(
         gpui::deferred(
             div()
@@ -569,8 +582,6 @@ fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, g
                 .top_0()
                 .right_full()
                 .mr_1()
-                .invisible()
-                .group_hover(group, |s| s.visible())
                 .flex()
                 .flex_col()
                 .px_2()
