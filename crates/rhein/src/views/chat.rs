@@ -34,6 +34,8 @@ const TYPING_IDLE: Duration = Duration::from_secs(8);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(1600);
 const COMPOSER_LINES: usize = 10;
 const LIGHTBOX_CONTEXT: &str = "Lightbox";
+/// Space between the message bar and the chat's bottom, left and right edges.
+const COMPOSER_MARGIN: Pixels = px(6.);
 
 pub fn bindings() -> Vec<KeyBinding> {
     vec![KeyBinding::new("escape", Dismiss, Some(LIGHTBOX_CONTEXT))]
@@ -1665,12 +1667,13 @@ impl ChatView {
             }))
         });
 
+        // The bar keeps the same distance from the bottom as from the sides.
         div()
             .relative()
             .flex_none()
-            .px_4()
+            .px(COMPOSER_MARGIN)
             .pt_2()
-            .pb_2()
+            .pb(COMPOSER_MARGIN)
             .flex()
             .flex_col()
             .children(typing_line)
@@ -1766,7 +1769,6 @@ impl ChatView {
                     )
                     .into_any_element()
             })
-            .pb_1()
     }
 
     /// The picture over the whole window, as large as fits and smoothed when shrunk. A click
