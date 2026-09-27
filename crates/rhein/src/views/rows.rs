@@ -20,6 +20,7 @@ use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
 use crate::views::chat::ChatView;
+use crate::views::media::{self, Media};
 use crate::views::message_text;
 
 /// Messages from the same author this close together share one header.
@@ -385,7 +386,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             let (view, m) = (ctx.view.clone(), message.clone());
             d.on_mouse_down(gpui::MouseButton::Right, move |e, window, cx| {
                 let (m, at) = (m.clone(), e.position);
-                view.update(cx, |v, cx| v.open_message_menu(m, at, window, cx)).ok();
+                view.update(cx, |v, cx| v.open_message_menu(m, None, at, window, cx)).ok();
             })
         });
 
@@ -501,7 +502,7 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
             view.update(cx, |v, cx| {
                 // A second press on the same button closes its menu.
                 if !v.menu.toggle(&format!("more-{}", m.id), cx) {
-                    v.open_message_menu(m, at, window, cx);
+                    v.open_message_menu(m, None, at, window, cx);
                 }
             })
             .ok();
@@ -562,6 +563,9 @@ fn fit(width: Option<i64>, height: Option<i64>) -> (Pixels, Option<f32>) {
 fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, starred: bool, t: &Theme, cx: &App) -> AnyElement {
     let group = SharedString::from(format!("gif-group-{ix}-{n}"));
     let star = starred.then(|| gif_star(ctx, format!("gif-star-{ix}-{n}"), message_group(ix), media.clone(), t, cx));
+    // A still picture (not a GIF) can be saved from its corner.
+    let save = (!starred).then(|| download_button(ctx, format!("gif-save-{ix}-{n}"), group.clone(), Media::new(media.clone(), media.clone()), t));
+    let menu_media = Media::new(media.clone(), media.clone());
     let view = ctx.view.clone();
     let (open, raised, faint) = (media.clone(), t.bg_raised, t.text_faint);
     let Fitted { source, size } = picture(ctx, &media, f32::MAX);
@@ -590,6 +594,8 @@ fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, star
                 }),
         )
         .children(star)
+        .children(save)
+        .map(|d| media_menu(d, ctx, ix, menu_media))
         .into_any_element()
 }
 
@@ -633,6 +639,38 @@ fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Them
         .into_any_element()
 }
 
+/// Right-clicking a picture opens its message's menu, starting with copying and saving it.
+fn media_menu<E: InteractiveElement>(el: E, ctx: &RowCtx, ix: usize, media: Media) -> E {
+    let view = ctx.view.clone();
+    el.on_mouse_down(gpui::MouseButton::Right, move |e, window, cx| {
+        cx.stop_propagation();
+        let (media, at) = (media.clone(), e.position);
+        view.update(cx, |v, cx| v.open_media_menu(ix, media, at, window, cx)).ok();
+    })
+}
+
+/// The download button in a still picture's top right corner, shown while it is hovered.
+fn download_button(ctx: &RowCtx, id: String, group: SharedString, media: Media, t: &Theme) -> AnyElement {
+    let client = ctx.client.clone();
+    div()
+        .absolute()
+        .top_1p5()
+        .right_1p5()
+        .rounded(radius::MD)
+        .bg(t.bg_base)
+        .invisible()
+        .group_hover(group, |s| s.visible())
+        .child(
+            IconButton::new(SharedString::from(id), Icon::Download)
+                .tooltip("Download")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    media::download(&client, media.clone(), cx);
+                }),
+        )
+        .into_any_element()
+}
+
 fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
     // The size the attachment says it has, else the one it turned out to have once it arrived.
@@ -643,6 +681,8 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let Fitted { source, size } = fitted(url.clone(), natural, gpui::size(px(f32::MAX), px(PICTURE_MAX_H)), ctx.scale_factor);
     let group = SharedString::from(format!("img-group-{ix}-{i}"));
     let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), message_group(ix), url.clone(), t, cx));
+    let menu_media = Media::new(url.clone(), a.filename.clone());
+    let save = (a.mime != "image/gif").then(|| download_button(ctx, format!("img-save-{ix}-{i}"), group.clone(), menu_media.clone(), t));
     let view = ctx.view.clone();
     let (open, name) = (url.clone(), a.filename.clone());
     let fallback_name = a.filename.clone();
@@ -682,6 +722,8 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
                 }),
         )
         .children(star)
+        .children(save)
+        .map(|d| media_menu(d, ctx, ix, menu_media))
         .into_any_element()
 }
 
@@ -803,7 +845,10 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         let (open, name) = (image.clone(), e.url.clone());
         // A GIF is kept by its picture's own link, which draws anywhere.
         let group = SharedString::from(format!("embed-group-{ix}-{n}"));
-        let star = (gif_links::is_gif(&image) || gif_links::is_gif(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), message_group(ix), image.clone(), t, cx));
+        let is_gif = gif_links::is_gif(&image) || gif_links::is_gif(&e.url);
+        let star = is_gif.then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), message_group(ix), image.clone(), t, cx));
+        let menu_media = Media::new(image.clone(), image.clone());
+        let save = (!is_gif).then(|| download_button(ctx, format!("embed-save-{ix}-{n}"), group.clone(), menu_media.clone(), t));
         let Fitted { source, size } = picture(ctx, &image, f32::MAX);
         return picture_box(div(), size)
             .id(SharedString::from(format!("embed-{ix}-{n}")))
@@ -818,6 +863,8 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
             })
             .child(img(source).id("pic").map(|i| if size.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) }).object_fit(ObjectFit::Contain))
             .children(star)
+            .children(save)
+            .map(|d| media_menu(d, ctx, ix, menu_media))
             .into_any_element();
     }
     let link = e.url.clone();
@@ -829,8 +876,13 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         let name = e.url.clone();
         let view = view.clone();
         let Fitted { source, size } = picture(ctx, &image, IMAGE_MAX_W);
+        let group = SharedString::from(format!("embed-media-group-{ix}-{n}"));
+        let menu_media = Media::new(image.clone(), image.clone());
+        let save = (!is_video && !gif_links::is_gif(&image))
+            .then(|| download_button(ctx, format!("embed-media-save-{ix}-{n}"), group.clone(), menu_media.clone(), t));
         div()
             .id(SharedString::from(format!("embed-media-{ix}-{n}")))
+            .group(group)
             .relative()
             .self_start()
             .mt_2()
@@ -868,6 +920,8 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                     ),
                 )
             })
+            .children(save)
+            .when(!is_video, |d| media_menu(d, ctx, ix, menu_media))
     });
     div()
         .max_w(px(IMAGE_MAX_W + 32.))

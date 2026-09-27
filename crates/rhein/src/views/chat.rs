@@ -25,6 +25,7 @@ use rhein_ui::{motion,
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
 use crate::views::gif_picker::{GifPicker, PickedGif};
+use crate::views::media::{self, Media};
 use crate::views::rows::{RowCtx, format_size, message_key, render_row};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
@@ -1033,7 +1034,15 @@ impl ChatView {
 
     // ---------------------------------------------------------------- context menu
 
-    pub(crate) fn open_message_menu(&mut self, message: Message, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The menu of the message at `ix` in this channel, opened on one of its pictures.
+    pub(crate) fn open_media_menu(&mut self, ix: usize, media: Media, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel) = self.current() else { return };
+        let Some(message) = self.client.read(cx).logs.get(&channel).and_then(|log| log.messages.get(ix)).cloned() else { return };
+        self.open_message_menu(message, Some(media), at, window, cx);
+    }
+
+    /// The menu of a message; opened on one of its pictures, it starts with copying and saving it.
+    pub(crate) fn open_message_menu(&mut self, message: Message, media: Option<Media>, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(channel) = self.current() else { return };
         let client = self.client.read(cx);
         let mine = client.user_id() == Some(message.author.as_str());
@@ -1042,6 +1051,15 @@ impl ChatView {
         let in_thread = client.channel(&channel).is_some_and(|c| c.is_thread());
         let this = cx.weak_entity();
         let mut entries = Vec::new();
+        if let Some(media) = media {
+            let (client, url) = (self.client.clone(), media.url.clone());
+            entries.push(MenuEntry::item("Copy picture", move |_, cx| media::copy(&client, url.clone(), cx)).with_icon(Icon::Copy));
+            let client = self.client.clone();
+            entries.push(
+                MenuEntry::item("Download picture", move |_, cx| media::download(&client, media.clone(), cx)).with_icon(Icon::Download),
+            );
+            entries.push(MenuEntry::Separator);
+        }
         {
             let (this, id) = (this.clone(), message.id.clone());
             entries.push(
@@ -1756,7 +1774,7 @@ impl ChatView {
     fn render_lightbox(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (url, name) = self.lightbox.clone()?;
         let t = cx.theme().clone();
-        let open = url.clone();
+        let (open, save, save_name) = (url.clone(), url.clone(), name.clone());
         let viewport = window.viewport_size();
         // Room left by the padding (`p_8`), the caption row and the gap above it.
         let bound = gpui::size(viewport.width - px(64.), (viewport.height - px(64.) - px(48.)) * 0.95);
@@ -1803,7 +1821,17 @@ impl ChatView {
                                 cx.stop_propagation();
                                 cx.open_url(&open);
                             }),
-                    ),
+                    )
+                    .child({
+                        let (client, media) = (self.client.clone(), Media::new(save, save_name));
+                        Button::new("lightbox-download", "Download")
+                            .ghost()
+                            .icon(Icon::Download)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                media::download(&client, media.clone(), cx);
+                            })
+                    }),
             );
         // Over the whole window, not just the chat, so the sidebars close it too.
         Some(deferred(anchored().position(gpui::point(px(0.), px(0.))).child(overlay)).with_priority(3).into_any_element())

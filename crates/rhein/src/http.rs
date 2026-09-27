@@ -66,7 +66,8 @@ impl HttpClient for Client {
     }
 }
 
-fn read(body: AsyncBody) -> Result<Option<Vec<u8>>> {
+/// A buffered body's bytes (this client buffers every response).
+pub(crate) fn read(body: AsyncBody) -> Result<Option<Vec<u8>>> {
     match body.0 {
         Inner::Empty => Ok(None),
         Inner::Bytes(mut cursor) => {
