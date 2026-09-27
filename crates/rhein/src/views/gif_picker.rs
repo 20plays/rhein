@@ -2,6 +2,7 @@
 //! (the words in their links), sent with a click, taken out with their star.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -26,6 +27,8 @@ const GAP: f32 = 12.;
 /// Two columns, or four in the wide picker.
 const COLS: usize = 2;
 const WIDE_COLS: usize = 4;
+/// How far above and below the view tiles are still rendered (and their pictures loaded).
+const OVERSCAN: f32 = PICKER_H;
 /// Share/media resolutions started per frame; a large favourites list ramps up gradually.
 const MAX_RESOLVE_PER_FRAME: usize = 8;
 
@@ -42,6 +45,9 @@ pub struct GifPicker {
     scroll: ScrollHandle,
     /// Four columns instead of two; shared with the chat so reopening keeps the choice.
     wide: Rc<Cell<bool>>,
+    /// The height of each favourite's tile once its picture has loaded; others count as
+    /// `TILE_H`, the height of their placeholder.
+    heights: HashMap<String, f32>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -87,7 +93,7 @@ impl GifPicker {
             }),
         ];
         window.focus(&search.focus_handle(cx), cx);
-        GifPicker { client, search, scroll: ScrollHandle::new(), wide, focus: cx.focus_handle(), _subs: subs }
+        GifPicker { client, search, scroll: ScrollHandle::new(), wide, heights: HashMap::new(), focus: cx.focus_handle(), _subs: subs }
     }
 
     fn shown(&self, cx: &App) -> Vec<String> {
@@ -246,18 +252,33 @@ impl Render for GifPicker {
                 // Masonry: favourite `i` goes to column `i % cols`, and each column stacks its
                 // pictures at their own heights. Aspect ratios are only known once a picture
                 // loads, so the columns are filled in order rather than shortest-first.
+                //
+                // Only tiles near the view are rendered, and only their pictures loaded: a
+                // decoded GIF holds every frame, so loading hundreds of favourites at once runs
+                // a machine out of memory. The rest of a column is a spacer of the heights its
+                // tiles are known (or assumed) to have.
+                let top = -f32::from(self.scroll.offset().y);
+                let view_h = f32::from(self.scroll.bounds().size.height).max(PICKER_H);
+                let (lo, hi) = (top - OVERSCAN, top + view_h + OVERSCAN);
                 let view: WeakEntity<Self> = cx.weak_entity();
                 let mut shares_missing: Vec<String> = Vec::new();
                 let mut probes_missing: Vec<String> = Vec::new();
                 let mut columns: Vec<Vec<AnyElement>> = (0..cols).map(|_| Vec::new()).collect();
-                let previews: Vec<(String, Preview)> = {
-                    let client = self.client.read(cx);
-                    shown.into_iter().map(|url| {
-                        let preview = Preview::of(&url, client, &mut shares_missing, &mut probes_missing);
-                        (url, preview)
-                    }).collect()
-                };
-                for (idx, (url, preview)) in previews.into_iter().enumerate() {
+                let mut ys = vec![GAP; cols];
+                let mut gaps = vec![0f32; cols];
+                for (idx, url) in shown.into_iter().enumerate() {
+                    let col = idx % cols;
+                    let h = self.heights.get(&url).copied().unwrap_or(TILE_H);
+                    let y = ys[col];
+                    ys[col] += h + GAP;
+                    if y + h < lo || y > hi {
+                        gaps[col] += h + GAP;
+                        continue;
+                    }
+                    if gaps[col] > 0. {
+                        columns[col].push(div().flex_none().h(px(std::mem::take(&mut gaps[col]))).into_any_element());
+                    }
+                    let preview = Preview::of(&url, self.client.read(cx), &mut shares_missing, &mut probes_missing);
                     let preview = match preview {
                         Preview::Image(media) => {
                             let bound = gpui::size(px(TILE_W), px(f32::MAX));
@@ -268,7 +289,17 @@ impl Render for GifPicker {
                         }
                         other => other,
                     };
-                    columns[idx % cols].push(tile(idx, url, preview, &t, view.clone(), self.client.clone()));
+                    let known = match &preview {
+                        Preview::Fitted(Fitted { size: Some(s), .. }) => TILE_W * f32::from(s.height) / f32::from(s.width),
+                        _ => TILE_H,
+                    };
+                    self.heights.insert(url.clone(), known);
+                    columns[col].push(div().flex_none().pb(px(GAP)).child(tile(idx, url, preview, &t, view.clone(), self.client.clone())).into_any_element());
+                }
+                for (col, gap) in gaps.into_iter().enumerate() {
+                    if gap > 0. {
+                        columns[col].push(div().flex_none().h(px(gap)).into_any_element());
+                    }
                 }
                 // Capped per frame: each resolution notifies the client and renders again, so a
                 // large list ramps up instead of bursting every provider and hitting rate limits.
@@ -293,13 +324,16 @@ impl Render for GifPicker {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
+                    // Scrolling brings other tiles into view: render again.
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
                         div()
                             .flex()
                             .items_start()
                             .gap_3()
-                            .p_3()
-                            .children(columns.into_iter().map(|tiles| div().flex().flex_col().gap_3().children(tiles))),
+                            .px_3()
+                            .pt_3()
+                            .children(columns.into_iter().map(|tiles| div().flex().flex_col().children(tiles))),
                     )
                     .into_any_element()
             }
