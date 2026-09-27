@@ -119,6 +119,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let links = if strip_embeds || !client.prefs.link_previews { Vec::new() } else { markdown::links_in(&message.content) };
     let mut missing = Vec::new();
     let mut media_missing = Vec::new();
+    let mut shares_missing = Vec::new();
+    let mut page_gifs = Vec::new();
     let mut cards = Vec::new();
     for url in &links {
         if is_invite(url) {
@@ -141,6 +143,26 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 }
             }
         }
+        // Any other page shows as the GIF its tags name, if they name one; its card waits until
+        // that is known (its preview is asked for meanwhile), so it doesn't swap under the reader.
+        if gif_links::is_page_link(url) {
+            match client.gif_share(url) {
+                Some(GifShare::Ready(media)) => {
+                    page_gifs.push((url.clone(), media));
+                    continue;
+                }
+                Some(GifShare::Failed) => {}
+                state => {
+                    if state.is_none() {
+                        shares_missing.push(url.clone());
+                    }
+                    if client.embed(channel_id, url).is_none() {
+                        missing.push(url.clone());
+                    }
+                    continue;
+                }
+            }
+        }
         match client.embed(channel_id, url) {
             Some(EmbedState::Ready(embed)) => cards.push(embed_card(ctx, ix, cards.len(), embed, &t, cx)),
             Some(EmbedState::Loading) => {}
@@ -152,7 +174,6 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let seen = client.dm_seen(channel_id) == Some(message.id.as_str());
 
     // GIF links: the picture itself (a share page once its provider has named it).
-    let mut shares_missing = Vec::new();
     let mut gifs = Vec::new();
     for (n, url) in client.gif_links_in(&message.content).into_iter().enumerate() {
         match gif_links::share(&url) {
@@ -164,6 +185,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 None => shares_missing.push(url),
             },
         }
+    }
+    // Pages whose tags named a GIF.
+    for (url, media) in page_gifs {
+        let n = gifs.len() + 200;
+        gifs.push(gif_tile(ctx, ix, n, media, url, true, &t, cx));
     }
     // Telium media that proved to be a still picture: shown as one, without the GIF star.
     for url in gif_links::telium_media_in(&message.content) {
@@ -1216,6 +1242,18 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMed
                     media.probes.push(url.clone());
                     continue;
                 }
+            }
+        }
+        if gif_links::is_page_link(url) {
+            match client.gif_share(url) {
+                Some(GifShare::Ready(picture)) => {
+                    6u8.hash(&mut progress);
+                    media.pictures.push(picture);
+                    continue;
+                }
+                Some(GifShare::Loading) => 7u8.hash(&mut progress),
+                Some(GifShare::Failed) => 8u8.hash(&mut progress),
+                None => media.shares.push(url.clone()),
             }
         }
         match client.embed(channel_id, url) {

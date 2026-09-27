@@ -145,6 +145,12 @@ pub fn gifs_in(content: &str) -> Vec<String> {
     links_in(content).into_iter().filter(|u| is_gif(u)).collect()
 }
 
+/// Whether a link is an ordinary web page, which shows as a GIF when its tags name one (see
+/// `page_gif`): an https link that is neither a GIF itself nor Telium media.
+pub fn is_page_link(value: &str) -> bool {
+    https(value).is_some() && !is_gif(value) && !is_telium_media(value)
+}
+
 /// Whether a link is a file on a Telium media origin (`/_telium/v1/media/{hash}`, or a remote
 /// one's `/_telium/v1/media/remote/{origin}/{hash}`). Its name says nothing about what it is: an
 /// uploaded GIF is known as one only by the type the origin serves it with.
@@ -225,6 +231,16 @@ pub fn klipy_media(payload: &serde_json::Value, slug: &str) -> Option<String> {
 /// The GIF a share page names in its Open Graph tags, as Discord embeds it: the `og:image` that
 /// is a GIF (by its `og:image:type` or its path), else the first `og:image` or `twitter:image`.
 pub fn page_media(html: &str) -> Option<String> {
+    page_images(html, false)
+}
+
+/// The GIF any page names in its Open Graph or Twitter tags, if it names one: what makes a link
+/// to it show as that GIF.
+pub fn page_gif(html: &str) -> Option<String> {
+    page_images(html, true)
+}
+
+fn page_images(html: &str, gif_only: bool) -> Option<String> {
     let mut images: Vec<(String, Option<String>)> = Vec::new();
     let mut twitter: Option<String> = None;
     for tag in html.split("<meta").skip(1) {
@@ -243,12 +259,14 @@ pub fn page_media(html: &str) -> Option<String> {
             _ => {}
         }
     }
-    let gif = images.iter().find(|(url, kind)| kind.as_deref() == Some("image/gif") || https(url).is_some_and(|u| decoded_path(&u).to_lowercase().ends_with(".gif")));
-    gif.or(images.first())
-        .map(|(url, _)| url.clone())
-        .or(twitter)
-        .and_then(|u| https(&u))
-        .map(|u| u.to_string())
+    let is_gif = |url: &str| https(url).is_some_and(|u| decoded_path(&u).to_lowercase().ends_with(".gif"));
+    let gif = images.iter().find(|(url, kind)| kind.as_deref() == Some("image/gif") || is_gif(url)).map(|(url, _)| url.clone());
+    let found = if gif_only {
+        gif.or(twitter.filter(|u| is_gif(u)))
+    } else {
+        gif.or(images.first().map(|(url, _)| url.clone())).or(twitter)
+    };
+    found.and_then(|u| https(&u)).map(|u| u.to_string())
 }
 
 /// A quoted attribute's value in the inside of an HTML tag, with its entities decoded.
@@ -312,6 +330,17 @@ mod tests {
         assert_eq!(super::page_media(html).as_deref(), Some("https://media.tenor.com/y/still.png"));
         assert_eq!(super::page_media(r#"<meta property="og:image" content="http://insecure/x.gif">"#), None);
         assert_eq!(super::page_media("<html></html>"), None);
+    }
+
+    #[test]
+    fn page_gif_takes_only_a_gif() {
+        let still = r#"<meta property="og:image" content="https://news.example/cover.jpg">"#;
+        assert_eq!(super::page_gif(still), None);
+        let gif = r#"<meta property="og:image" content="https://cdn.example/cat">
+            <meta property="og:image:type" content="image/gif">"#;
+        assert_eq!(super::page_gif(gif).as_deref(), Some("https://cdn.example/cat"));
+        let twitter = r#"<meta name="twitter:image" content="https://cdn.example/dance.GIF">"#;
+        assert_eq!(super::page_gif(twitter).as_deref(), Some("https://cdn.example/dance.GIF"));
     }
 
     use super::*;
