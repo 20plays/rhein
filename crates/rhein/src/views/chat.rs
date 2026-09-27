@@ -57,6 +57,8 @@ pub struct ChatView {
     picker: Option<OpenPicker>,
     /// The GIF favourites menu, where it is anchored, its subscriptions.
     gif_picker: Option<(Entity<GifPicker>, Point<Pixels>, Vec<Subscription>)>,
+    /// The GIF picker shows four columns instead of two; kept across openings.
+    gif_picker_wide: Rc<Cell<bool>>,
     /// When a composer picker (GIF or emoji) last closed by a click outside it: the click on
     /// its own button that closed it must not open it again.
     picker_closed: Option<(String, std::time::Instant)>,
@@ -210,6 +212,7 @@ impl ChatView {
             fixed,
             picker: None,
             gif_picker: None,
+            gif_picker_wide: Rc::new(Cell::new(false)),
             picker_closed: None,
             suggest: None,
             menu: MenuHost::default(),
@@ -765,7 +768,7 @@ impl ChatView {
             cx.notify();
             return;
         }
-        let picker = cx.new(|cx| GifPicker::new(self.client.clone(), window, cx));
+        let picker = cx.new(|cx| GifPicker::new(self.client.clone(), self.gif_picker_wide.clone(), window, cx));
         let pick = cx.subscribe_in(&picker, window, |this, _, picked: &PickedGif, window, cx| {
             this.gif_picker = None;
             if let Some(channel) = this.current() {
