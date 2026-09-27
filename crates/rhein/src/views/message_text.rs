@@ -1,8 +1,8 @@
 //! Renders a parsed message (`rhein_store::markdown`) with GPUI rich text.
 //!
 //! Inline spans are flattened into one string per block with non-overlapping highlight ranges;
-//! nested emphasis combines into one style per leaf. Clickable leaves (links, channel mentions,
-//! spoilers) become `InteractiveText` click ranges.
+//! nested emphasis combines into one style per leaf. Clickable leaves (links, channel and user
+//! mentions, spoilers) become `InteractiveText` click ranges.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -25,6 +25,8 @@ use crate::views::select;
 enum Action {
     Open(String),
     Channel(String),
+    /// A user mention: opens their profile.
+    User(String),
     Spoiler(usize),
 }
 
@@ -131,12 +133,16 @@ fn inline(
     let view = ctx.view.clone();
     let message_id = ctx.message_id.to_owned();
     let element_id = SharedString::from(format!("text-{}-{}", id.0, id.1));
-    let interactive = InteractiveText::new(element_id, styled).on_click(ranges, move |ix, _window, cx| {
+    let interactive = InteractiveText::new(element_id, styled).on_click(ranges, move |ix, window, cx| {
         match &actions[ix] {
             Action::Open(url) => cx.open_url(url),
             Action::Channel(channel) => {
                 let channel = channel.clone();
                 client.update(cx, |c, cx| c.select_channel(channel, cx));
+            }
+            Action::User(user) => {
+                let (user, at) = (user.clone(), window.mouse_position());
+                view.update(cx, |v, cx| v.show_profile(user, at, cx)).ok();
             }
             Action::Spoiler(n) => {
                 let key = (message_id.clone(), *n);
@@ -148,7 +154,7 @@ fn inline(
 }
 
 /// The block's highlights with the clickable range under the pointer brightened: a link takes
-/// its hover colour, a channel a stronger background.
+/// its hover colour, a channel or user mention a stronger background.
 fn hover_marks(ctx: &Context, block: usize, highlights: Vec<(Range<usize>, HighlightStyle)>, clicks: &[(Range<usize>, Action)], t: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
     let Some((b, range)) = &ctx.hovered else { return highlights };
     if *b != block {
@@ -156,7 +162,7 @@ fn hover_marks(ctx: &Context, block: usize, highlights: Vec<(Range<usize>, Highl
     }
     let style = match clicks.iter().find(|(r, _)| r == range).map(|(_, a)| a) {
         Some(Action::Open(_)) => HighlightStyle { color: Some(t.link_hover.into()), ..Default::default() },
-        Some(Action::Channel(_)) => HighlightStyle { background_color: Some(t.selection.into()), ..Default::default() },
+        Some(Action::Channel(_) | Action::User(_)) => HighlightStyle { background_color: Some(t.selection.into()), ..Default::default() },
         Some(Action::Spoiler(_)) | None => return highlights,
     };
     let mut sorted = highlights;
@@ -319,7 +325,7 @@ fn flatten(
                 let label = format!("@{}", client.display_name(ctx.guild_id, user));
                 let mine = ctx.me == Some(user.as_str());
                 let s = if mine { pill(t.warning.into(), gpui::Hsla::from(t.warning).opacity(0.18)) } else { pill(t.accent.into(), t.accent_soft.into()) };
-                push(flat, &label, merge(style, s), None);
+                push(flat, &label, merge(style, s), Some(Action::User(user.clone())));
             }
             Span::Broadcast(b) => {
                 push(flat, b, merge(style, pill(t.warning.into(), gpui::Hsla::from(t.warning).opacity(0.18))), None);
