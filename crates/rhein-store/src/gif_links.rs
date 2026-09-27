@@ -201,9 +201,13 @@ pub fn tenor_media(payload: &serde_json::Value, id: &str) -> Option<String> {
         .map(|u| u.to_string())
 }
 
-/// The GIF of a Klipy search answer whose slug is `slug`.
+/// The GIF whose slug is `slug` in a Klipy answer: a search's list, or the one item of a lookup
+/// by slug.
 pub fn klipy_media(payload: &serde_json::Value, slug: &str) -> Option<String> {
-    let items = [&payload["data"]["data"], &payload["data"], &payload["results"], &payload["gifs"]].into_iter().find_map(|v| v.as_array())?;
+    let single = payload["data"]["slug"].is_string().then(|| std::slice::from_ref(&payload["data"]));
+    let items = single.or_else(|| {
+        [&payload["data"]["data"], &payload["data"], &payload["results"], &payload["gifs"]].into_iter().find_map(|v| v.as_array().map(Vec::as_slice))
+    })?;
     let wanted = slug.to_lowercase();
     let item = items.iter().find(|i| {
         i["slug"].as_str().map(str::to_lowercase).is_some_and(|s| s == wanted || s.starts_with(&format!("{wanted}--")))
@@ -311,5 +315,7 @@ mod tests {
         assert_eq!(tenor_media(&tenor, "1"), None);
         let klipy = json!({"data":{"data":[{"slug":"other","file":{"md":{"gif":{"url":"https://media.klipy.com/o.gif"}}}},{"slug":"big-5--x","file":{"hd":{"gif":{"url":"https://media.klipy.com/b.gif"}}}}]}});
         assert_eq!(klipy_media(&klipy, "big-5").as_deref(), Some("https://media.klipy.com/b.gif"));
+        let item = json!({"result":true,"data":{"slug":"lucky-star-konata-25","file":{"hd":{"gif":{"url":"https://static.klipy.com/k.gif"}}}}});
+        assert_eq!(klipy_media(&item, "lucky-star-konata-25").as_deref(), Some("https://static.klipy.com/k.gif"));
     }
 }

@@ -216,11 +216,15 @@ async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, shar
                 return Ok(None);
             };
             let base = provider["api_base_url"].as_str().unwrap_or("https://api.klipy.com/api/v1").trim_end_matches('/');
-            let url = format!(
-                "{base}/{}/gifs/search?page=1&limit=24&per_page=24&q={}",
-                urlencoding::encode(key),
-                urlencoding::encode(slug)
-            );
+            let key = urlencoding::encode(key);
+            // The GIF by its slug; a search for the slug finds it only among the first results.
+            let item = format!("{base}/{key}/gifs/{}", urlencoding::encode(slug));
+            match get(item).await {
+                Ok(payload) if gif_links::klipy_media(&payload, slug).is_some() => return Ok(gif_links::klipy_media(&payload, slug)),
+                Ok(_) => {}
+                Err(err) => log::debug!("klipy item {slug}: {err:#}"),
+            }
+            let url = format!("{base}/{key}/gifs/search?page=1&limit=24&per_page=24&q={}", urlencoding::encode(slug));
             Ok(gif_links::klipy_media(&get(url).await?, slug))
         }
     }
