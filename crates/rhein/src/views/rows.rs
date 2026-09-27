@@ -519,8 +519,12 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
         .children(message.reactions.iter().enumerate().map(|(i, r)| {
             let client = ctx.client.clone();
             let (chan, mid, emoji) = (ctx.channel_id.clone(), message.id.clone(), r.emoji.clone());
+            let group = SharedString::from(format!("react-group-{ix}-{i}"));
+            let who = reactors(r, store, guild_id, group.clone(), t);
             div()
                 .id(SharedString::from(format!("react-{ix}-{i}")))
+                .group(group)
+                .relative()
                 .px_2()
                 .py_0p5()
                 .rounded(radius::MD)
@@ -539,8 +543,51 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
                 .gap_1()
                 .child(reaction_emoji(&r.emoji, (ix, i), store, guild_id))
                 .child(div().text_color(if r.me { t.accent } else { t.text_muted }).child(r.count.to_string()))
+                .children(who)
         }))
         .into_any_element()
+}
+
+/// Who reacted, shown to the left of the reaction while it is hovered: the first three, and how
+/// many more under them.
+fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, group: SharedString, t: &Theme) -> Option<AnyElement> {
+    const SHOWN: usize = 3;
+    if r.users.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = r.users.iter().take(SHOWN).map(|u| store.display_name(guild_id, u)).collect();
+    let others = (r.count.max(r.users.len() as i64) as usize).saturating_sub(names.len());
+    let more = (others > 0).then(|| {
+        let label = if others == 1 { "and 1 other".to_owned() } else { format!("and {others} others") };
+        div().text_color(t.text_faint).child(label)
+    });
+    // Painted after the rows, so the messages below don't cover it.
+    Some(
+        gpui::deferred(
+            div()
+                .absolute()
+                .top_0()
+                .right_full()
+                .mr_1()
+                .invisible()
+                .group_hover(group, |s| s.visible())
+                .flex()
+                .flex_col()
+                .px_2()
+                .py_1()
+                .rounded(radius::MD)
+                .bg(t.bg_raised)
+                .border_1()
+                .border_color(t.border_strong)
+                .shadow_md()
+                .text_size(text::XS)
+                .text_color(t.text)
+                .whitespace_nowrap()
+                .children(names.into_iter().map(|n| div().child(n)))
+                .children(more),
+        )
+        .into_any_element(),
+    )
 }
 
 /// A reaction's emoji: a custom one (`<name:ID>`) as its picture, a unicode one as text.
