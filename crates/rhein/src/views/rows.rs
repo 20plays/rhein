@@ -244,8 +244,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         selected,
         hovered,
         pending: pending && !failed,
+        // "(edited)" follows the last line when the message ends in one; else it gets its own.
+        edited: message.edited_at.is_some() && message_text::ends_in_text(&doc),
     };
     let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(&doc, &text_ctx, cx));
+    let edited_line = message.edited_at.is_some() && !(body_text.is_some() && text_ctx.edited);
 
     // Indexed by position in the message, which is how an encrypted attachment is found again.
     type Indexed<'a> = Vec<(usize, &'a Attachment)>;
@@ -287,7 +290,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             )
         })
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
-        .when(message.edited_at.is_some(), |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("(edited)")))
+        .when(edited_line, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(message_text::EDITED)))
         .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t, cx)))
         .children(files.into_iter().map(|(i, a)| {
             if rhein_voice::playback::playable(&a.filename, &a.mime) {

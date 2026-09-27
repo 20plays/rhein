@@ -43,6 +43,17 @@ pub struct Context<'a> {
     pub selected: Option<(usize, Range<usize>)>,
     /// The clickable range under the pointer in this message: the block and the byte range.
     pub hovered: Option<(usize, Range<usize>)>,
+    /// The message was edited: "(edited)" follows its last line (see [`ends_in_text`]).
+    pub edited: bool,
+}
+
+/// What an edited message is marked with, after its last line.
+pub const EDITED: &str = "(edited)";
+
+/// Whether the message ends in a line of text, which "(edited)" can follow; otherwise (a code
+/// block, big emoji) the row shows it on a line of its own.
+pub fn ends_in_text(doc: &Document) -> bool {
+    !doc.jumbo && matches!(doc.blocks.last(), Some(Block::Text(_) | Block::Quote(_)))
 }
 
 struct Flat {
@@ -63,15 +74,17 @@ pub fn render(doc: &Document, ctx: &Context, cx: &App) -> AnyElement {
         return col.child(jumbo(doc, ctx, &t, cx)).into_any_element();
     }
     let mut spoiler_base = 0;
+    let last = doc.blocks.len().saturating_sub(1);
     for (i, block) in doc.blocks.iter().enumerate() {
+        let tail = ctx.edited && i == last;
         match block {
             Block::Text(spans) => {
-                let (el, used) = inline(spans, ctx, &t, cx, (ctx.message_id, i), spoiler_base);
+                let (el, used) = inline(spans, ctx, &t, cx, (ctx.message_id, i), spoiler_base, tail);
                 spoiler_base += used;
                 col = col.child(el);
             }
             Block::Quote(spans) => {
-                let (el, used) = inline(spans, ctx, &t, cx, (ctx.message_id, i), spoiler_base);
+                let (el, used) = inline(spans, ctx, &t, cx, (ctx.message_id, i), spoiler_base, tail);
                 spoiler_base += used;
                 col = col.child(
                     div().flex().child(div().w(px(3.)).flex_none().rounded(px(2.)).bg(t.border_strong)).child(
@@ -110,10 +123,17 @@ fn inline(
     cx: &App,
     id: (&str, usize),
     spoiler_base: usize,
+    edited: bool,
 ) -> (AnyElement, usize) {
     let mut flat = Flat { text: String::new(), highlights: Vec::new(), mono: Vec::new(), clicks: Vec::new(), spoilers: 0 };
     let base = HighlightStyle { color: Some(if ctx.pending { t.text_faint } else { t.text }.into()), ..Default::default() };
     flatten(spans, base, ctx, t, cx, &mut flat, spoiler_base);
+    // Right after the last line, faint and monospaced, instead of on a line of its own.
+    if edited {
+        push(&mut flat, " ", base, None);
+        let range = push(&mut flat, EDITED, HighlightStyle { color: Some(t.text_faint.into()), ..Default::default() }, None);
+        flat.mono.push((range, FONT_MONO.into()));
+    }
     let used = flat.spoilers;
     // Font overrides must be sorted and must not overlap (code spans hold no emoji ranges).
     flat.mono.sort_by_key(|(r, _)| r.start);
