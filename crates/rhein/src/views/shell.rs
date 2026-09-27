@@ -2703,6 +2703,20 @@ impl Shell {
         let gid = client.selected_guild.clone()?;
         let members = client.members.get(&gid)?;
         let (online, offline): (Vec<_>, Vec<_>) = members.iter().partition(|m| m.status() != "offline");
+        // Roles shown separately each get a heading, highest first, and an online member stands
+        // under exactly one: the highest of them they hold (as the web client groups them).
+        // Everyone else online goes under "Online"; offline members are never grouped.
+        let mut hoisted: Vec<&rhein_proto::Role> = client.guild(&gid).map(|g| g.guild.roles.iter().filter(|r| r.hoist).collect()).unwrap_or_default();
+        hoisted.sort_by_key(|r| std::cmp::Reverse(r.position));
+        let mut groups: Vec<Vec<&rhein_proto::Member>> = vec![Vec::new(); hoisted.len()];
+        let mut ungrouped = Vec::new();
+        for m in online {
+            let held = if client.user_id() == Some(m.user_id.as_str()) { client.my_roles(&gid) } else { m.roles.clone() };
+            match hoisted.iter().position(|r| held.contains(&r.id)) {
+                Some(best) => groups[best].push(m),
+                None => ungrouped.push(m),
+            }
+        }
         let this = cx.weak_entity();
         let row = |m: &rhein_proto::Member| {
             let name = m.shown_name().to_owned();
@@ -2734,8 +2748,16 @@ impl Shell {
                     weak2.update(cx, |v, cx| v.member_menu(u, at, window, cx)).ok();
                 })
         };
-        let online_label = section_label(format!("Online — {}", online.len()), cx).pt_2();
-        let offline_label = (!offline.is_empty()).then(|| section_label(format!("Offline — {}", offline.len()), cx));
+        let mut sections: Vec<AnyElement> = Vec::new();
+        let named = hoisted.iter().map(|r| r.name.clone()).zip(groups);
+        for (label, list) in named.chain([("Online".to_owned(), ungrouped), ("Offline".to_owned(), offline)]) {
+            if list.is_empty() {
+                continue;
+            }
+            let heading = section_label(format!("{label} — {}", list.len()), cx);
+            sections.push(if sections.is_empty() { heading.pt_2() } else { heading }.into_any_element());
+            sections.extend(list.into_iter().map(|m| row(m).into_any_element()));
+        }
         Some(
             div()
                 .w(size::PANEL)
@@ -2768,10 +2790,7 @@ impl Shell {
                         .px_2()
                         .overflow_y_scroll()
                         .track_scroll(&self.members_scroll)
-                        .child(online_label)
-                        .children(online.into_iter().map(row))
-                        .children(offline_label)
-                        .children(offline.into_iter().map(row)),
+                        .children(sections),
                 ))
                 .into_any_element(),
         )
