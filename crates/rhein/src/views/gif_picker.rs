@@ -12,6 +12,7 @@ use rhein_store::Client;
 use rhein_store::MediaProbe;
 use rhein_store::client::GifShare;
 use rhein_store::gif_links;
+use rhein_ui::scaled_image::{self, Fitted};
 use rhein_ui::theme::{radius, text};
 use rhein_ui::{ActiveTheme as _, Dismiss, Icon, IconButton, InputEvent, TextInput, Theme};
 
@@ -100,6 +101,8 @@ impl GifPicker {
 /// back to its SVG parser, spamming `Usvg(ParsingFailed(MalformedEntityReference))` per tile.
 enum Preview {
     Image(String),
+    /// A picture fitted to the tile width, smoothed when shrunk.
+    Fitted(Fitted),
     Waiting,
     ShareLink(String),
     Still,
@@ -160,10 +163,18 @@ fn tile(idx: usize, url: String, preview: Preview, t: &Theme, view: WeakEntity<G
     let faint = t.text_faint;
     let name = url.rsplit('/').next().unwrap_or(&url).to_owned();
     let picture = match preview {
-        // Only a width: GPUI's img takes the height from the picture's aspect ratio.
+        // Not loaded yet: only a width, GPUI's img takes the height from the aspect ratio.
         Preview::Image(media) => img(media)
             .id("pic")
             .w(px(TILE_W))
+            .with_loading(move || note("Loading…", faint))
+            .with_fallback(move || note(name.clone(), faint))
+            .into_any_element(),
+        Preview::Fitted(Fitted { source, size }) => img(source)
+            .id("pic")
+            .w(px(TILE_W))
+            // A smaller picture is drawn up to the tile width, so its height is scaled with it.
+            .when_some(size, |i, s| i.h(px(TILE_W * f32::from(s.height) / f32::from(s.width))))
             .with_loading(move || note("Loading…", faint))
             .with_fallback(move || note(name.clone(), faint))
             .into_any_element(),
@@ -201,7 +212,7 @@ fn tile(idx: usize, url: String, preview: Preview, t: &Theme, view: WeakEntity<G
 }
 
 impl Render for GifPicker {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
         let wide = self.wide.get();
         let cols = if wide { WIDE_COLS } else { COLS };
@@ -239,9 +250,24 @@ impl Render for GifPicker {
                 let mut shares_missing: Vec<String> = Vec::new();
                 let mut probes_missing: Vec<String> = Vec::new();
                 let mut columns: Vec<Vec<AnyElement>> = (0..cols).map(|_| Vec::new()).collect();
-                let client = self.client.read(cx);
-                for (idx, url) in shown.into_iter().enumerate() {
-                    let preview = Preview::of(&url, client, &mut shares_missing, &mut probes_missing);
+                let previews: Vec<(String, Preview)> = {
+                    let client = self.client.read(cx);
+                    shown.into_iter().map(|url| {
+                        let preview = Preview::of(&url, client, &mut shares_missing, &mut probes_missing);
+                        (url, preview)
+                    }).collect()
+                };
+                for (idx, (url, preview)) in previews.into_iter().enumerate() {
+                    let preview = match preview {
+                        Preview::Image(media) => {
+                            let bound = gpui::size(px(TILE_W), px(f32::MAX));
+                            match scaled_image::fit(media.clone(), bound, window, cx) {
+                                fitted @ Fitted { size: Some(_), .. } => Preview::Fitted(fitted),
+                                _ => Preview::Image(media),
+                            }
+                        }
+                        other => other,
+                    };
                     columns[idx % cols].push(tile(idx, url, preview, &t, view.clone(), self.client.clone()));
                 }
                 // Capped per frame: each resolution notifies the client and renders again, so a

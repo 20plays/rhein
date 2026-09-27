@@ -1,6 +1,10 @@
 //! One row of the message list: optional day separator and "New messages" line, the reply
 //! quote, header, rich text, attachments, link previews, reactions and hover actions.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, Entity, FontWeight, Hsla, IntoElement, ObjectFit, ParentElement as _, Pixels, SharedString,
     Styled as _, StyledImage as _, WeakEntity, Window, div, img, prelude::*, px,
@@ -11,6 +15,7 @@ use rhein_store::client::GifShare;
 use rhein_store::gif_links::MediaKind;
 use rhein_store::MediaProbe;
 use rhein_store::{Client, EmbedState, gif_links, markdown};
+use rhein_ui::scaled_image::{Fitted, fitted};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
@@ -36,6 +41,24 @@ pub struct RowCtx {
     pub client: Entity<Client>,
     pub view: WeakEntity<ChatView>,
     pub channel_id: String,
+    /// The pixel size of each picture that has arrived (see `ChatView::prefetch`).
+    pub picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
+    pub scale_factor: f32,
+}
+
+/// `url` fitted whole into `max_w` by the picture height limit, smoothed when it is larger.
+fn picture(ctx: &RowCtx, url: &str, max_w: f32) -> Fitted {
+    let natural = ctx.picture_sizes.borrow().get(url).copied();
+    fitted(url.to_owned(), natural, gpui::size(px(max_w), px(PICTURE_MAX_H)), ctx.scale_factor)
+}
+
+/// A box for a picture of `size`: that size, keeping its shape when the column is narrower.
+/// Unknown yet: at most the height limit, the picture laying itself out once it has loaded.
+fn picture_box<E: Styled>(el: E, size: Option<gpui::Size<Pixels>>) -> E {
+    match size {
+        Some(s) => el.max_w_full().w(s.width).aspect_ratio(f32::from(s.width) / f32::from(s.height)),
+        None => el.max_w_full().max_h(px(PICTURE_MAX_H)),
+    }
 }
 
 pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -> AnyElement {
@@ -539,12 +562,11 @@ fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, star
     let star = starred.then(|| gif_star(ctx, format!("gif-star-{ix}-{n}"), message_group(ix), media.clone(), t, cx));
     let view = ctx.view.clone();
     let (open, raised, faint) = (media.clone(), t.bg_raised, t.text_faint);
-    div()
+    let Fitted { source, size } = picture(ctx, &media, f32::MAX);
+    picture_box(div(), size)
         .id(SharedString::from(format!("gif-{ix}-{n}")))
         .group(group)
         .relative()
-        .max_w_full()
-        .max_h(px(PICTURE_MAX_H))
         .rounded(radius::LG)
         .overflow_hidden()
         .cursor_pointer()
@@ -553,12 +575,14 @@ fn gif_tile(ctx: &RowCtx, ix: usize, n: usize, media: String, link: String, star
             view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
         })
         .child(
-            img(media)
+            img(source)
                 .id("pic")
-                .max_w_full()
-                .max_h(px(PICTURE_MAX_H))
+                .map(|i| if size.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
                 .object_fit(ObjectFit::Contain)
-                .with_loading(move || div().w(px(PICTURE_UNKNOWN.0 / 2.)).h(px(PICTURE_UNKNOWN.1 / 2.)).bg(raised).into_any_element())
+                .with_loading(move || {
+                    let placeholder = div().bg(raised);
+                    if size.is_some() { placeholder.size_full() } else { placeholder.w(px(PICTURE_UNKNOWN.0 / 2.)).h(px(PICTURE_UNKNOWN.1 / 2.)) }.into_any_element()
+                })
                 .with_fallback(move || {
                     div().p_3().text_size(text::SM).text_color(faint).child("This picture is no longer available").into_any_element()
                 }),
@@ -610,6 +634,11 @@ fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Them
 fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
     let (w, aspect) = fit(a.width, a.height);
+    let natural = match (a.width, a.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as u32, h as u32)),
+        _ => ctx.picture_sizes.borrow().get(&url).copied(),
+    };
+    let source = fitted(url.clone(), natural, gpui::size(px(f32::MAX), px(PICTURE_MAX_H)), ctx.scale_factor).source;
     let group = SharedString::from(format!("img-group-{ix}-{i}"));
     let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), message_group(ix), url.clone(), t, cx));
     let view = ctx.view.clone();
@@ -637,7 +666,7 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
             view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
         })
         .child(
-            img(url)
+            img(source)
                 .id("pic")
                 .map(|i| if aspect.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
                 .object_fit(ObjectFit::Contain)
@@ -780,12 +809,11 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         // A GIF is kept by its picture's own link, which draws anywhere.
         let group = SharedString::from(format!("embed-group-{ix}-{n}"));
         let star = (gif_links::is_gif(&image) || gif_links::is_gif(&e.url)).then(|| gif_star(ctx, format!("embed-star-{ix}-{n}"), message_group(ix), image.clone(), t, cx));
-        return div()
+        let Fitted { source, size } = picture(ctx, &image, f32::MAX);
+        return picture_box(div(), size)
             .id(SharedString::from(format!("embed-{ix}-{n}")))
             .group(group)
             .relative()
-            .max_w_full()
-            .max_h(px(PICTURE_MAX_H))
             .rounded(radius::LG)
             .overflow_hidden()
             .cursor_pointer()
@@ -793,7 +821,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                 let (open, name) = (open.clone(), name.clone());
                 view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
             })
-            .child(img(image).id("pic").max_w_full().max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(img(source).id("pic").map(|i| if size.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) }).object_fit(ObjectFit::Contain))
             .children(star)
             .into_any_element();
     }
@@ -805,6 +833,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         let target = video.clone().unwrap_or_else(|| image.clone());
         let name = e.url.clone();
         let view = view.clone();
+        let Fitted { source, size } = picture(ctx, &image, IMAGE_MAX_W);
         div()
             .id(SharedString::from(format!("embed-media-{ix}-{n}")))
             .relative()
@@ -821,7 +850,14 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                     view.update(cx, |v, cx| v.open_lightbox(open, name, window, cx)).ok();
                 }
             })
-            .child(img(image).id("pic").max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain))
+            .child(
+                img(source)
+                    .id("pic")
+                    .max_w(px(IMAGE_MAX_W))
+                    .max_h(px(PICTURE_MAX_H))
+                    .when_some(size, |i, s| i.w(s.width).h(s.height))
+                    .object_fit(ObjectFit::Contain),
+            )
             .when(is_video, |d| {
                 d.child(
                     div().absolute().inset_0().flex().items_center().justify_center().child(

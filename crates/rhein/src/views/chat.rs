@@ -90,6 +90,8 @@ pub struct ChatView {
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
+    /// The pixel size of each picture that has arrived, for the rows to lay it out whole.
+    picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
     /// state moves on is measured again (see `prefetch`).
     row_progress: HashMap<String, u64>,
@@ -231,6 +233,7 @@ impl ChatView {
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
             arrived: HashSet::new(),
+            picture_sizes: Rc::default(),
             row_progress: HashMap::new(),
             _subs: subs,
         };
@@ -515,8 +518,14 @@ impl ChatView {
             let resource = gpui::Resource::Uri(gpui::SharedUri::from(picture.clone()));
             let (task, _) = cx.fetch_asset::<gpui::ImgResourceLoader>(&resource);
             cx.spawn(async move |this, cx| {
-                task.await.ok();
+                let size = task.await.ok().map(|image| {
+                    let size = image.size(0);
+                    (size.width.0.max(0) as u32, size.height.0.max(0) as u32)
+                });
                 this.update(cx, |this, cx| {
+                    if let Some(size) = size {
+                        this.picture_sizes.borrow_mut().insert(picture.clone(), size);
+                    }
                     this.arrived.insert(picture);
                     cx.notify();
                 })
@@ -1742,44 +1751,62 @@ impl ChatView {
             .pb_1()
     }
 
-    fn render_lightbox(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    /// The picture over the whole window, as large as fits and smoothed when shrunk. A click
+    /// anywhere but on the picture or its link closes it.
+    fn render_lightbox(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (url, name) = self.lightbox.clone()?;
         let t = cx.theme().clone();
         let open = url.clone();
-        Some(
-            div()
-                .id("lightbox")
-                .track_focus(&self.lightbox_focus)
-                .key_context(LIGHTBOX_CONTEXT)
-                .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.close_lightbox(window, cx)))
-                .absolute()
-                .inset_0()
-                .bg(t.overlay)
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .p_8()
-                .on_click(cx.listener(|this, _, window, cx| this.close_lightbox(window, cx)))
-                .child(img(url).id("pic").max_w_full().max_h(gpui::relative(0.85)).object_fit(ObjectFit::Contain))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .text_size(text::SM)
-                        .text_color(t.text_muted)
-                        .child(name)
-                        .child(
-                            Button::new("lightbox-open", "Open in browser")
-                                .ghost()
-                                .icon(Icon::ExternalLink)
-                                .on_click(move |_, _, cx| cx.open_url(&open)),
-                        ),
-                )
-                .into_any_element(),
-        )
+        let viewport = window.viewport_size();
+        // Room left by the padding (`p_8`), the caption row and the gap above it.
+        let bound = gpui::size(viewport.width - px(64.), (viewport.height - px(64.) - px(48.)) * 0.95);
+        let picture = rhein_ui::scaled_image::fit(url, bound, window, cx);
+        let overlay = div()
+            .id("lightbox")
+            .occlude()
+            .track_focus(&self.lightbox_focus)
+            .key_context(LIGHTBOX_CONTEXT)
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.close_lightbox(window, cx)))
+            .w(viewport.width)
+            .h(viewport.height)
+            .bg(t.overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_8()
+            .on_click(cx.listener(|this, _, window, cx| this.close_lightbox(window, cx)))
+            .child(
+                img(picture.source)
+                    .id("pic")
+                    .map(|i| match picture.size {
+                        Some(s) => i.w(s.width).h(s.height),
+                        None => i.max_w_full().max_h(gpui::relative(0.85)),
+                    })
+                    .object_fit(ObjectFit::Contain)
+                    .on_click(|_, _, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(text::SM)
+                    .text_color(t.text_muted)
+                    .child(name)
+                    .child(
+                        Button::new("lightbox-open", "Open in browser")
+                            .ghost()
+                            .icon(Icon::ExternalLink)
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                cx.open_url(&open);
+                            }),
+                    ),
+            );
+        // Over the whole window, not just the chat, so the sidebars close it too.
+        Some(deferred(anchored().position(gpui::point(px(0.), px(0.))).child(overlay)).with_priority(3).into_any_element())
     }
 }
 
@@ -1974,6 +2001,8 @@ impl Render for ChatView {
             client: self.client.clone(),
             view: cx.weak_entity(),
             channel_id: channel_id.clone(),
+            picture_sizes: self.picture_sizes.clone(),
+            scale_factor: window.scale_factor(),
         });
         let messages = rhein_ui::smooth_scroll(
             "history-glide",
@@ -2020,7 +2049,7 @@ impl Render for ChatView {
                 }))
         });
         let composer = self.render_composer(&channel_id, window, cx);
-        let lightbox = self.render_lightbox(cx);
+        let lightbox = self.render_lightbox(window, cx);
         let suggestions = self.render_suggestions(cx);
         let delete_confirm = self.render_delete_confirm(cx);
         let picker = self.render_picker();
