@@ -343,6 +343,7 @@ fn flatten(
 fn jumbo(doc: &Document, ctx: &Context, t: &Theme, cx: &App) -> AnyElement {
     let client = ctx.client.read(cx);
     let mut row = div().flex().flex_wrap().items_center().gap_1().text_size(px(40.)).text_color(t.text);
+    let mut n = 0usize;
     for block in &doc.blocks {
         let (Block::Text(spans) | Block::Quote(spans)) = block else { continue };
         for span in spans {
@@ -350,7 +351,9 @@ fn jumbo(doc: &Document, ctx: &Context, t: &Theme, cx: &App) -> AnyElement {
                 Span::Emoji { name, id, origin } => {
                     match client.emoji_url(ctx.guild_id, id, origin.as_deref()) {
                         Some(url) => {
-                            row = row.child(img(url).size(px(48.)).with_fallback({
+                            let pic = n;
+                            n += 1;
+                            row = row.child(img(url).id(("jumbo", pic)).size(px(48.)).with_fallback({
                                 let name = name.clone();
                                 move || div().text_size(text::MD).child(format!(":{name}:")).into_any_element()
                             }))

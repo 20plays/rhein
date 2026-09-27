@@ -1759,7 +1759,7 @@ impl ChatView {
                 .gap_3()
                 .p_8()
                 .on_click(cx.listener(|this, _, window, cx| this.close_lightbox(window, cx)))
-                .child(img(url).max_w_full().max_h(gpui::relative(0.85)).object_fit(ObjectFit::Contain))
+                .child(img(url).id("pic").max_w_full().max_h(gpui::relative(0.85)).object_fit(ObjectFit::Contain))
                 .child(
                     div()
                         .flex()
