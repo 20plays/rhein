@@ -110,7 +110,9 @@ pub struct Shell {
     /// Guilds folded or unfolded by hand in the sidebar tree.
     folded_guilds: HashSet<String>,
     unfolded_guilds: HashSet<String>,
-    confirm_sign_out: bool,
+    /// The sign-out question, with how many other saved accounts stay signed in (read once when
+    /// it opens, not from disk on every frame).
+    confirm_sign_out: Option<usize>,
     modal_focus: FocusHandle,
     menu: MenuHost,
     modal: Option<ShellModal>,
@@ -456,7 +458,7 @@ impl Shell {
             collapsed: HashSet::new(),
             folded_guilds: HashSet::new(),
             unfolded_guilds: HashSet::new(),
-            confirm_sign_out: false,
+            confirm_sign_out: None,
             modal_focus: cx.focus_handle(),
             menu: MenuHost::default(),
             modal: None,
@@ -632,19 +634,21 @@ impl Shell {
 
     fn ask_sign_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = None;
-        self.confirm_sign_out = true;
+        let client = self.client.read(cx);
+        let me = client.user_id().unwrap_or_default().to_owned();
+        self.confirm_sign_out = Some(client.saved_accounts().iter().filter(|a| a.user_id != me).count());
         window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
-        self.confirm_sign_out = false;
+        self.confirm_sign_out = None;
         self.client.update(cx, |c, cx| c.sign_out(cx));
     }
 
     fn close_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog = None;
-        self.confirm_sign_out = false;
+        self.confirm_sign_out = None;
         let focus = self.chat.read(cx).composer_focus(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -924,7 +928,7 @@ impl Shell {
             let guild = client.guild(&gid).map(|g| g.guild.clone()).unwrap_or_default();
             let top = guild.me.as_ref().and_then(|m| m.get("top_role_position")).and_then(|v| v.as_i64()).unwrap_or(0);
             let owner = client.is_owner(&gid);
-            let held: Vec<String> = client.members.get(&gid).and_then(|l| l.iter().find(|m| m.user_id == user_id)).map(|m| m.roles.clone()).unwrap_or_default();
+            let held: Vec<String> = client.member(&gid, &user_id).map(|m| m.roles.clone()).unwrap_or_default();
             let mut roles: Vec<_> = guild.roles.iter().filter(|r| r.id != gid && !r.managed && (owner || r.position < top)).cloned().collect();
             roles.sort_by_key(|r| std::cmp::Reverse(r.position));
             roles.into_iter().map(|r| { let has = held.contains(&r.id); (r.id, r.name, has) }).collect()
@@ -964,7 +968,7 @@ impl Shell {
         }
         if myself {
             let (v, g, u) = (this.clone(), gid.clone(), user_id.clone());
-            let current = client.members.get(&gid).and_then(|l| l.iter().find(|m| m.user_id == user_id)).and_then(|m| m.nickname.clone()).unwrap_or_default();
+            let current = client.member(&gid, &user_id).and_then(|m| m.nickname.clone()).unwrap_or_default();
             entries.push(MenuEntry::item("Change nickname", move |window, cx| {
                 let (g, u, current) = (g.clone(), u.clone(), current.clone());
                 v.update(cx, |v, cx| {
@@ -1423,8 +1427,7 @@ impl Shell {
             let client = self.client.read(cx);
             guild_id
                 .as_deref()
-                .and_then(|g| client.members.get(g))
-                .and_then(|l| l.iter().find(|m| m.user_id == user_id))
+                .and_then(|g| client.member(g, &user_id))
                 .map(|m| m.activities())
                 .filter(|a| !a.is_empty())
                 .or_else(|| client.friends.iter().find(|f| f.user_id == user_id).map(|f| f.activities()))
@@ -1448,7 +1451,7 @@ impl Shell {
         let client = self.client.read(cx);
         let name = client.display_name(guild_id.as_deref(), &user_id);
         let avatar = client.avatar_url(guild_id.as_deref(), &user_id);
-        let member = guild_id.as_deref().and_then(|g| client.members.get(g)).and_then(|l| l.iter().find(|m| m.user_id == user_id)).cloned();
+        let member = guild_id.as_deref().and_then(|g| client.member(g, &user_id)).cloned();
         let roles: Vec<String> = match (&member, guild_id.as_deref().and_then(|g| client.guild(g))) {
             (Some(m), Some(g)) => g.guild.roles.iter().filter(|r| m.roles.contains(&r.id)).map(|r| r.name.clone()).collect(),
             _ => Vec::new(),
@@ -1738,8 +1741,7 @@ impl Shell {
             let client = self.client.read(cx);
             guild_id
                 .as_deref()
-                .and_then(|g| client.members.get(g))
-                .and_then(|l| l.iter().find(|m| m.user_id == user_id))
+                .and_then(|g| client.member(g, &user_id))
                 .map(|m| m.activities())
                 .filter(|a| !a.is_empty())
                 .or_else(|| client.friends.iter().find(|f| f.user_id == user_id).map(|f| f.activities()))
@@ -1760,7 +1762,7 @@ impl Shell {
         let client = self.client.read(cx);
         let name = client.display_name(guild_id.as_deref(), &user_id);
         let avatar = client.avatar_url(guild_id.as_deref(), &user_id);
-        let member = guild_id.as_deref().and_then(|g| client.members.get(g)).and_then(|l| l.iter().find(|m| m.user_id == user_id)).cloned();
+        let member = guild_id.as_deref().and_then(|g| client.member(g, &user_id)).cloned();
         let is_bot = member.as_ref().is_some_and(|m| m.is_bot);
         let roles: Vec<(String, Option<u32>)> = match (&member, guild_id.as_deref().and_then(|g| client.guild(g))) {
             (Some(m), Some(g)) => g.guild.roles.iter().filter(|r| m.roles.contains(&r.id)).map(|r| (r.name.clone(), r.rgb())).collect(),
@@ -2601,7 +2603,7 @@ impl Shell {
                 continue;
             }
             let active = selected_channel.as_deref() == Some(ch.id.as_str());
-            let mark = client.read_mark(&ch.id);
+            let mark = client.read_mark_in(entry, ch);
             // A collapsed category still shows its open channel and anything with news.
             let hidden = ch.parent_id.as_ref().is_some_and(|p| self.collapsed.contains(p));
             if hidden && !active && !mark.is_unread() && mark.mentions == 0 {
@@ -2868,12 +2870,9 @@ impl Shell {
 
     /// Signing out drops this device's session, so it asks first.
     fn sign_out_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.confirm_sign_out {
-            return None;
-        }
+        let others = self.confirm_sign_out?;
         let t = cx.theme().clone();
         let me = self.client.read(cx).user_id().unwrap_or_default().to_owned();
-        let others = self.client.read(cx).saved_accounts().iter().filter(|a| a.user_id != me).count();
         let rest = match others {
             0 => String::new(),
             1 => " Your other saved account stays signed in.".into(),
@@ -3111,7 +3110,13 @@ impl Render for Shell {
                             .map(|d| {
                                 // An open conversation reads like a channel; the friends page is home's own view.
                                 let client = self.client.read(cx);
-                                if client.showing_home && client.home_conversation.is_none() { d.child(self.home.clone()) } else { d.child(self.chat.clone()) }
+                                // Cached: the chat draws again when it or the client changes, not whenever the
+                                // sidebar or member list around it does.
+                                if client.showing_home && client.home_conversation.is_none() {
+                                    d.child(self.home.clone())
+                                } else {
+                                    d.child(self.chat.clone().cached(gpui::StyleRefinement::default().flex_1().min_w_0().h_full()))
+                                }
                             }),
                     )
                     .child(status),

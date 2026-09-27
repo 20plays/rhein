@@ -72,6 +72,14 @@ impl VideoFeed {
         Some((self.seq.load(Ordering::Relaxed), picture))
     }
 
+    /// Takes the latest picture out, for a consumer that turns it into something else: the
+    /// pixels move instead of being copied (a copy only if someone else still holds them).
+    pub fn take_latest(&self) -> Option<(u64, Picture)> {
+        let picture = self.latest.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        let seq = self.seq.load(Ordering::Relaxed);
+        Some((seq, Arc::try_unwrap(picture).unwrap_or_else(|p| Picture { width: p.width, height: p.height, bgra: p.bgra.clone() })))
+    }
+
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
     }

@@ -45,6 +45,46 @@ pub struct RowCtx {
     /// The pixel size of each picture that has arrived (see `ChatView::prefetch`).
     pub picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
     pub scale_factor: f32,
+    /// Each message's parsed text, kept between frames (see `parsed`).
+    pub parsed: ParsedCache,
+}
+
+/// What a message's text parses to, which depends on nothing but the text: worked out once,
+/// not on every frame. Keyed by message id and checked against a hash of the text, so an edit
+/// parses again.
+pub struct Parsed {
+    hash: u64,
+    pub doc: markdown::Document,
+    pub links: Vec<String>,
+    /// `gif_links::gifs_in` of the text.
+    pub gifs: Vec<String>,
+}
+
+pub type ParsedCache = Rc<RefCell<HashMap<String, Rc<Parsed>>>>;
+
+/// Past this many messages the cache starts over rather than growing with every channel read.
+const PARSED_KEPT: usize = 4000;
+
+pub fn parsed(cache: &ParsedCache, message: &Message) -> Rc<Parsed> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.content.hash(&mut hasher);
+    let hash = hasher.finish();
+    if let Some(p) = cache.borrow().get(&message.id).filter(|p| p.hash == hash) {
+        return p.clone();
+    }
+    let p = Rc::new(Parsed {
+        hash,
+        doc: markdown::parse(&message.content),
+        links: markdown::links_in(&message.content),
+        gifs: gif_links::gifs_in(&message.content),
+    });
+    let mut cache = cache.borrow_mut();
+    if cache.len() >= PARSED_KEPT {
+        cache.clear();
+    }
+    cache.insert(message.id.clone(), p.clone());
+    p
 }
 
 /// `url` fitted whole into `max_w` by the picture height limit, smoothed when it is larger.
@@ -81,18 +121,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
     let author_name = client.display_name(guild_id.as_deref(), &message.author);
     let author_color: Option<gpui::Hsla> = guild_id.as_deref().and_then(|g| client.name_color(g, &message.author)).map(|c| gpui::rgb(c).into());
-    let author_bot = guild_id
-        .as_deref()
-        .and_then(|g| client.members.get(g))
-        .and_then(|l| l.iter().find(|m| m.user_id == message.author))
-        .is_some_and(|m| m.is_bot);
+    let author_bot = guild_id.as_deref().and_then(|g| client.member(g, &message.author)).is_some_and(|m| m.is_bot);
     let me = client.user_id().map(str::to_owned);
     let mine = me.as_deref() == Some(message.author.as_str());
     let pending = message.id.starts_with("pending:");
     let failed = client.is_failed(channel_id, &message.id);
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
     let avatar_url = client.avatar_url(guild_id.as_deref(), &message.author);
-    let prefs = client.prefs.clone();
+    let prefs = &client.prefs;
     let avatar_size = if prefs.compact { 28. } else { 40. };
     let body_size = text::MD * (prefs.text_scale.clamp(80, 150) as f32 / 100.);
 
@@ -105,22 +141,23 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
-    let doc = markdown::parse(&message.content);
+    let parsed = parsed(&ctx.parsed, &message);
+    let doc = &parsed.doc;
     // Called on: by name, @everyone, a role we hold, or a reply to one of our messages.
     let mentions_me = me.as_deref().is_some_and(|me| {
         let roles = guild_id.as_deref().map(|g| client.my_roles(g)).unwrap_or_default();
         let replied = message.reply_author.as_deref().or_else(|| {
             message.reply_to.as_deref().and_then(|p| client.find_message(channel_id, p)).map(|p| p.author.as_str())
         }) == Some(me);
-        !mine && (replied || markdown::mentions_me(&doc, me, &roles))
+        !mine && (replied || markdown::mentions_me(doc, me, &roles))
     });
 
     // Previews: links outside code, looked up lazily.
-    let links = if strip_embeds || !client.prefs.link_previews { Vec::new() } else { markdown::links_in(&message.content) };
+    let links: &[String] = if strip_embeds || !client.prefs.link_previews { &[] } else { &parsed.links };
     let mut missing = Vec::new();
     let mut media_missing = Vec::new();
     let mut cards = Vec::new();
-    for url in &links {
+    for url in links {
         if is_invite(url) {
             cards.push(invite_card(ctx, ix, url, &t));
             continue;
@@ -245,9 +282,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         hovered,
         pending: pending && !failed,
         // "(edited)" follows the last line when the message ends in one; else it gets its own.
-        edited: message.edited_at.is_some() && message_text::ends_in_text(&doc),
+        edited: message.edited_at.is_some() && message_text::ends_in_text(doc),
     };
-    let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(&doc, &text_ctx, cx));
+    let body_text = (!message.content.trim().is_empty() && !gif_only).then(|| message_text::render(doc, &text_ctx, cx));
     let edited_line = message.edited_at.is_some() && !(body_text.is_some() && text_ctx.edited);
 
     // Indexed by position in the message, which is how an encrypted attachment is found again.
@@ -531,12 +568,15 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
                 .on_hover(move |hovered, _, cx| {
                     let key = (hover_id.clone(), i);
                     view.update(cx, |v, cx| {
+                        let before = v.hovered_reaction.clone();
                         if *hovered {
                             v.hovered_reaction = Some(key);
                         } else if v.hovered_reaction.as_ref() == Some(&key) {
                             v.hovered_reaction = None;
                         }
-                        cx.notify();
+                        if v.hovered_reaction != before {
+                            cx.notify();
+                        }
                     })
                     .ok();
                 })
@@ -1191,7 +1231,8 @@ pub struct RowMedia {
     pub progress: u64,
 }
 
-pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMedia {
+pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &ParsedCache) -> RowMedia {
+    let parsed = parsed(cache, message);
     use std::hash::{Hash, Hasher};
     let mut media = RowMedia::default();
     let mut progress = std::collections::hash_map::DefaultHasher::new();
@@ -1201,7 +1242,7 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMed
         }
     }
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
-    let links = if strip_embeds { Vec::new() } else { markdown::links_in(&message.content) };
+    let links: &[String] = if strip_embeds { &[] } else { &parsed.links };
     for url in links.iter().filter(|u| !is_invite(u) && !gif_links::is_gif(u)) {
         if gif_links::is_telium_media(url) {
             match client.media_kind(url) {
@@ -1231,7 +1272,7 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message) -> RowMed
             None => media.embeds.push(url.clone()),
         }
     }
-    for url in gif_links::gifs_in(&message.content) {
+    for url in parsed.gifs.iter().cloned() {
         if gif_links::share(&url).is_none() {
             media.pictures.push(url);
             continue;

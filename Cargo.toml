@@ -27,7 +27,7 @@ futures = "0.3"
 log = "0.4"
 env_logger = "0.11"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
@@ -51,6 +51,17 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 opt-level = 2
+
+# The UI's own crates run every frame's layout and lookups; unoptimised they made the debug
+# client feel far slower than a release. Level 1 keeps rebuilds quick.
+[profile.dev.package.rhein]
+opt-level = 1
+
+[profile.dev.package.rhein-ui]
+opt-level = 1
+
+[profile.dev.package.rhein-store]
+opt-level = 1
 
 # What `./rheinprod` builds and installs: the release build, optimised across crates and with
 # its symbols stripped. Slower to build than `--release`, which stays quick for development.

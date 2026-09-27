@@ -97,6 +97,9 @@ pub struct ChatView {
     pub(crate) hovered_reaction: Option<(String, usize)>,
     /// The pixel size of each picture that has arrived, for the rows to lay it out whole.
     picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
+    parsed: crate::views::rows::ParsedCache,
+    /// A repaint is scheduled for the typing dots' next step.
+    typing_tick: std::cell::Cell<bool>,
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
     /// state moves on is measured again (see `prefetch`).
     row_progress: HashMap<String, u64>,
@@ -203,7 +206,11 @@ impl ChatView {
                     cx.emit(ChatEvent::OpenThread(thread_id.clone()));
                 }
             }),
-            cx.observe(&client, |this, _, cx| this.sync_channel(cx)),
+            // The chat is a cached view: whatever it shows of the client, it repaints for.
+            cx.observe(&client, |this, _, cx| {
+                this.sync_channel(cx);
+                cx.notify();
+            }),
         ];
         let mut this = Self {
             client,
@@ -240,6 +247,8 @@ impl ChatView {
             arrived: HashSet::new(),
             hovered_reaction: None,
             picture_sizes: Rc::default(),
+            parsed: Rc::default(),
+            typing_tick: Default::default(),
             row_progress: HashMap::new(),
             _subs: subs,
         };
@@ -504,7 +513,7 @@ impl ChatView {
             let Some(log) = client.logs.get(&channel) else { return };
             for ix in range {
                 let Some(message) = log.messages.get(ix) else { break };
-                let media = crate::views::rows::row_media(client, &channel, message);
+                let media = crate::views::rows::row_media(client, &channel, message, &self.parsed);
                 let arrived = media.pictures.iter().filter(|p| self.arrived.contains(*p)).count() as u64;
                 let progress = media.progress ^ arrived.wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 if self.row_progress.insert(crate::views::rows::message_key(message).to_owned(), progress).is_some_and(|was| was != progress) {
@@ -1532,7 +1541,7 @@ impl ChatView {
                     ),
             )
 ;
-        div().flex_1().min_w_0().h_full().flex().child(stage).children(column).into_any_element()
+        div().flex_1().min_w_0().size_full().flex().child(stage).children(column).into_any_element()
     }
 
     fn render_picker(&self) -> Option<AnyElement> {
@@ -1557,16 +1566,25 @@ impl ChatView {
         let typing: Vec<String> = client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect();
         // Who is typing, just above the message bar, as in Discord: floating over the end of the
         // list, so the chat does not move when it comes and goes.
+        // The dots pulse in steps of TYPING_STEP rather than every display frame: each step
+        // repaints the window, and someone may type for a long while.
+        const TYPING_STEP: Duration = Duration::from_millis(120);
+        if !typing.is_empty() && !self.typing_tick.replace(true) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(TYPING_STEP).await;
+                this.update(cx, |this, cx| {
+                    this.typing_tick.set(false);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+        let delta = (typing_epoch().elapsed().as_secs_f32() / 1.2).fract();
         let typing_line = typing_label(&typing).map(|label| {
             let dot = |i: usize| {
-                gpui::AnimationExt::with_animation(div().size(px(5.)).rounded_full().bg(t.text_muted),
-                    ("typing-dot", i),
-                    gpui::Animation::new(Duration::from_millis(1200)).repeat(),
-                    move |d, delta| {
-                        let phase = (delta * std::f32::consts::TAU - i as f32 * 0.9).sin() * 0.5 + 0.5;
-                        d.opacity(0.3 + 0.7 * phase)
-                    },
-                )
+                let phase = (delta * std::f32::consts::TAU - i as f32 * 0.9).sin() * 0.5 + 0.5;
+                div().size(px(5.)).rounded_full().bg(t.text_muted).opacity(0.3 + 0.7 * phase)
             };
             div()
                 .absolute()
@@ -1873,6 +1891,7 @@ impl Render for ChatView {
         let Some(channel_id) = channel_id else {
             return div()
                 .flex_1()
+                .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2036,6 +2055,7 @@ impl Render for ChatView {
             channel_id: channel_id.clone(),
             picture_sizes: self.picture_sizes.clone(),
             scale_factor: window.scale_factor(),
+            parsed: self.parsed.clone(),
         });
         let messages = rhein_ui::smooth_scroll(
             "history-glide",
@@ -2108,6 +2128,7 @@ impl Render for ChatView {
             .relative()
             .flex_1()
             .min_w_0()
+            .w_full()
             .h_full()
             .flex()
             .flex_col()
@@ -2162,4 +2183,10 @@ fn picker_key(target: &PickerTarget) -> String {
         PickerTarget::Composer => "composer".into(),
         PickerTarget::React { message_id, .. } => format!("react-{message_id}"),
     }
+}
+
+/// Where the typing dots' pulse is measured from.
+fn typing_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
 }

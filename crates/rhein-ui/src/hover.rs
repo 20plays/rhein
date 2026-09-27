@@ -79,10 +79,13 @@ pub fn hover_fade_with(el: gpui::Stateful<gpui::Div>, id: &ElementId, rest: Pain
     let paint = |a: Paint, b: Paint, t: f32| Paint { bg: mix(a.bg, b.bg, t), text: mix(a.text, b.text, t) };
     let now = paint(paint(rest, hover, hover_level), press, press_level);
     let (on_hover, on_down, on_up, on_up_out) = (state.clone(), state.clone(), state.clone(), state);
+    // Repaint only the view this element is drawn by (and those around it), not the whole
+    // window: `window.refresh()` also throws away every cached view.
+    let view = window.current_view();
     let el = el
         .bg(now.bg)
         .text_color(now.text)
-        .on_hover(move |hovered, window, cx| {
+        .on_hover(move |hovered, _, cx| {
             on_hover.update(cx, |s, _| {
                 s.hovered = *hovered;
                 if !*hovered {
@@ -90,25 +93,25 @@ pub fn hover_fade_with(el: gpui::Stateful<gpui::Div>, id: &ElementId, rest: Pain
                 }
                 s.last = Some(Instant::now());
             });
-            window.refresh();
+            cx.notify(view);
         })
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             on_down.update(cx, |s, _| {
                 s.pressed = true;
                 s.last = Some(Instant::now());
             });
-            window.refresh();
+            cx.notify(view);
         })
-        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
             on_up.update(cx, |s, _| {
                 s.pressed = false;
                 s.last = Some(Instant::now());
             });
-            window.refresh();
+            cx.notify(view);
         })
-        .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
             on_up_out.update(cx, |s, _| s.pressed = false);
-            window.refresh();
+            cx.notify(view);
         });
     (el, now)
 }

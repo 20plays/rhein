@@ -163,6 +163,10 @@ struct Blink {
     timer: bool,
 }
 
+/// How long the cursor blinks after the last edit or move before it holds still: every blink
+/// frame repaints the window, so an idle, focused field would otherwise never let it rest.
+const BLINK_FOR: f32 = 10.;
+
 /// One blink cycle: shown, fading out, hidden, fading in.
 const BLINK_SHOW: f32 = 0.6;
 const BLINK_FADE: f32 = 0.18;
@@ -1270,10 +1274,10 @@ impl Element for MultiLineElement {
                     .filter(|p| (p.y - cursor_at.y).abs() < px(0.5) && p.x > cursor_at.x)
                     .map_or(space, |p| p.x - cursor_at.x),
             };
-            let alpha = if !window.is_window_active() || cx.reduce_motion() {
+            let elapsed = input.blink.epoch.map_or(0., |e| e.elapsed().as_secs_f32());
+            let alpha = if !window.is_window_active() || cx.reduce_motion() || elapsed >= BLINK_FOR {
                 1.
             } else {
-                let elapsed = input.blink.epoch.map_or(0., |e| e.elapsed().as_secs_f32());
                 let (alpha, next_frame) = blink_at(elapsed);
                 blink_next = Some(next_frame);
                 alpha

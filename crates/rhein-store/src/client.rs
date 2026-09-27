@@ -116,7 +116,7 @@ impl GuildEntry {
     /// children, everything by `position`.
     pub fn ordered_channels(&self) -> Vec<&Channel> {
         let mut chans: Vec<&Channel> = self.guild.channels.iter().filter(|c| !c.is_thread()).collect();
-        chans.sort_by_key(|c| (c.position, c.id.clone()));
+        chans.sort_by(|a, b| (a.position, &a.id).cmp(&(b.position, &b.id)));
         let mut out = Vec::with_capacity(chans.len());
         for c in chans.iter().filter(|c| c.parent_id.is_none() && !c.is_category()) {
             out.push(*c);
@@ -128,11 +128,9 @@ impl GuildEntry {
             }
         }
         // Children whose category is not visible to us.
-        for c in chans.iter() {
-            if !out.iter().any(|o| o.id == c.id) {
-                out.push(*c);
-            }
-        }
+        let placed: HashSet<&str> = out.iter().map(|c| c.id.as_str()).collect();
+        let orphans: Vec<&Channel> = chans.iter().filter(|c| !placed.contains(c.id.as_str())).copied().collect();
+        out.extend(orphans);
         out
     }
 }
@@ -330,6 +328,8 @@ pub struct Client {
     selected_channel: HashMap<String, String>,
     pub logs: HashMap<String, ChannelLog>,
     pub members: HashMap<String, Vec<Member>>,
+    /// guild id → user id → index in `members`, kept with it (see `set_members`).
+    member_ix: HashMap<String, HashMap<String, usize>>,
     pins: HashMap<String, Vec<Message>>,
     threads: HashMap<String, Vec<rhein_proto::Thread>>,
     emoji: HashMap<String, Vec<rhein_proto::CustomEmoji>>,
@@ -347,6 +347,8 @@ pub struct Client {
     /// Channels in the order they were opened, newest first (for the quick switcher).
     pub visited: Vec<String>,
     typing: HashMap<String, Vec<(String, Instant)>>,
+    /// Drops expired typing entries and repaints once they are gone; one for all of them.
+    typing_sweep: Option<Task<()>>,
     signin: Option<Task<()>>,
     /// The last sign-in stopped for a two-factor code.
     pub mfa_required: bool,
@@ -375,6 +377,7 @@ impl Client {
             selected_channel: HashMap::new(),
             logs: HashMap::new(),
             members: HashMap::new(),
+            member_ix: HashMap::new(),
             pins: HashMap::new(),
             threads: HashMap::new(),
             emoji: HashMap::new(),
@@ -389,6 +392,7 @@ impl Client {
             profiles: HashMap::new(),
             visited: Vec::new(),
             typing: HashMap::new(),
+            typing_sweep: None,
             showing_home: false,
             read: HashMap::new(),
             dividers: HashMap::new(),
@@ -774,6 +778,7 @@ impl Client {
         self.guilds.clear();
         self.logs.clear();
         self.members.clear();
+        self.member_ix.clear();
         self.pins.clear();
         self.threads.clear();
         self.emoji.clear();
@@ -1578,9 +1583,25 @@ impl Client {
                 .ok()
                 .flatten();
             let Some(name) = name else { return };
-            // Pump gateway events into the entity until the connection is dropped.
+            // Pump gateway events into the entity until the connection is dropped: whatever
+            // arrived together is applied in one update, with one repaint.
             while let Some(event) = events.recv().await {
-                if this.update(cx, |this, cx| this.on_gateway(&name, event, cx)).is_err() {
+                let mut batch = vec![event];
+                while batch.len() < 256
+                    && let Ok(more) = events.try_recv()
+                {
+                    batch.push(more);
+                }
+                let applied = this.update(cx, |this, cx| {
+                    let mut changed = false;
+                    for event in batch {
+                        changed |= this.on_gateway(&name, event, cx);
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                });
+                if applied.is_err() {
                     break;
                 }
             }
@@ -1631,7 +1652,8 @@ impl Client {
         self.renew_server(name, cx);
     }
 
-    fn on_gateway(&mut self, server: &str, event: GatewayEvent, cx: &mut Context<Self>) {
+    /// Applies one gateway event; true when something on screen may have changed.
+    fn on_gateway(&mut self, server: &str, event: GatewayEvent, cx: &mut Context<Self>) -> bool {
         match event {
             GatewayEvent::Status(status) => {
                 let renew = matches!(status, GatewayStatus::Rejected);
@@ -1652,14 +1674,14 @@ impl Client {
                 }
             }
             GatewayEvent::Ready(ready) => self.on_ready(server, *ready, cx),
-            GatewayEvent::Dispatch(event) => self.on_dispatch(server, *event, cx),
+            GatewayEvent::Dispatch(event) => return self.on_dispatch(server, *event, cx),
             GatewayEvent::Latency(rtt) => {
                 if let Some(s) = self.server_mut(server) {
                     s.latency = Some(rtt);
                 }
             }
         }
-        cx.notify();
+        true
     }
 
     fn on_ready(&mut self, server: &str, ready: Ready, cx: &mut Context<Self>) {
@@ -1718,7 +1740,8 @@ impl Client {
             }
     }
 
-    fn on_dispatch(&mut self, _server: &str, event: Event, cx: &mut Context<Self>) {
+    /// Applies one dispatch; true when something on screen may have changed.
+    fn on_dispatch(&mut self, _server: &str, event: Event, cx: &mut Context<Self>) -> bool {
         match event {
             Event::MessageCreate(message) => {
                 log::debug!("message {} in {}", message.id, message.channel_id);
@@ -1727,19 +1750,19 @@ impl Client {
                     typing.retain(|(u, _)| *u != message.author);
                 }
                 self.count_unread(&message, cx);
-                let Some(log) = self.logs.get_mut(&channel_id) else { return };
+                let Some(log) = self.logs.get_mut(&channel_id) else { return true };
                 if !log.loaded {
-                    return;
+                    return true;
                 }
                 if log.messages.iter().any(|m| m.id == message.id) {
-                    return;
+                    return true;
                 }
                 // Our own send may already be here under its nonce.
                 if let Some(nonce) = &message.nonce
                     && let Some(i) = log.messages.iter().position(|m| m.nonce.as_ref() == Some(nonce) && m.id.starts_with("pending:")) {
                         log.messages[i] = message;
                         cx.emit(ClientEvent::MessageChanged { channel_id, index: i });
-                        return;
+                        return true;
                     }
                 log.messages.push(message);
                 cx.emit(ClientEvent::MessageAppended { channel_id });
@@ -1772,20 +1795,15 @@ impl Client {
             }
             Event::TypingStart { channel_id, user_id } => {
                 if Some(user_id.as_str()) == self.user_id() {
-                    return;
+                    return false;
                 }
                 let entry = self.typing.entry(channel_id).or_default();
                 entry.retain(|(u, _)| *u != user_id);
                 entry.push((user_id, Instant::now()));
-                // Repaint once the indicator has expired.
-                let task = cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(TYPING_SHOWN_FOR).await;
-                    this.update(cx, |_, cx| cx.notify()).ok();
-                });
-                task.detach();
+                self.sweep_typing(cx);
             }
             Event::ChannelCreate(channel) | Event::ChannelUpdate(channel) => {
-                let Some(gid) = channel.guild_id.clone() else { return };
+                let Some(gid) = channel.guild_id.clone() else { return false };
                 if let Some(entry) = self.guild_mut(&gid) {
                     match entry.guild.channels.iter().position(|c| c.id == channel.id) {
                         Some(i) => entry.guild.channels[i] = channel,
@@ -1834,18 +1852,25 @@ impl Client {
             }
             Event::PresenceUpdate { user_id, presence } => {
                 // The whole object is kept: status, custom status and activities.
-                for list in self.members.values_mut() {
-                    for m in list.iter_mut().filter(|m| m.user_id == user_id) {
+                let mut known = false;
+                for (gid, ix) in &self.member_ix {
+                    if let Some(&i) = ix.get(&user_id)
+                        && let Some(m) = self.members.get_mut(gid).and_then(|l| l.get_mut(i))
+                    {
                         m.presence = Some(presence.clone());
+                        known = true;
                     }
                 }
                 for f in self.friends.iter_mut().filter(|f| f.user_id == user_id) {
                     f.presence = Some(presence.clone());
+                    known = true;
                 }
+                // Nobody we show: nothing to repaint.
+                return known;
             }
             Event::VoiceStateUpdate(state) => {
                 // A guild's roster, or a conversation's call (on the home gateway).
-                let Some(guild) = state.guild_id.clone().or_else(|| state.conversation_id.clone()) else { return };
+                let Some(guild) = state.guild_id.clone().or_else(|| state.conversation_id.clone()) else { return false };
                 let roster = self.voice.entry(guild).or_default();
                 let before = roster.len();
                 if state.channel_id.is_some() {
@@ -1908,9 +1933,49 @@ impl Client {
             Event::VoiceE2ee { channel_id, data } => self.on_voice_e2ee(&channel_id, data),
             Event::VoiceServerUpdate(data) => self.on_voice_server(data),
             // Screen watchers matter with M4.2.
-            Event::VoiceWatchersUpdate { .. } => {}
-            Event::MemberListUpdate(_) | Event::Other { .. } => {}
+            Event::VoiceWatchersUpdate { .. } => return false,
+            Event::MemberListUpdate(_) | Event::Other { .. } => return false,
         }
+        true
+    }
+
+    /// Keeps one task that drops expired typing entries and repaints when some expired, for as
+    /// long as anyone is typing anywhere.
+    fn sweep_typing(&mut self, cx: &mut Context<Self>) {
+        if self.typing_sweep.is_some() {
+            return;
+        }
+        self.typing_sweep = Some(cx.spawn(async move |this, cx| {
+            loop {
+                // The slot is cleared in the same update that finds nothing left, so an entry
+                // added afterwards starts a new sweep.
+                let next = this.update(cx, |this, _| {
+                    let next = this.typing.values().flatten().map(|(_, at)| *at + TYPING_SHOWN_FOR).min();
+                    if next.is_none() {
+                        this.typing_sweep = None;
+                    }
+                    next
+                });
+                let Ok(Some(next)) = next else { break };
+                let wait = next.saturating_duration_since(Instant::now());
+                cx.background_executor().timer(wait + Duration::from_millis(10)).await;
+                let more = this.update(cx, |this, cx| {
+                    let now = Instant::now();
+                    for list in this.typing.values_mut() {
+                        list.retain(|(_, at)| now.duration_since(*at) < TYPING_SHOWN_FOR);
+                    }
+                    this.typing.retain(|_, list| !list.is_empty());
+                    cx.notify();
+                    if this.typing.is_empty() {
+                        this.typing_sweep = None;
+                    }
+                    !this.typing.is_empty()
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
+                }
+            }
+        }));
     }
 
     fn reaction(&mut self, channel_id: String, message_id: String, emoji: String, user_id: String, add: bool, cx: &mut Context<Self>) {
@@ -2390,12 +2455,23 @@ impl Client {
     }
 
     pub fn read_mark(&self, channel_id: &str) -> ReadMark {
+        let entry = self.guild_of_channel(channel_id);
+        let parent = entry
+            .and_then(|g| g.guild.channels.iter().find(|c| c.id == channel_id))
+            .and_then(|c| c.parent_id.as_deref());
+        self.mark_with(channel_id, parent, entry.map(|g| g.guild.id.as_str()))
+    }
+
+    /// `read_mark` for a channel whose guild is already at hand, without looking either up.
+    pub fn read_mark_in(&self, entry: &GuildEntry, channel: &Channel) -> ReadMark {
+        self.mark_with(&channel.id, channel.parent_id.as_deref(), Some(&entry.guild.id))
+    }
+
+    fn mark_with(&self, channel_id: &str, parent: Option<&str>, guild: Option<&str>) -> ReadMark {
         let mut mark = self.read.get(channel_id).cloned().unwrap_or_default();
         // Muted here, or its category or its guild muted, in the account's preferences.
         if !mark.muted {
-            let parent = self.channel(channel_id).and_then(|c| c.parent_id.clone());
-            let guild = self.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
-            mark.muted = [Some(channel_id.to_owned()), parent, guild].into_iter().flatten().any(|id| self.is_muted(&id));
+            mark.muted = [Some(channel_id), parent, guild].into_iter().flatten().any(|id| self.is_muted(id));
         }
         mark
     }
@@ -2444,7 +2520,7 @@ impl Client {
     pub fn guild_unread(&self, guild_id: &str) -> (bool, u32) {
         let Some(entry) = self.guild(guild_id) else { return (false, 0) };
         entry.guild.channels.iter().fold((false, 0), |(unread, mentions), c| {
-            let mark = self.read_mark(&c.id);
+            let mark = self.read_mark_in(entry, c);
             (unread || mark.is_unread(), mentions + mark.mentions)
         })
     }
@@ -2484,9 +2560,9 @@ impl Client {
         let held: Vec<String> = if self.user_id() == Some(user_id) {
             self.my_roles(guild_id)
         } else {
-            self.members.get(guild_id)?.iter().find(|m| m.user_id == user_id)?.roles.clone()
+            self.member(guild_id, user_id)?.roles.clone()
         };
-        entry.guild.roles.iter().filter(|r| held.contains(&r.id) && r.rgb().is_some()).max_by_key(|r| r.position).and_then(|r| r.rgb())
+        entry.guild.roles.iter().filter(|r| r.rgb().is_some() && held.contains(&r.id)).max_by_key(|r| r.position).and_then(|r| r.rgb())
     }
 
     /// The roles this user holds in a guild, from READY.
@@ -2794,6 +2870,24 @@ impl Client {
         found
     }
 
+    /// Replaces a guild's roster and its index.
+    fn set_members(&mut self, guild_id: String, members: Vec<Member>) {
+        let ix = members.iter().enumerate().map(|(i, m)| (m.user_id.clone(), i)).collect();
+        self.member_ix.insert(guild_id.clone(), ix);
+        self.members.insert(guild_id, members);
+    }
+
+    /// A member of a guild's loaded roster.
+    pub fn member(&self, guild_id: &str, user_id: &str) -> Option<&Member> {
+        let i = *self.member_ix.get(guild_id)?.get(user_id)?;
+        self.members.get(guild_id)?.get(i)
+    }
+
+    /// The same person in any loaded roster.
+    fn any_member(&self, user_id: &str) -> Option<&Member> {
+        self.member_ix.keys().find_map(|g| self.member(g, user_id))
+    }
+
     pub fn load_members(&mut self, guild_id: String, cx: &mut Context<Self>) {
         let Some(api) = self.api_for_guild(&guild_id) else { return };
         let io = self.io.clone();
@@ -2802,7 +2896,7 @@ impl Client {
             let result = join(io.spawn(async move { Ok(api.members(&gid, 0, 200).await?) })).await;
             this.update(cx, |this, cx| {
                 if let Ok(list) = result {
-                    this.members.insert(guild_id, list.members);
+                    this.set_members(guild_id, list.members);
                     cx.notify();
                 }
             })
@@ -2813,10 +2907,7 @@ impl Client {
 
     /// Who to show a user as in a guild: nickname, display name, then the localpart.
     pub fn display_name(&self, guild_id: Option<&str>, user_id: &str) -> String {
-        if let Some(m) = guild_id
-            .and_then(|g| self.members.get(g))
-            .and_then(|list| list.iter().find(|m| m.user_id == user_id))
-        {
+        if let Some(m) = guild_id.and_then(|g| self.member(g, user_id)) {
             return m.shown_name().to_owned();
         }
         if self.user_id() == Some(user_id)
@@ -2831,7 +2922,7 @@ impl Client {
             .find(|f| f.user_id == user_id)
             .and_then(|f| f.display_name.clone())
             .or_else(|| self.profiles.get(user_id).and_then(|p| p.as_ref()).and_then(|p| p.display_name.clone()))
-            .or_else(|| self.members.values().flatten().find(|m| m.user_id == user_id).map(|m| m.shown_name().to_owned()));
+            .or_else(|| self.any_member(user_id).map(|m| m.shown_name().to_owned()));
         known.filter(|n| !n.is_empty()).unwrap_or_else(|| localpart(user_id).to_owned())
     }
 
@@ -2839,7 +2930,7 @@ impl Client {
     /// server, or for ourselves the home profile through the home server.
     pub fn avatar_url(&self, guild_id: Option<&str>, user_id: &str) -> Option<String> {
         if let Some(gid) = guild_id
-            && let Some(member) = self.members.get(gid).and_then(|l| l.iter().find(|m| m.user_id == user_id))
+            && let Some(member) = self.member(gid, user_id)
             && let Some(reference) = member.avatar_ref.as_deref().filter(|r| !r.is_empty())
             && let Some(entry) = self.guild(gid)
             && let Some(server) = self.server(&entry.server)

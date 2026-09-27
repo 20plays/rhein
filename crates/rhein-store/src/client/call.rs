@@ -832,11 +832,12 @@ impl Client {
                     }
                     let mut stale = Vec::new();
                     for (key, feed) in &call.videos {
-                        let Some((seq, picture)) = feed.latest() else { continue };
+                        // Taken, not cloned: the next one is a new picture with a new number.
+                        let Some((seq, picture)) = feed.take_latest() else { continue };
                         if call.images.get(key).is_some_and(|(have, _)| *have == seq) {
                             continue;
                         }
-                        if let Some(image) = render_image(&picture) {
+                        if let Some(image) = render_image(picture) {
                             if let Some((_, old)) = call.images.insert(key.clone(), (seq, image)) {
                                 stale.push(old);
                             }
@@ -1021,8 +1022,8 @@ impl Privacy {
     }
 }
 
-fn render_image(picture: &rhein_voice::video::Picture) -> Option<Arc<gpui::RenderImage>> {
-    let buffer = image::RgbaImage::from_raw(picture.width, picture.height, picture.bgra.clone())?;
+fn render_image(picture: rhein_voice::video::Picture) -> Option<Arc<gpui::RenderImage>> {
+    let buffer = image::RgbaImage::from_raw(picture.width, picture.height, picture.bgra)?;
     Some(Arc::new(gpui::RenderImage::new(smallvec::smallvec![image::Frame::new(buffer)])))
 }
 

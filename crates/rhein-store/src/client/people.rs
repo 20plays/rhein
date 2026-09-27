@@ -10,7 +10,7 @@ impl Client {
     pub fn mutual_guilds(&self, user_id: &str) -> Vec<(String, String)> {
         self.guilds
             .iter()
-            .filter(|g| self.members.get(&g.guild.id).is_some_and(|list| list.iter().any(|m| m.user_id == user_id)))
+            .filter(|g| self.member(&g.guild.id, user_id).is_some())
             .map(|g| (g.guild.id.clone(), g.guild.name.clone()))
             .collect()
     }
