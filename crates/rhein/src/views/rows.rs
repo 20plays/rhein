@@ -322,7 +322,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     })),
             )
         })
-        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, &t)))
+        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t)))
         .children(thread_chip);
 
     let group = message_group(ix);
@@ -511,7 +511,7 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
     bar.into_any_element()
 }
 
-fn reactions(ctx: &RowCtx, ix: usize, message: &Message, t: &Theme) -> AnyElement {
+fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_id: Option<&str>, t: &Theme) -> AnyElement {
     div()
         .flex()
         .flex_wrap()
@@ -537,9 +537,26 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, t: &Theme) -> AnyElemen
                 .flex()
                 .items_center()
                 .gap_1()
-                .child(div().font_family(FONT_EMOJI).child(r.emoji.clone()))
+                .child(reaction_emoji(&r.emoji, (ix, i), store, guild_id))
                 .child(div().text_color(if r.me { t.accent } else { t.text_muted }).child(r.count.to_string()))
         }))
+        .into_any_element()
+}
+
+/// A reaction's emoji: a custom one (`<name:ID>`) as its picture, a unicode one as text.
+fn reaction_emoji(emoji: &str, id: (usize, usize), client: &Client, guild_id: Option<&str>) -> AnyElement {
+    let text_emoji = || div().font_family(FONT_EMOJI).child(emoji.to_owned()).into_any_element();
+    let spans = markdown::spans(emoji);
+    let [markdown::Span::Emoji { name, id: emoji_id, origin }] = spans.as_slice() else { return text_emoji() };
+    let Some(url) = client.emoji_url(guild_id, emoji_id, origin.as_deref()) else {
+        return div().child(format!(":{name}:")).into_any_element();
+    };
+    let name = name.clone();
+    img(url)
+        .id(SharedString::from(format!("react-emoji-{}-{}", id.0, id.1)))
+        .size(px(18.))
+        .object_fit(ObjectFit::Contain)
+        .with_fallback(move || div().child(format!(":{name}:")).into_any_element())
         .into_any_element()
 }
 
