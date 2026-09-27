@@ -54,7 +54,9 @@ fn picture(ctx: &RowCtx, url: &str, max_w: f32) -> Fitted {
 
 /// A box for a picture of `size`: that size, keeping its shape when the column is narrower.
 /// Unknown yet: at most the height limit, the picture laying itself out once it has loaded.
+/// Either way it hugs the picture instead of stretching across the message column.
 fn picture_box<E: Styled>(el: E, size: Option<gpui::Size<Pixels>>) -> E {
+    let el = el.self_start();
     match size {
         Some(s) => el.max_w_full().w(s.width).aspect_ratio(f32::from(s.width) / f32::from(s.height)),
         None => el.max_w_full().max_h(px(PICTURE_MAX_H)),
@@ -633,12 +635,12 @@ fn gif_star(ctx: &RowCtx, id: String, group: SharedString, url: String, t: &Them
 
 fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
     let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
-    let (w, aspect) = fit(a.width, a.height);
+    // The size the attachment says it has, else the one it turned out to have once it arrived.
     let natural = match (a.width, a.height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as u32, h as u32)),
         _ => ctx.picture_sizes.borrow().get(&url).copied(),
     };
-    let source = fitted(url.clone(), natural, gpui::size(px(f32::MAX), px(PICTURE_MAX_H)), ctx.scale_factor).source;
+    let Fitted { source, size } = fitted(url.clone(), natural, gpui::size(px(f32::MAX), px(PICTURE_MAX_H)), ctx.scale_factor);
     let group = SharedString::from(format!("img-group-{ix}-{i}"));
     let star = (a.mime == "image/gif").then(|| gif_star(ctx, format!("img-star-{ix}-{i}"), message_group(ix), url.clone(), t, cx));
     let view = ctx.view.clone();
@@ -646,17 +648,10 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let fallback_name = a.filename.clone();
     let faint = t.text_faint;
     let raised = t.bg_raised;
-    div()
+    picture_box(div(), size)
         .id(SharedString::from(format!("img-{ix}-{i}")))
         .group(group)
         .relative()
-        .max_w_full()
-        // Known size: its natural width, keeping its shape when the column is narrower. Unknown:
-        // the picture lays itself out once it has loaded.
-        .map(|d| match aspect {
-            Some(ratio) => d.w(w).aspect_ratio(ratio),
-            None => d,
-        })
         .rounded(radius::LG)
         .overflow_hidden()
         .bg(t.bg_raised)
@@ -668,11 +663,11 @@ fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
         .child(
             img(source)
                 .id("pic")
-                .map(|i| if aspect.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
+                .map(|i| if size.is_some() { i.size_full() } else { i.max_w_full().max_h(px(PICTURE_MAX_H)) })
                 .object_fit(ObjectFit::Contain)
                 .with_loading(move || {
                     let placeholder = div().bg(raised);
-                    if aspect.is_some() { placeholder.size_full() } else { placeholder.w(px(PICTURE_UNKNOWN.0)).h(px(PICTURE_UNKNOWN.1)) }.into_any_element()
+                    if size.is_some() { placeholder.size_full() } else { placeholder.w(px(PICTURE_UNKNOWN.0)).h(px(PICTURE_UNKNOWN.1)) }.into_any_element()
                 })
                 .with_fallback(move || {
                     div()
@@ -837,6 +832,7 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
         div()
             .id(SharedString::from(format!("embed-media-{ix}-{n}")))
             .relative()
+            .self_start()
             .mt_2()
             .max_w(px(IMAGE_MAX_W))
             .rounded(radius::MD)
