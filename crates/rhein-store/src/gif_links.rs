@@ -222,58 +222,6 @@ pub fn klipy_media(payload: &serde_json::Value, slug: &str) -> Option<String> {
     .map(|u| u.to_string())
 }
 
-/// The GIF a share page names in its Open Graph tags, as Discord embeds it: the `og:image` that
-/// is a GIF (by its `og:image:type` or its path), else the first `og:image` or `twitter:image`.
-pub fn page_media(html: &str) -> Option<String> {
-    let mut images: Vec<(String, Option<String>)> = Vec::new();
-    let mut twitter: Option<String> = None;
-    for tag in html.split("<meta").skip(1) {
-        let tag = tag.split('>').next().unwrap_or_default();
-        let key = attribute(tag, "property").or_else(|| attribute(tag, "name")).unwrap_or_default().to_ascii_lowercase();
-        let Some(content) = attribute(tag, "content") else { continue };
-        match key.as_str() {
-            "og:image" | "og:image:url" | "og:image:secure_url" => images.push((content, None)),
-            // Describes the `og:image` before it.
-            "og:image:type" => {
-                if let Some(last) = images.last_mut() {
-                    last.1 = Some(content.to_ascii_lowercase());
-                }
-            }
-            "twitter:image" | "twitter:image:src" if twitter.is_none() => twitter = Some(content),
-            _ => {}
-        }
-    }
-    let gif = images.iter().find(|(url, kind)| kind.as_deref() == Some("image/gif") || https(url).is_some_and(|u| decoded_path(&u).to_lowercase().ends_with(".gif")));
-    gif.or(images.first())
-        .map(|(url, _)| url.clone())
-        .or(twitter)
-        .and_then(|u| https(&u))
-        .map(|u| u.to_string())
-}
-
-/// A quoted attribute's value in the inside of an HTML tag, with its entities decoded.
-fn attribute(tag: &str, name: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(found) = lower[from..].find(name) {
-        let start = from + found;
-        from = start + name.len();
-        // A whole attribute name: not the end of another (`data-name`).
-        if start > 0 && !lower.as_bytes()[start - 1].is_ascii_whitespace() {
-            continue;
-        }
-        let rest = lower[from..].trim_start();
-        let Some(rest) = rest.strip_prefix('=') else { continue };
-        let rest = rest.trim_start();
-        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
-        let offset = tag.len() - rest.len() + 1;
-        let end = tag[offset..].find(quote)?;
-        let value = &tag[offset..offset + end];
-        return Some(value.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">"));
-    }
-    None
-}
-
 /// The GIF links in a favourites export (Discord's, as the web client reads it): a list of
 /// links, or an object of link → `{order, …}`, in their order; https links only.
 pub fn favourites_in_export(document: &serde_json::Value) -> Vec<String> {
@@ -300,20 +248,6 @@ pub fn favourites_in_export(document: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn page_media_prefers_the_gif() {
-        let html = r#"<head><meta property="og:image" content="https://static2.klipy.com/a/x.webp"/>
-            <meta property="og:image:type" content="image/webp"/>
-            <meta property="og:image" content="https://static2.klipy.com/a/x.gif?a=1&amp;b=2"/>
-            <meta property="og:image:type" content="image/gif"/>
-            <meta property="og:video:url" content="https://static2.klipy.com/a/x.mp4"/></head>"#;
-        assert_eq!(super::page_media(html).as_deref(), Some("https://static2.klipy.com/a/x.gif?a=1&b=2"));
-        let html = r#"<meta content='https://media.tenor.com/y/still.png' name='twitter:image'>"#;
-        assert_eq!(super::page_media(html).as_deref(), Some("https://media.tenor.com/y/still.png"));
-        assert_eq!(super::page_media(r#"<meta property="og:image" content="http://insecure/x.gif">"#), None);
-        assert_eq!(super::page_media("<html></html>"), None);
-    }
-
     use super::*;
     use serde_json::json;
 

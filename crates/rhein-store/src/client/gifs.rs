@@ -169,12 +169,14 @@ impl Client {
         let (io, http, api) = (self.io.clone(), self.http.clone(), self.home.as_ref().map(|h| h.api.clone()));
         let key = url.to_owned();
         cx.spawn(async move |this, cx| {
-            let page = key.clone();
-            let found = join(io.spawn(async move { resolve_share(&http, api, &page, &share).await })).await;
+            let found = join(io.spawn(async move { resolve_share(&http, api, &share).await })).await;
             this.update(cx, |this, cx| {
                 let state = match found {
                     Ok(Some(media)) => GifShare::Ready(media),
-                    Ok(None) => GifShare::Failed,
+                    Ok(None) => {
+                        log::debug!("resolving {key}: the provider named no GIF for it");
+                        GifShare::Failed
+                    }
                     Err(err) => {
                         log::debug!("resolving {key}: {err:#}");
                         GifShare::Failed
@@ -189,33 +191,8 @@ impl Client {
     }
 }
 
-/// A share page's GIF: Klipy's from the page's own Open Graph tags (as Discord embeds it), then
-/// its search API; Tenor's from its API, then the page.
-async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, url: &str, share: &gif_links::Share) -> anyhow::Result<Option<String>> {
-    let from_page = async {
-        let page = http.get(url).header("Accept", "text/html").send().await?.error_for_status()?.text().await?;
-        anyhow::Ok(gif_links::page_media(&page))
-    };
-    match share {
-        gif_links::Share::Klipy(_) => match from_page.await {
-            Ok(Some(media)) => Ok(Some(media)),
-            page => {
-                if let Err(err) = page {
-                    log::debug!("reading {url}: {err:#}");
-                }
-                ask_provider(http, api, share).await
-            }
-        },
-        gif_links::Share::Tenor(_) => match ask_provider(http, api, share).await {
-            Ok(Some(media)) => Ok(Some(media)),
-            _ => from_page.await,
-        },
-        gif_links::Share::Giphy(_) => ask_provider(http, api, share).await,
-    }
-}
-
 /// Asks Tenor or Klipy (Klipy with the key the home server publishes) for a share page's GIF.
-async fn ask_provider(http: &reqwest::Client, api: Option<rhein_net::Api>, share: &gif_links::Share) -> anyhow::Result<Option<String>> {
+async fn resolve_share(http: &reqwest::Client, api: Option<rhein_net::Api>, share: &gif_links::Share) -> anyhow::Result<Option<String>> {
     let get = |url: String| async move {
         let answer = http.get(url).header("Accept", "application/json").send().await?.error_for_status()?;
         anyhow::Ok(answer.json::<serde_json::Value>().await?)
