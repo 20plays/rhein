@@ -34,6 +34,14 @@ const TYPING_IDLE: Duration = Duration::from_secs(8);
 const HIGHLIGHT_FOR: Duration = Duration::from_millis(1600);
 const COMPOSER_LINES: usize = 10;
 const LIGHTBOX_CONTEXT: &str = "Lightbox";
+/// The typing line: its height, and the space it keeps from the last message's box above and
+/// from the message bar below. The history ends that far above the composer's top.
+const TYPING_H: Pixels = px(18.);
+const TYPING_GAP: Pixels = px(6.);
+/// The composer's padding above the message bar (`pt_2`).
+const COMPOSER_TOP: Pixels = px(8.);
+/// `TYPING_H + 2 × TYPING_GAP − COMPOSER_TOP` (pixel arithmetic isn't const).
+const HISTORY_BOTTOM: Pixels = px(18. + 6. * 2. - 8.);
 /// Space between the message bar and the chat's bottom, left and right edges.
 const COMPOSER_MARGIN: Pixels = px(6.);
 
@@ -344,10 +352,12 @@ impl ChatView {
                 }
             }
             ClientEvent::MessageChanged { channel_id, index } if is_current(channel_id) => {
-                // The next row's header depends on this one, so re-measure both.
+                // The next row's header depends on this one, so re-measure both. Not `splice`:
+                // that resets the scroll position, and the echo replacing a message just sent
+                // made the list jump up and back to the end.
                 let end = (*index + 2).min(self.list.item_count());
                 if *index < end {
-                    self.list.splice(*index..end, end - *index);
+                    self.list.remeasure_items(*index..end);
                 }
             }
             ClientEvent::MessageRemoved { channel_id, index } if is_current(channel_id) && *index < self.list.item_count() => {
@@ -1589,8 +1599,9 @@ impl ChatView {
             div()
                 .absolute()
                 .left(px(20.))
-                .top(px(-16.))
-                .h(px(18.))
+                // Its bottom `TYPING_GAP` above the message bar.
+                .top(COMPOSER_TOP - TYPING_GAP - TYPING_H)
+                .h(TYPING_H)
                 .px_1()
                 .rounded(radius::SM)
                 .bg(t.bg_base)
@@ -1693,7 +1704,7 @@ impl ChatView {
             .relative()
             .flex_none()
             .px(COMPOSER_MARGIN)
-            .pt_2()
+            .pt(COMPOSER_TOP)
             .pb(COMPOSER_MARGIN)
             .flex()
             .flex_col()
@@ -2114,9 +2125,15 @@ impl Render for ChatView {
             .track_focus(&self.select_focus)
             // A press anywhere ends the old selection first; a press on message text then
             // starts a new one.
-            .capture_any_mouse_down(cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+            .capture_any_mouse_down(cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
                 if e.button == gpui::MouseButton::Left {
                     this.set_selection(None, cx);
+                    // A click into the chat focuses it (an input clicked takes the focus back as
+                    // the event reaches it), so typing afterwards goes to the message bar. An
+                    // open overlay keeps the focus it has.
+                    if this.lightbox.is_none() && this.picker.is_none() && this.gif_picker.is_none() {
+                        window.focus(&this.select_focus, cx);
+                    }
                 }
             }))
             .capture_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, _, cx| {
@@ -2124,6 +2141,25 @@ impl Render for ChatView {
                 if k.key == "c" && (k.modifiers.control || k.modifiers.platform) && !k.modifiers.shift && this.copy_selection(cx) {
                     cx.stop_propagation();
                 }
+            }))
+            // Typing while the chat itself has focus (after clicking into the history) writes
+            // into the message bar, as in Discord: the key goes there and so does the focus.
+            .on_key_down(cx.listener(|this, e: &gpui::KeyDownEvent, window, cx| {
+                if !this.select_focus.is_focused(window) {
+                    return;
+                }
+                let k = &e.keystroke;
+                if k.modifiers.control || k.modifiers.alt || k.modifiers.platform || k.modifiers.function {
+                    return;
+                }
+                let Some(text) = k.key_char.clone().filter(|c| !c.is_empty() && !c.chars().any(char::is_control)) else { return };
+                if this.current().is_none_or(|channel| !this.client.read(cx).may_write(&channel)) {
+                    return;
+                }
+                let focus = this.composer_focus(cx);
+                window.focus(&focus, cx);
+                this.composer.update(cx, |c, cx| c.insert(&text, cx));
+                cx.stop_propagation();
             }))
             .relative()
             .flex_1()
@@ -2146,7 +2182,9 @@ impl Render for ChatView {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .pb_4()
+                    // Room for the typing line between the last message and the message bar,
+                    // with as much space above it as below.
+                    .pb(HISTORY_BOTTOM)
                     // Switching channels fades the new history in instead of swapping it hard.
                     .child(motion::fade_in(
                         div().size_full().child(messages),

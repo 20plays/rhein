@@ -28,6 +28,8 @@ const ROW_PAD: Pixels = px(2.);
 /// Space between groups of messages, outside the rows.
 const GROUP_GAP: Pixels = px(14.);
 const GROUP_GAP_COMPACT: Pixels = px(6.);
+/// How much closer a message's text sits under its header than the body's gap (`gap_1`).
+const HEADER_TEXT_PULL: Pixels = px(2.);
 /// The line height of a group's header, shared by the name and the time.
 const HEADER_LINE: Pixels = px(20.);
 /// Messages from the same author this close together share one header.
@@ -347,7 +349,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     ),
             )
         })
-        .children(body_text.map(|b| div().text_size(body_size).child(b)))
+        // Text sits closer under the header than the gap between the body's parts (media keeps
+        // the full gap).
+        .children(body_text.map(|b| div().when(!grouped, |d| d.mt(-HEADER_TEXT_PULL)).text_size(body_size).child(b)))
         .when(edited_line, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(message_text::EDITED)))
         .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t, cx)))
         .children(files.into_iter().map(|(i, a)| {
