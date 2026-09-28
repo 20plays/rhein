@@ -148,7 +148,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         let v = v.read(cx);
         let selected = v.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range()));
         let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
-        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.contains(message_key(&message)), (selected, hovered))
+        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(&message)).copied(), (selected, hovered))
     });
     let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
@@ -466,13 +466,34 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .flex_col()
         .when(new_day, |d| d.child(day_separator(message.created_at, &t)))
         .when(divider_here, |d| d.child(new_messages_line(&t)))
-        .when(!grouped, |d| d.pt(if prefs.compact { GROUP_GAP_COMPACT } else { GROUP_GAP }));
-    // A message that just arrived rises into place; history renders as it is.
-    let element = if fresh {
-        let key = SharedString::from(format!("fresh-{}", message_key(&message)));
-        element.child(motion::rise_in(row, key, 6., motion::BASE)).into_any_element()
-    } else {
-        element.child(row).into_any_element()
+        .when(!grouped, |d| d.pt(if prefs.compact { GROUP_GAP_COMPACT } else { GROUP_GAP }))
+        .child(row);
+    // A message that just arrived: it is first laid out unseen and without taking room (with its
+    // group gap and any day line), to learn its height; then that space opens smoothly (the
+    // history moves up) and the message fades in. History renders as it is.
+    let element = match fresh {
+        Some(None) => {
+            let (view, key) = (ctx.view.clone(), message_key(&message).to_owned());
+            div()
+                .w_full()
+                .relative()
+                // One pixel, not none: the list lays out (and so measures) only rows that reach
+                // into its view.
+                .h(px(1.))
+                .overflow_hidden()
+                .on_children_prepainted(move |bounds, _, cx| {
+                    let Some(height) = bounds.first().map(|b| f32::from(b.size.height)) else { return };
+                    let key = key.clone();
+                    view.update(cx, |v, cx| v.fresh_measured(key, height, cx)).ok();
+                })
+                .child(div().absolute().top_0().left_0().right_0().opacity(0.).child(element))
+                .into_any_element()
+        }
+        Some(Some(height)) => {
+            let id = SharedString::from(format!("fresh-{}", message_key(&message)));
+            motion::expand_then_fade_in(div().w_full().overflow_hidden().child(element), id, height).into_any_element()
+        }
+        None => element.into_any_element(),
     };
     // Unknown previews are asked for after this frame, never during it.
     if !media_missing.is_empty() {

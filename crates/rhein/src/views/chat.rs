@@ -89,7 +89,9 @@ pub struct ChatView {
     /// The message bar's box, as last laid out.
     composer_bounds: Rc<Cell<gpui::Bounds<Pixels>>>,
     /// Messages that arrived while the channel was open, animating in (see `rows::message_key`).
-    pub(crate) fresh: HashSet<String>,
+    /// Messages that just arrived, by `rows::message_key`, and the height their row measured:
+    /// `None` until the row has been laid out once, unseen, to learn it (see `rows`).
+    pub(crate) fresh: HashMap<String, Option<f32>>,
     /// A message briefly highlighted after a jump.
     pub(crate) highlight: Option<(String, Instant)>,
     lightbox: Option<(String, String)>,
@@ -241,7 +243,7 @@ impl ChatView {
             confirm_delete: None,
             modal_focus: cx.focus_handle(),
             revealed: HashSet::new(),
-            fresh: HashSet::new(),
+            fresh: HashMap::new(),
             highlight: None,
             lightbox: None,
             lightbox_focus: cx.focus_handle(),
@@ -342,11 +344,20 @@ impl ChatView {
                 let n = self.list.item_count();
                 self.list.splice(n..n, 1);
                 let key = self.client.read(cx).logs.get(channel_id).and_then(|l| l.messages.last()).map(|m| message_key(m).to_owned());
-                if let Some(key) = key {
-                    self.fresh.insert(key.clone());
+                if let Some(key) = key
+                    && !cx.reduce_motion()
+                {
+                    self.fresh.insert(key.clone(), None);
+                    // A row not laid out soon (the list is scrolled away from the end) just shows.
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(motion::BASE * 2).await;
-                        this.update(cx, |this, _| this.fresh.remove(&key)).ok();
+                        cx.background_executor().timer(Duration::from_millis(400)).await;
+                        this.update(cx, |this, cx| {
+                            if this.fresh.get(&key) == Some(&None) {
+                                this.fresh.remove(&key);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
                     })
                     .detach();
                 }
@@ -380,6 +391,26 @@ impl ChatView {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// A new message's row has been laid out, unseen, at `height`: now its space opens and it
+    /// fades in (`motion::expand_then_fade_in`), after which it is an ordinary row.
+    pub(crate) fn fresh_measured(&mut self, key: String, height: f32, cx: &mut Context<Self>) {
+        let Some(slot) = self.fresh.get_mut(&key) else { return };
+        if slot.is_some() {
+            return;
+        }
+        *slot = Some(height);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(motion::EXPAND + motion::APPEAR + Duration::from_millis(40)).await;
+            this.update(cx, |this, cx| {
+                this.fresh.remove(&key);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn flash(&mut self, message_id: String, cx: &mut Context<Self>) {
@@ -2150,6 +2181,17 @@ impl Render for ChatView {
                 }
                 let k = &e.keystroke;
                 if k.modifiers.control || k.modifiers.alt || k.modifiers.platform || k.modifiers.function {
+                    return;
+                }
+                // Enter sends what the message bar holds (text, or files waiting to go) without
+                // going there first.
+                if k.key == "enter" && !k.modifiers.shift {
+                    let Some(channel) = this.writable(cx) else { return };
+                    let has_text = !this.composer.read(cx).text().trim().is_empty();
+                    if has_text || !this.client.read(cx).staged(&channel).is_empty() {
+                        this.submit(window, cx);
+                        cx.stop_propagation();
+                    }
                     return;
                 }
                 let Some(text) = k.key_char.clone().filter(|c| !c.is_empty() && !c.chars().any(char::is_control)) else { return };

@@ -44,6 +44,27 @@ where
     el.with_animation(id, animation(duration), move |el, v| el.opacity(v).top(px(distance * (1. - v))))
 }
 
+/// How long a new message's space takes to open, and its content to fade in after.
+pub const EXPAND: Duration = Duration::from_millis(140);
+pub const APPEAR: Duration = Duration::from_millis(120);
+
+/// A new message arriving: first the space it takes opens to its `height` (what is above moves
+/// up to make room), then its content fades in. `el` should clip its content (`overflow_hidden`).
+pub fn expand_then_fade_in<E>(el: E, id: impl Into<ElementId>, height: f32) -> impl IntoElement
+where
+    E: IntoElement + Styled + 'static,
+{
+    let total = (EXPAND + APPEAR).as_secs_f32();
+    let split = EXPAND.as_secs_f32() / total;
+    el.with_animation(id, Animation::new(EXPAND + APPEAR), move |el, v| {
+        if v < split {
+            el.h(px(height * ease_out(v / split))).opacity(0.)
+        } else {
+            el.opacity(ease_out((v - split) / (1. - split)))
+        }
+    })
+}
+
 /// The opening transition of popovers, menus and dialogs.
 pub fn pop_in<E>(el: E, id: impl Into<ElementId>) -> impl IntoElement
 where
