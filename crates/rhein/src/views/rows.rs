@@ -23,6 +23,13 @@ use crate::views::chat::ChatView;
 use crate::views::media::{self, Media};
 use crate::views::message_text;
 
+/// Room above and below every row's content, inside its background.
+const ROW_PAD: Pixels = px(2.);
+/// Space between groups of messages, outside the rows.
+const GROUP_GAP: Pixels = px(14.);
+const GROUP_GAP_COMPACT: Pixels = px(6.);
+/// The line height of a group's header, shared by the name and the time.
+const HEADER_LINE: Pixels = px(20.);
 /// Messages from the same author this close together share one header.
 const GROUP_WINDOW_MS: i64 = 7 * 60 * 1000;
 /// How many emoji the hover bar offers to react with in one click: the most recently used,
@@ -219,7 +226,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         let label = match parent {
             Some(p) => {
                 let name = client.display_name(guild_id.as_deref(), &p.author);
-                let snippet: String = p.content.lines().next().unwrap_or("").chars().take(100).collect();
+                let first = p.content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                let snippet: String = plain_text(&markdown::spans(first), client, guild_id.as_deref()).chars().take(100).collect();
                 format!("{name}: {}", if snippet.is_empty() { "(attachment)".to_owned() } else { snippet })
             }
             None => "Replying to an older message".to_owned(),
@@ -300,11 +308,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .min_w_0()
         .flex_1()
         .when(!grouped, |d| {
+            // Name and time share one line height, so their baselines sit together: GPUI text has
+            // no baseline to align by, and boxes of different heights put the time too low.
             d.child(
                 div()
                     .flex()
-                    .items_baseline()
+                    .items_start()
                     .gap_2()
+                    .line_height(HEADER_LINE)
                     .child({
                         let (v1, v2, u1, u2) = (ctx.view.clone(), ctx.view.clone(), message.author.clone(), message.author.clone());
                         div()
@@ -326,7 +337,14 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     })
                     // Centred on the name, not on its baseline: the tag's padding would drop it.
                     .when(author_bot, |d| d.child(div().self_center().flex().child(rhein_ui::Tag("BOT"))))
-                    .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(format_time(message.created_at, prefs.clock_24h))),
+                    .child(
+                        div()
+                            .font_family(FONT_MONO)
+                            .text_size(text::XS)
+                            .line_height(HEADER_LINE)
+                            .text_color(t.text_faint)
+                            .child(format_time(message.created_at, prefs.clock_24h)),
+                    ),
             )
         })
         .children(body_text.map(|b| div().text_size(body_size).child(b)))
@@ -365,7 +383,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                     })),
             )
         })
-        .when(!message.reactions.is_empty(), |d| d.child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t, cx)))
+        // A little room under the chips, which are taller than a line of text.
+        .when(!message.reactions.is_empty(), |d| d.child(div().pb_0p5().child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t, cx))))
         .children(thread_chip);
 
     let group = message_group(ix);
@@ -411,8 +430,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .flex()
         .flex_col()
         .px_4()
-        .when(grouped, |d| d.py_0p5())
-        .when(!grouped, |d| if prefs.compact { d.pt_1p5().pb_0p5() } else { d.pt_3().pb_0p5() })
+        // The same room above and below the content, so a highlight or the hover sits evenly
+        // around it; the space between groups is outside the row (below).
+        .py(ROW_PAD)
         .when_some(row_bg, |d, bg| d.bg(bg))
         // The bar lies over the row's edge rather than taking room, so the text stays in line
         // with its neighbours.
@@ -434,13 +454,15 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         });
 
     // As wide as the list: a highlight or the hover spans the row, and the actions sit at its
-    // right edge rather than on the text.
+    // right edge rather than on the text. A new group starts after a gap the row's background
+    // doesn't cover.
     let element = div()
         .w_full()
         .flex()
         .flex_col()
         .when(new_day, |d| d.child(day_separator(message.created_at, &t)))
-        .when(divider_here, |d| d.child(new_messages_line(&t)));
+        .when(divider_here, |d| d.child(new_messages_line(&t)))
+        .when(!grouped, |d| d.pt(if prefs.compact { GROUP_GAP_COMPACT } else { GROUP_GAP }));
     // A message that just arrived rises into place; history renders as it is.
     let element = if fresh {
         let key = SharedString::from(format!("fresh-{}", message_key(&message)));
@@ -668,6 +690,28 @@ fn reactors(r: &rhein_proto::Reaction, store: &Client, guild_id: Option<&str>, t
         )
         .into_any_element(),
     )
+}
+
+/// A line of a message as plain text, for a one-line quote: mentions by name, custom emoji as
+/// `:name:`, formatting dropped and spoilers kept hidden.
+fn plain_text(spans: &[markdown::Span], store: &Client, guild_id: Option<&str>) -> String {
+    use markdown::Span;
+    let mut out = String::new();
+    for span in spans {
+        match span {
+            Span::Text(t) | Span::Code(t) | Span::Broadcast(t) | Span::Link(t) => out.push_str(t),
+            Span::Bold(inner) | Span::Italic(inner) | Span::Strike(inner) => out.push_str(&plain_text(inner, store, guild_id)),
+            Span::Spoiler(_) => out.push_str("▮▮▮"),
+            Span::User(user) => out.push_str(&format!("@{}", store.display_name(guild_id, user))),
+            Span::Role(id) => {
+                let role = guild_id.and_then(|g| store.guild(g)).and_then(|g| g.guild.roles.iter().find(|r| &r.id == id).map(|r| r.name.clone()));
+                out.push_str(&format!("@{}", role.as_deref().unwrap_or("unknown-role")));
+            }
+            Span::Channel(id) => out.push_str(&format!("#{}", store.channel(id).map_or("unknown-channel", |c| c.name.as_str()))),
+            Span::Emoji { name, .. } => out.push_str(&format!(":{name}:")),
+        }
+    }
+    out
 }
 
 /// A reaction's emoji: a custom one (`<name:ID>`) as its picture, a unicode one as text.
