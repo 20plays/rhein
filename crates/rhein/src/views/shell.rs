@@ -110,6 +110,8 @@ pub struct Shell {
     /// Guilds folded or unfolded by hand in the sidebar tree.
     folded_guilds: HashSet<String>,
     unfolded_guilds: HashSet<String>,
+    /// The guild open when the client last changed, to keep it unfolded once another opens.
+    open_guild: Option<String>,
     /// The sign-out question, with how many other saved accounts stay signed in (read once when
     /// it opens, not from disk on every frame).
     confirm_sign_out: Option<usize>,
@@ -178,6 +180,7 @@ impl Shell {
                 cx.observe_keystrokes(move |_, _, _, cx| note_input(&last, &client, cx))
             },
             cx.observe_in(&client, window, |this, _, window, cx| {
+                this.keep_previous_guild_unfolded(cx);
                 this.follow_channel(window, cx);
                 cx.notify();
             }),
@@ -458,6 +461,7 @@ impl Shell {
             collapsed: HashSet::new(),
             folded_guilds: HashSet::new(),
             unfolded_guilds: HashSet::new(),
+            open_guild: None,
             confirm_sign_out: None,
             modal_focus: cx.focus_handle(),
             menu: MenuHost::default(),
@@ -2043,6 +2047,22 @@ impl Shell {
         !self.folded_guilds.contains(gid) && (open || self.unfolded_guilds.contains(gid))
     }
 
+    /// Opening another guild, however (its name, one of its text or voice channels, the
+    /// switcher), leaves the one open before unfolded: only its arrow folds a guild.
+    fn keep_previous_guild_unfolded(&mut self, cx: &App) {
+        let client = self.client.read(cx);
+        let open = if client.showing_home { None } else { client.selected_guild.clone() };
+        if open == self.open_guild {
+            return;
+        }
+        if let Some(previous) = self.open_guild.take()
+            && !self.folded_guilds.contains(&previous)
+        {
+            self.unfolded_guilds.insert(previous);
+        }
+        self.open_guild = open;
+    }
+
     fn toggle_guild(&mut self, gid: &str, cx: &mut Context<Self>) {
         if self.guild_expanded(gid, cx) {
             self.unfolded_guilds.remove(gid);
@@ -2187,12 +2207,8 @@ impl Shell {
                             if open {
                                 this.toggle_guild(&select_id, cx);
                             } else {
-                                // Choosing another guild leaves the one open before open: only
-                                // its arrow folds a guild.
-                                let previous = this.client.read(cx).selected_guild.clone();
-                                if let Some(prev) = previous.filter(|p| this.guild_expanded(p, cx)) {
-                                    this.unfolded_guilds.insert(prev);
-                                }
+                                // The guild open before stays unfolded (see
+                                // `keep_previous_guild_unfolded`).
                                 this.folded_guilds.remove(&select_id);
                                 let id = select_id.clone();
                                 this.client.update(cx, |c, cx| c.select_guild(id, cx));
