@@ -158,12 +158,42 @@ pub struct VideoOut {
     preview: Option<PreviewSink>,
     /// When it started: frames carry the time since, for the encoder's pacing.
     started: std::time::Instant,
+    /// Pictures taller than this are scaled down to it (0: as they come).
+    max_height: u32,
+    /// The rate pictures come at, for the encoder's layers.
+    fps: u32,
 }
 
 impl VideoOut {
     /// Must be called inside a tokio runtime: the source keeps a task of its own there.
     pub fn new(width: u32, height: u32, screencast: bool) -> VideoOut {
-        VideoOut { source: NativeVideoSource::new(VideoResolution { width, height }, screencast), preview: None, started: std::time::Instant::now() }
+        VideoOut {
+            source: NativeVideoSource::new(VideoResolution { width, height }, screencast),
+            preview: None,
+            started: std::time::Instant::now(),
+            max_height: 0,
+            fps: if screencast { 15 } else { 30 },
+        }
+    }
+
+    /// Caps the height pictures go out at (0: none) and says how many come each second.
+    pub fn with_limits(mut self, max_height: u32, fps: u32) -> VideoOut {
+        self.max_height = max_height;
+        self.fps = fps.clamp(1, 60);
+        self
+    }
+
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    /// The size a picture of `width` × `height` goes out at under the height cap.
+    pub fn fitted(max_height: u32, width: u32, height: u32) -> (u32, u32) {
+        if max_height == 0 || height <= max_height {
+            return (width & !1, height & !1);
+        }
+        let w = (u64::from(width) * u64::from(max_height) / u64::from(height.max(1))) as u32;
+        ((w & !1).max(2), max_height & !1)
     }
 
     /// Also shows what goes out, through `sink`.
@@ -189,6 +219,10 @@ impl VideoOut {
         let (sy, su, sv) = i420.strides();
         let (y, u, v) = i420.data_mut();
         yuv_helper::argb_to_i420(bgra, stride, y, sy, u, su, v, sv, width as i32, height as i32);
+        let (fit_w, fit_h) = Self::fitted(self.max_height, width, height);
+        if (fit_w, fit_h) != (width, height) {
+            i420 = i420.scale(fit_w as i32, fit_h as i32);
+        }
         if let Some(preview) = &self.preview {
             preview.offer(&i420);
         }
@@ -239,6 +273,14 @@ impl Drop for TestPattern {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shares_fit_their_height_cap() {
+        assert_eq!(VideoOut::fitted(0, 2560, 1440), (2560, 1440));
+        assert_eq!(VideoOut::fitted(1080, 2560, 1440), (1920, 1080));
+        assert_eq!(VideoOut::fitted(1080, 1280, 720), (1280, 720));
+        assert_eq!(VideoOut::fitted(720, 3441, 1441), (1718, 720));
+    }
+
     use super::*;
 
     /// A screen share makes its source on the capture thread, which has no runtime of its own

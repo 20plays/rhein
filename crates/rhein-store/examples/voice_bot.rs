@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         let out = rhein_voice::video::VideoOut::new(1280, 720, true);
         let pattern = rhein_voice::video::TestPattern::start(out.clone(), 1280, 720);
         api.voice_stream(&channel.id, true, Some("detail 720p@15")).await?;
-        call.publish_video(rhein_voice::Slot::Screen, out.source()).await?;
+        call.publish_video(rhein_voice::Slot::Screen, &out).await?;
         Some(pattern)
     } else {
         None

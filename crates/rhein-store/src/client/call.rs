@@ -692,8 +692,10 @@ impl Client {
             return;
         }
         let io = self.io.clone();
+        let (fps, height) = (self.prefs.voice.share_fps(), self.prefs.voice.share_height);
+        let preset = self.prefs.voice.share_preset();
         cx.spawn(async move |this, cx| {
-            let started = io.spawn(async move { tokio::task::spawn_blocking(|| ScreenShare::start(30, true)).await }).await;
+            let started = io.spawn(async move { tokio::task::spawn_blocking(move || ScreenShare::start(fps, height, true)).await }).await;
             let started = match started {
                 Ok(Ok(result)) => result,
                 _ => Err(ShareError::Other("the screen capture stopped unexpectedly".into())),
@@ -710,7 +712,7 @@ impl Client {
                         call.sharing_screen = true;
                         this.place_own_preview(cx);
                         if let Some(route) = this.route() {
-                            this.io.spawn(async move { route.stream(true).await });
+                            this.io.spawn(async move { route.stream(Some(preset)).await });
                         }
                     }
                     // A closed picker is the person's answer; anything else is worth saying.
@@ -747,7 +749,7 @@ impl Client {
         call.sharing_screen = true;
         self.place_own_preview(cx);
         if let Some(route) = self.route() {
-            self.io.spawn(async move { route.stream(true).await });
+            self.io.spawn(async move { route.stream(Some("detail 720p@15".into())).await });
         }
         cx.notify();
     }
@@ -802,7 +804,7 @@ impl Client {
             let _ = commands.send(Command::Unpublish(Slot::Screen));
         }
         if let Some(route) = self.route() {
-            self.io.spawn(async move { route.stream(false).await });
+            self.io.spawn(async move { route.stream(None).await });
         }
         cx.notify();
     }
@@ -948,9 +950,11 @@ impl Route {
         }
     }
 
-    async fn stream(&self, on: bool) {
+    /// Starts (with the share's preset) or stops (`None`) streaming.
+    async fn stream(&self, preset: Option<String>) {
+        let on = preset.is_some();
         let _ = match self {
-            Route::Channel { api, channel } => api.voice_stream(channel, on, on.then_some("detail native@30")).await,
+            Route::Channel { api, channel } => api.voice_stream(channel, on, preset.as_deref()).await,
             Route::Conversation { api, id } => api.conversation_voice_state(id, &serde_json::json!({ "streaming": on })).await,
         };
     }
@@ -1180,7 +1184,7 @@ async fn drive(
                                 command = commands.recv() => match command {
                                     Some(Command::Watch { user, on }) => call.watch(&user, on),
                                     Some(Command::Publish { slot, video }) => {
-                                        if let Err(err) = call.publish_video(slot, video.source()).await {
+                                        if let Err(err) = call.publish_video(slot, &video).await {
                                             let _ = updates.send(Update::Failed(format!("{err:#}")));
                                         }
                                     }

@@ -311,7 +311,7 @@ async fn share_and_look(tag: &str, width: u32, height: u32, check_early: bool) -
     let out = VideoOut::new(width, height, true);
     let _pattern = TestPattern::start(out.clone(), width, height);
     call.a_api.voice_stream(&call.voice, true, Some("detail")).await.expect("stream state");
-    a_call.publish_video(Slot::Screen, out.source()).await.expect("publish the screen");
+    a_call.publish_video(Slot::Screen, &out).await.expect("publish the screen");
 
     if check_early {
         let early = tokio::time::timeout(Duration::from_secs(3), async {

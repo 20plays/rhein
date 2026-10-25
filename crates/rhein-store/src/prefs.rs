@@ -65,10 +65,39 @@ pub struct VoicePrefs {
     pub volumes: std::collections::HashMap<String, u32>,
     /// Call privacy in conversations: `direct`, `relay` or `sfu` (see `docs/calls.md`).
     pub posture: String,
+    /// What a screen share is for: `detail` (a document or code) or `motion` (a game or video).
+    pub share_kind: String,
+    /// The tallest a shared screen goes out (720, 1080, 1440, 2160; 0 as it is).
+    pub share_height: u32,
+    /// Pictures a second for a screen share (15, 30 or 60; 0 the kind's own default).
+    pub share_fps: u32,
     /// Open ALSA's null devices instead of real ones (`RHEIN_AUDIO=null`, for screenshots and
     /// demos that must not touch the speakers). Never saved.
     #[serde(skip)]
     pub null_devices: bool,
+}
+
+impl VoicePrefs {
+    /// Whether screen shares are set up for motion (a game, a video) rather than detail.
+    pub fn share_motion(&self) -> bool {
+        self.share_kind == "motion"
+    }
+
+    /// The share's rate: the chosen one, else 60 for motion and 15 for detail.
+    pub fn share_fps(&self) -> u32 {
+        match self.share_fps {
+            15 | 30 | 60 => self.share_fps,
+            _ if self.share_motion() => 60,
+            _ => 15,
+        }
+    }
+
+    /// How the share is described to the server and the people watching, `detail 1080p@15`.
+    pub fn share_preset(&self) -> String {
+        let kind = if self.share_motion() { "motion" } else { "detail" };
+        let size = if self.share_height > 0 { format!("{}p", self.share_height) } else { "native".into() };
+        format!("{kind} {size}@{}", self.share_fps())
+    }
 }
 
 impl Default for Prefs {
@@ -122,6 +151,17 @@ pub fn store(prefs: &Prefs) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn share_presets() {
+        let mut v = VoicePrefs::default();
+        assert_eq!(v.share_preset(), "detail native@15");
+        v.share_kind = "motion".into();
+        v.share_height = 1080;
+        assert_eq!(v.share_preset(), "motion 1080p@60");
+        v.share_fps = 30;
+        assert_eq!(v.share_fps(), 30);
+    }
+
     use super::*;
 
     #[test]

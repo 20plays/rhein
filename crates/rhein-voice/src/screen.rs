@@ -76,18 +76,18 @@ pub struct ScreenShare {
 }
 
 impl ScreenShare {
-    /// Asks the desktop for a screen or window and starts sending it at `fps`. Returns once the
-    /// first picture arrived, or with an error when the person cancelled the picker or capture
-    /// is unavailable.
-    pub fn start(fps: u32, cursor: bool) -> Result<ScreenShare, ShareError> {
+    /// Asks the desktop for a screen or window and starts sending it at `fps`, at most
+    /// `max_height` pixels high (0: as it is). Returns once the first picture arrived, or with an
+    /// error when the person cancelled the picker or capture is unavailable.
+    pub fn start(fps: u32, max_height: u32, cursor: bool) -> Result<ScreenShare, ShareError> {
         portal_ready()?;
-        Self::capture(fps, cursor).map_err(|err| match err.downcast_ref::<ShareError>() {
+        Self::capture(fps, max_height, cursor).map_err(|err| match err.downcast_ref::<ShareError>() {
             Some(share) => share.clone(),
             None => ShareError::Other(format!("{err:#}")),
         })
     }
 
-    fn capture(fps: u32, cursor: bool) -> Result<ScreenShare> {
+    fn capture(fps: u32, max_height: u32, cursor: bool) -> Result<ScreenShare> {
         // The video source runs a task of its own on tokio, and it is made in the capture
         // callback, on the capture thread: that thread works inside the caller's runtime.
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| ShareError::Other("screen sharing has to start inside the call's runtime".into()))?;
@@ -120,7 +120,8 @@ impl ScreenShare {
                             let (w, h) = (frame.width() as u32, frame.height() as u32);
                             let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
                             let video = sink.get_or_insert_with(|| {
-                                let video = VideoOut::new_in(&handle, w, h, true).with_preview(preview_sink.clone());
+                                let (sw, sh) = VideoOut::fitted(max_height, w, h);
+                                let video = VideoOut::new_in(&handle, sw, sh, true).with_limits(max_height, fps).with_preview(preview_sink.clone());
                                 let _ = first.send(Ok(video.clone()));
                                 video
                             });

@@ -13,7 +13,6 @@ use livekit::options::TrackPublishOptions;
 use livekit::id::TrackSid;
 use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, TrackSource};
 use livekit::webrtc::video_source::RtcVideoSource;
-use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::media_stream_track::MediaStreamTrack;
 use livekit::webrtc::prelude::RtcAudioSource;
@@ -144,7 +143,8 @@ impl SfuCall {
     /// Publishes a camera or a screen (simulcast, so each viewer gets the layer it can take),
     /// within this participant's share of the ceiling: the SFU mutes a track whose layers
     /// declare more (a full-HD screen with LiveKit's own presets did, and went out black).
-    pub async fn publish_video(&mut self, slot: Slot, source: NativeVideoSource) -> Result<()> {
+    pub async fn publish_video(&mut self, slot: Slot, video: &crate::video::VideoOut) -> Result<()> {
+        let source = video.source();
         self.unpublish(slot).await;
         let source_kind = match slot {
             Slot::Camera => TrackSource::Camera,
@@ -155,7 +155,7 @@ impl SfuCall {
         let mut options = TrackPublishOptions { source: source_kind, simulcast: true, ..Default::default() };
         if let Some(budget) = self.ceiling().and_then(crate::budget::budget) {
             let screen = slot == Slot::Screen;
-            let (slice, fps) = if screen { (budget.screen, 15.) } else { (budget.camera, 30.) };
+            let (slice, fps) = (if screen { budget.screen } else { budget.camera }, f64::from(video.fps()));
             let ladder = crate::budget::ladder(size.width, size.height, fps, slice, screen);
             log::info!("publishing {slot:?} {}x{} in {} of {} bit/s", size.width, size.height, ladder.declared, budget.total);
             options.simulcast = !ladder.layers.is_empty();

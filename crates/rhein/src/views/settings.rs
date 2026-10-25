@@ -6,7 +6,7 @@ use gpui::{
     px,
 };
 use rhein_proto::Device;
-use rhein_store::{Client, ServerStatus};
+use rhein_store::{Client, ServerStatus, VoicePrefs};
 
 use crate::views::crop::{self, CropDialog, CropEvent};
 use crate::views::profile;
@@ -461,11 +461,58 @@ impl SettingsView {
                 )
             })))
             .child(div().text_size(text::SM).text_color(t.text_faint).child(explained));
+        // Screen shares: what they are for, how tall and how fast (`features/voice-and-video`).
+        let share_pills = |items: Vec<SharePill>| {
+            div().flex().gap_1().children(items.into_iter().map(|(id, label, on, set)| {
+                let client = self.client.clone();
+                let set = std::rc::Rc::new(set);
+                pill(SharedString::from(id), label, on, Box::new(move |cx| {
+                    let set = set.clone();
+                    client.update(cx, |c, cx| c.update_voice_prefs(cx, move |v| set(v)))
+                }))
+            }))
+        };
+        let motion = voice.share_motion();
+        let kinds: Vec<SharePill> = vec![
+            // Choosing what it is for resets the rate to that kind's own.
+            ("share-detail".into(), "A document or code".into(), !motion, Box::new(|v: &mut VoicePrefs| {
+                v.share_kind = "detail".into();
+                v.share_fps = 0;
+            })),
+            ("share-motion".into(), "A game or video".into(), motion, Box::new(|v: &mut VoicePrefs| {
+                v.share_kind = "motion".into();
+                v.share_fps = 0;
+            })),
+        ];
+        let heights: Vec<SharePill> = [0u32, 720, 1080, 1440, 2160]
+            .into_iter()
+            .map(|h| {
+                let label = if h == 0 { "As it is".to_owned() } else { format!("{h}p") };
+                (format!("share-h-{h}"), label, voice.share_height == h, Box::new(move |v: &mut VoicePrefs| v.share_height = h) as Box<dyn Fn(&mut VoicePrefs)>)
+            })
+            .collect();
+        let rates: Vec<SharePill> = [15u32, 30, 60]
+            .into_iter()
+            .map(|f| (format!("share-fps-{f}"), format!("{f} fps"), voice.share_fps() == f, Box::new(move |v: &mut VoicePrefs| v.share_fps = f) as Box<dyn Fn(&mut VoicePrefs)>))
+            .collect();
+        let share_control = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(share_pills(kinds))
+            .child(share_pills(heights))
+            .child(share_pills(rates))
+            .child(div().text_size(text::SM).text_color(t.text_faint).child(if motion {
+                "Keeps the motion smooth and lets sharpness give way when the connection is tight."
+            } else {
+                "Keeps text sharp and lets the frame rate give way when the connection is tight."
+            }));
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(row("Call privacy", "For calls in direct messages and group chats. A call is as private as its most cautious participant asks; no server learns your choice.", posture_control.into_any_element()))
+            .child(row("Screen sharing", "What your shares are usually for. Both spend the same bandwidth, split differently.", share_control.into_any_element()))
             .child(row("Microphone", "Where your voice comes from.", device_pills(true)))
             .child(row("Speakers", "Where calls are played.", device_pills(false)))
             .child(row("Input sensitivity", "Below this level the microphone sends silence, so keyboards and fans stay out of the call.", sensitivity.into_any_element()))
@@ -1918,6 +1965,9 @@ impl SecurityForm {
         }
     }
 }
+
+/// One choice of the screen-sharing rows: id, label, chosen, and what it sets.
+type SharePill = (String, String, bool, Box<dyn Fn(&mut VoicePrefs)>);
 
 #[derive(Clone, Copy)]
 enum SecurityAction {
