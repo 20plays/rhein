@@ -2323,10 +2323,9 @@ impl Render for ChatView {
             .then(|| client.guild_of_channel(&channel_id))
             .flatten()
             .map(|g| {
-                // A square filling the header's height, flush with the sidebar's edge and the
-                // header's bottom line (the header's padding is taken back on the left).
-                let side = size::HEADER - px(1.);
-                let tile = div().size(side).flex_none().ml(px(-16.)).mr_1().overflow_hidden().bg(t.bg_selected).flex().items_center().justify_center();
+                // A circle before the channel's name.
+                let side = px(28.);
+                let tile = div().size(side).flex_none().mr_1().rounded_full().overflow_hidden().bg(t.bg_selected).flex().items_center().justify_center();
                 match client.guild_icon_url(&g.guild.id) {
                     // Shrunk properly to the pixels it covers: GPUI's own sampling is jagged.
                     Some(url) => tile.child(gpui::img(rhein_ui::images::scaled(url, side, window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
@@ -2347,7 +2346,7 @@ impl Render for ChatView {
             .gap_2()
             .border_b_1()
             .border_color(t.border)
-            // The guild's face, in its square, before the channel.
+            // The guild's face, in its circle, before the channel.
             .children(guild_face)
             .child(
                 icon(match (&conversation, self.fixed.is_some()) {

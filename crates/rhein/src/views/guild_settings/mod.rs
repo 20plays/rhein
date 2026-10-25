@@ -316,13 +316,13 @@ pub(crate) fn input(placeholder: &'static str, text_: impl Into<SharedString>, c
     cx.new(|cx| TextInput::new(placeholder, cx).with_text(text_))
 }
 
-/// A guild's face: its icon, or its initial on a tile.
+/// A guild's face: its icon, or its initial, in a circle.
 pub(crate) fn guild_face(name: &str, url: Option<String>, size: f32, t: &Theme, window: &Window) -> AnyElement {
     let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
     let tile = div()
         .size(px(size))
         .flex_none()
-        .rounded(px(size * 0.25))
+        .rounded_full()
         .overflow_hidden()
         .bg(t.bg_selected)
         .flex()
