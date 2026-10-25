@@ -96,7 +96,8 @@ impl RenderOnce for Avatar {
                 Presence::Dnd => t.danger,
                 Presence::Offline => t.text_faint,
             };
-            let d = (size * 0.32).max(px(8.));
+            // A third of a small face, no more than 16px on a large one.
+            let d = (size * 0.32).clamp(px(8.), px(16.));
             div()
                 .absolute()
                 .bottom(px(-1.))

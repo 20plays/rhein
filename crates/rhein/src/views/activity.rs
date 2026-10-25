@@ -122,7 +122,8 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .gap_0p5()
+                        // Tight lines, as in the web client's card.
+                        .line_height(gpui::relative(1.2))
                         .child(div().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).truncate().child(activity.name.clone()))
                         .children(line(&activity.details))
                         .children(line(&state))
