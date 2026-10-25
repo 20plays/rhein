@@ -38,12 +38,12 @@ const COMPOSER_LINES: usize = 10;
 const LIGHTBOX_CONTEXT: &str = "Lightbox";
 /// The typing line: its height, and the space it keeps from the last message's box above and
 /// from the message bar below. The history ends that far above the composer's top.
-const TYPING_H: Pixels = px(18.);
-const TYPING_GAP: Pixels = px(6.);
+const TYPING_H: Pixels = px(16.);
+const TYPING_GAP: Pixels = px(2.);
 /// The composer's padding above the message bar (`pt_2`).
 const COMPOSER_TOP: Pixels = px(8.);
 /// `TYPING_H + 2 × TYPING_GAP − COMPOSER_TOP` (pixel arithmetic isn't const).
-const HISTORY_BOTTOM: Pixels = px(18. + 6. * 2. - 8.);
+const HISTORY_BOTTOM: Pixels = px(16. + 2. * 2. - 8.);
 /// Space between the message bar and the chat's bottom, left and right edges.
 const COMPOSER_MARGIN: Pixels = px(6.);
 
