@@ -37,7 +37,13 @@ pub use tooltip::tooltip;
 
 actions!(rhein_ui, [Dismiss]);
 
-/// Installs the theme, the embedded fonts and the component key bindings.
+/// Switches between the light and the dark theme and redraws every window, cached views included.
+pub fn set_theme(light: bool, cx: &mut App) {
+    cx.set_global(Theme::new(light));
+    cx.refresh_windows();
+}
+
+/// Installs the dark theme, the embedded fonts and the component key bindings.
 pub fn init(cx: &mut App) {
     cx.set_global(Theme::dark());
     if let Err(err) = Assets::load_fonts(cx) {

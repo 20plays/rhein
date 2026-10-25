@@ -1120,6 +1120,7 @@ impl SettingsView {
             .flex_col()
             .gap_2()
             .child(heading("display", t))
+            .child(row("Light theme", "Light surfaces and dark text instead of the dark look.", toggle("light-theme", prefs.light_theme, |p, on| p.light_theme = on)))
             .child(row("Message text size", "How large message text is drawn.", size_control))
             .child(row(
                 "Compact messages",

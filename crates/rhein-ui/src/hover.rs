@@ -32,6 +32,13 @@ pub fn darken(color: Rgba, amount: f32) -> Rgba {
 }
 
 fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    // A fully clear end takes the other's hue, so fading in from nothing does not pass through
+    // grey (which shows on a light surface).
+    let (a, b) = match (a.a == 0., b.a == 0.) {
+        (true, false) => (Rgba { a: 0., ..b }, b),
+        (false, true) => (a, Rgba { a: 0., ..a }),
+        _ => (a, b),
+    };
     Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
 }
 

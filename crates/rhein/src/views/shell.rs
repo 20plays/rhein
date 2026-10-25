@@ -1743,7 +1743,7 @@ impl Shell {
             .when(!activity_cards.is_empty(), |d| d.child(div().flex().flex_col().gap_1p5().children(activity_cards)));
         let more = {
             let (v, uid, link) = (cx.weak_entity(), user_id.clone(), link.clone());
-            div().absolute().top_2().right_2().rounded(radius::MD).bg(t.overlay).child(
+            div().absolute().top_2().right_2().rounded(radius::MD).bg(gpui::Hsla::from(t.bg_main).opacity(0.7)).child(
                 IconButton::new("profile-more", Icon::Ellipsis).tooltip("More").on_click(move |e, window, cx| {
                     let uid = uid.clone();
                     let at = e.position();

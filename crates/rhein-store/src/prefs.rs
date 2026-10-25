@@ -14,6 +14,8 @@ pub struct Prefs {
     /// UI text size in percent of the default (80–150).
     pub text_scale: u16,
     pub compact: bool,
+    /// Light surfaces and dark text instead of the dark theme.
+    pub light_theme: bool,
     pub clock_24h: bool,
     /// Show every change instantly: no fades, glides or blinking cursor.
     pub reduce_motion: bool,
@@ -109,6 +111,7 @@ impl Default for Prefs {
             custom_status: None,
             text_scale: 100,
             compact: false,
+            light_theme: false,
             clock_24h: true,
             reduce_motion: false,
             hide_own_screen: false,

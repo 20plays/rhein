@@ -1433,11 +1433,11 @@ fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App)
                         div()
                             .size(px(48.))
                             .rounded_full()
-                            .bg(t.overlay)
+                            .bg(t.scrim)
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon_sized(Icon::Play, px(22.)).text_color(t.text)),
+                            .child(icon_sized(Icon::Play, px(22.)).text_color(gpui::white())),
                     ),
                 )
             })

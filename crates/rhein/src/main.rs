@@ -38,9 +38,20 @@ fn main() {
         // GPUI's own switch covers every animation; keep it in step with the preference.
         let reduce = client.read(cx).prefs.reduce_motion;
         cx.set_reduce_motion(reduce);
-        cx.observe(&client, |client, cx| {
-            let reduce = client.read(cx).prefs.reduce_motion;
+        // The theme follows the preference too; switching repaints everything, so only on change.
+        let mut light = client.read(cx).prefs.light_theme;
+        if light {
+            rhein_ui::set_theme(light, cx);
+        }
+        cx.observe(&client, move |client, cx| {
+            let prefs = &client.read(cx).prefs;
+            let reduce = prefs.reduce_motion;
+            let now_light = prefs.light_theme;
             cx.set_reduce_motion(reduce);
+            if now_light != light {
+                light = now_light;
+                rhein_ui::set_theme(light, cx);
+            }
         })
         .detach();
         let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);

@@ -1,9 +1,10 @@
 //! Colour, type and spacing tokens. Views and components never write a literal colour or size;
 //! they read `cx.theme()` or one of the constants here.
 //!
-//! The look: pure black surfaces separated by 1px lines, three grey text levels, white as the only
-//! accent, and colour reserved for status (success, warning, danger) and for links, which must
-//! stand apart from white text and brighten under the pointer.
+//! The look: plain surfaces (pure black, or white in the light theme) separated by 1px lines,
+//! three grey text levels, the text colour as the only accent, and colour reserved for status
+//! (success, warning, danger) and for links, which must stand apart from the text and change
+//! under the pointer.
 
 use gpui::{App, Global, Hsla, Pixels, Rgba, px};
 
@@ -41,7 +42,10 @@ pub struct Theme {
     pub live: Rgba,
 
     pub selection: Rgba,
+    /// Behind a modal.
     pub overlay: Rgba,
+    /// A dark veil over pictures and videos, for white marks on top; dark in both themes.
+    pub scrim: Rgba,
     pub shadow: Hsla,
 }
 
@@ -77,8 +81,48 @@ impl Theme {
 
             selection: rgba(0xffffff33),
             overlay: rgba(0x000000b3),
+            scrim: rgba(0x000000b3),
             shadow: gpui::hsla(0., 0., 0., 0.6),
         }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            bg_base: rgb(0xffffff),
+            bg_panel: rgb(0xffffff),
+            bg_main: rgb(0xffffff),
+            bg_raised: rgb(0xfafafa),
+            bg_hover: rgb(0xf2f2f2),
+            bg_selected: rgb(0xebebeb),
+            border: rgb(0xebebeb),
+            border_strong: rgb(0xd6d6d6),
+
+            text: rgb(0x171717),
+            text_muted: rgb(0x5c5c5c),
+            text_faint: rgb(0x8f8f8f),
+            text_on_accent: rgb(0xffffff),
+
+            accent: rgb(0x171717),
+            accent_hover: rgb(0x000000),
+            accent_soft: rgba(0x0000000f),
+            link: rgb(0x0068d6),
+            link_hover: rgb(0x00418a),
+            danger: rgb(0xdc2626),
+            danger_soft: rgba(0xdc26261f),
+            success: rgb(0x16a34a),
+            warning: rgb(0xc27803),
+            live: rgb(0x7c3aed),
+
+            selection: rgba(0x0068d62e),
+            overlay: rgba(0x00000066),
+            scrim: rgba(0x00000099),
+            shadow: gpui::hsla(0., 0., 0., 0.12),
+        }
+    }
+
+    /// The light theme or the dark one.
+    pub fn new(light: bool) -> Self {
+        if light { Self::light() } else { Self::dark() }
     }
 }
 
