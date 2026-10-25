@@ -75,6 +75,8 @@ pub struct ChatView {
     picker_closed: Option<(String, std::time::Instant)>,
     suggest: Option<Suggest>,
     pub(crate) menu: MenuHost,
+    /// A bot select's picks before they are sent: `(message id, custom id)` to values.
+    select_draft: HashMap<(String, String), Vec<String>>,
     confirm_delete: Option<Message>,
     modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
@@ -240,6 +242,7 @@ impl ChatView {
             picker_closed: None,
             suggest: None,
             menu: MenuHost::default(),
+            select_draft: HashMap::new(),
             confirm_delete: None,
             modal_focus: cx.focus_handle(),
             revealed: HashSet::new(),
@@ -1206,6 +1209,67 @@ impl ChatView {
         if moderate && self.client.read(cx).pins(&channel).is_none() {
             let chan = channel.clone();
             self.client.update(cx, |c, cx| c.load_pins(chan, cx));
+        }
+        self.menu.show(at, entries, |v: &mut ChatView| &mut v.menu, window, cx);
+    }
+
+    /// A bot's select: its options as a menu. A single choice goes out at once; a select that
+    /// takes several gathers them (each pick toggles one) until they are sent.
+    pub(crate) fn open_select_menu(&mut self, message_id: String, select: rhein_proto::Component, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(channel) = self.channel.borrow().clone() else { return };
+        let Some(custom) = select.custom_id.clone() else { return };
+        let (min, max) = (select.min.unwrap_or(1).max(1) as usize, select.max.unwrap_or(1).max(1) as usize);
+        let key = (message_id.clone(), custom.clone());
+        let picked = self.select_draft.get(&key).cloned().unwrap_or_default();
+        let this = cx.weak_entity();
+        let mut entries = Vec::new();
+        for option in select.options.iter().take(25) {
+            let value = option.value.clone();
+            let on = picked.contains(&value);
+            let label = match &option.description {
+                Some(d) => format!("{} — {d}", option.label),
+                None => option.label.clone(),
+            };
+            let (client, chan, mid, custom, key, this) = (self.client.clone(), channel.clone(), message_id.clone(), custom.clone(), key.clone(), this.clone());
+            let mut entry = MenuEntry::item(label, move |_, cx| {
+                if max == 1 {
+                    let (chan, mid, custom, value) = (chan.clone(), mid.clone(), custom.clone(), value.clone());
+                    client.update(cx, |c, cx| c.press_component(chan, mid, custom, vec![value], cx));
+                    return;
+                }
+                let (key, value) = (key.clone(), value.clone());
+                this.update(cx, |v, cx| {
+                    let list = v.select_draft.entry(key).or_default();
+                    match list.iter().position(|x| *x == value) {
+                        Some(i) => {
+                            list.remove(i);
+                        }
+                        None if list.len() < max => list.push(value),
+                        None => {}
+                    }
+                    cx.notify();
+                })
+                .ok();
+            });
+            entry = entry.checked(max > 1 && on);
+            entries.push(entry);
+        }
+        if max > 1 {
+            entries.push(MenuEntry::Separator);
+            let ready = (min..=max).contains(&picked.len());
+            let (client, chan, mid, custom, key, this) = (self.client.clone(), channel.clone(), message_id.clone(), custom.clone(), key.clone(), this.clone());
+            let label = if ready { format!("Send {} chosen", picked.len()) } else { format!("Choose {min} to {max}") };
+            entries.push(
+                MenuEntry::item(label, move |_, cx| {
+                    if !ready {
+                        return;
+                    }
+                    let values = this.update(cx, |v, _| v.select_draft.remove(&key).unwrap_or_default()).unwrap_or_default();
+                    let (chan, mid, custom) = (chan.clone(), mid.clone(), custom.clone());
+                    client.update(cx, |c, cx| c.press_component(chan, mid, custom, values, cx));
+                })
+                .with_icon(Icon::SendHorizontal),
+            );
         }
         self.menu.show(at, entries, |v: &mut ChatView| &mut v.menu, window, cx);
     }

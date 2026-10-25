@@ -159,7 +159,21 @@ pub fn subscribe_members(guild_id: &str, first: u32, last: u32) -> Value {
 #[derive(Debug, Clone)]
 pub enum Event {
     MessageCreate(crate::model::Message),
-    MessageUpdate { id: String, channel_id: String, content: String, edited_at: Option<i64> },
+    /// An edit; a bot's update may also replace its components and cards (absent: unchanged).
+    MessageUpdate {
+        id: String,
+        channel_id: String,
+        content: String,
+        edited_at: Option<i64>,
+        components: Option<Vec<crate::model::Component>>,
+        cards: Option<Vec<crate::model::Card>>,
+    },
+    /// A bot took a press and will answer later: the presser sees it pending.
+    InteractionDeferred { channel_id: String, message_id: String },
+    /// A bot answered a press with a form for us to fill in.
+    ModalOpen(Value),
+    /// A message only we see was rewritten (or first shown).
+    EphemeralUpdate(crate::model::Message),
     MessageDelete { id: String, channel_id: String },
     ReactionAdd { message_id: String, channel_id: String, emoji: String, user_id: String },
     ReactionRemove { message_id: String, channel_id: String, emoji: String, user_id: String },
@@ -229,6 +243,20 @@ impl Event {
                 channel_id: str_of(&d, "channel_id"),
                 content: str_of(&d, "content"),
                 edited_at: d.get("edited_at").and_then(Value::as_i64),
+                components: d.get("components").and_then(|c| decode(c).ok()),
+                cards: d.get("cards").and_then(|c| decode(c).ok()),
+            },
+            "INTERACTION_DEFERRED" => Event::InteractionDeferred {
+                channel_id: str_of(&d, "channel_id"),
+                message_id: str_of(&d, "message_id"),
+            },
+            "MODAL_OPEN" => Event::ModalOpen(d),
+            "EPHEMERAL_MESSAGE_UPDATE" | "EPHEMERAL_MESSAGE_CREATE" => match decode::<crate::model::Message>(&d) {
+                Ok(mut m) => {
+                    m.ephemeral = true;
+                    Event::EphemeralUpdate(m)
+                }
+                Err(_) => Event::Other { t: t.into(), d },
             },
             "MESSAGE_DELETE" => Event::MessageDelete {
                 id: str_of(&d, "id"),

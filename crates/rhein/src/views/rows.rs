@@ -200,6 +200,12 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
 
     let seen = client.dm_seen(channel_id) == Some(message.id.as_str());
 
+    // What a bot attached: its cards, and the controls under them.
+    let api_base = client.api_base_of_channel(channel_id).unwrap_or_default();
+    let bot_cards: Vec<AnyElement> = message.cards.iter().take(5).enumerate().map(|(n, card)| bot_card(ix, n, card, &author_name, &api_base, &t)).collect();
+    let controls = (!message.components.is_empty()).then(|| bot_controls(ctx, ix, &message, client, &t));
+    let deferred = client.deferred.contains(&message.id);
+
     // GIF links: the picture itself (a share page once its provider has named it).
     let mut shares_missing = Vec::new();
     let mut gifs = Vec::new();
@@ -363,6 +369,21 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         }))
         .when(!gifs.is_empty(), |d| d.child(div().flex().flex_wrap().gap_2().children(gifs)))
         .children(cards)
+        .children(bot_cards)
+        .children(controls)
+        .when(deferred, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(format!("{author_name} is thinking…"))))
+        .when(message.ephemeral, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(text::XS)
+                    .text_color(t.text_faint)
+                    .child(icon_sized(Icon::Eye, px(12.)).text_color(t.text_faint))
+                    .child("Only you can see this."),
+            )
+        })
         // Your newest message the other side has read (read receipts on).
         .when(seen, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child("seen")))
         .when(failed, |d| {
@@ -1048,6 +1069,173 @@ fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment
         .child(icon(if a.is_image() { Icon::Image } else { Icon::File }).text_color(t.text_muted))
         .child(div().flex_1().truncate().text_color(t.accent).child(a.filename.clone()))
         .child(div().text_size(text::XS).text_color(t.text_faint).child(format_size(a.size)))
+}
+
+/// Only `https:` links without credentials reach a bot's buttons and cards.
+fn safe_link(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| u.scheme() == "https" && u.username().is_empty() && u.password().is_none())
+}
+
+/// A bot's action rows: buttons (a link button opens its address and never reaches the server)
+/// and selects, which open a menu of their options.
+fn bot_controls(ctx: &RowCtx, ix: usize, message: &Message, client: &Client, t: &Theme) -> AnyElement {
+    let mut rows = div().flex().flex_col().gap_1p5().pt_1();
+    for (r, row) in message.components.iter().filter(|c| c.kind == "action_row").take(5).enumerate() {
+        let mut line = div().flex().flex_wrap().gap_1p5();
+        for (n, c) in row.components.iter().take(5).enumerate() {
+            let id = SharedString::from(format!("bot-{ix}-{r}-{n}"));
+            let label = c.label.clone().unwrap_or_default();
+            match c.kind.as_str() {
+                "button" if c.style.as_deref() == Some("link") => {
+                    let url = c.url.clone().filter(|u| safe_link(u));
+                    line = line.child(
+                        Button::new(id, label)
+                            .small()
+                            .icon(Icon::ExternalLink)
+                            .disabled(c.disabled || url.is_none())
+                            .on_click(move |_, _, cx| {
+                                if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            }),
+                    );
+                }
+                "button" => {
+                    let Some(custom) = c.custom_id.clone() else { continue };
+                    let busy = client.pressing.contains(&(message.id.clone(), custom.clone()));
+                    let kind = match c.style.as_deref() {
+                        Some("primary" | "success") => rhein_ui::ButtonKind::Primary,
+                        Some("danger") => rhein_ui::ButtonKind::Danger,
+                        _ => rhein_ui::ButtonKind::Secondary,
+                    };
+                    let (client, chan, mid) = (ctx.client.clone(), ctx.channel_id.clone(), message.id.clone());
+                    line = line.child(Button::new(id, if busy { format!("{label}…") } else { label }).small().kind(kind).disabled(c.disabled || busy).on_click(
+                        move |_, _, cx| {
+                            let (chan, mid, custom) = (chan.clone(), mid.clone(), custom.clone());
+                            client.update(cx, |c, cx| c.press_component(chan, mid, custom, Vec::new(), cx));
+                        },
+                    ));
+                }
+                "select" => {
+                    if c.custom_id.is_none() {
+                        continue;
+                    }
+                    let chosen: Vec<&str> = c.options.iter().filter(|o| o.default).map(|o| o.label.as_str()).collect();
+                    let shown = if chosen.is_empty() { c.placeholder.clone().unwrap_or_else(|| "Choose…".into()) } else { chosen.join(", ") };
+                    let (view, mid, select) = (ctx.view.clone(), message.id.clone(), c.clone());
+                    line = line.child(
+                        div()
+                            .id(id)
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .h(px(28.))
+                            .min_w(px(180.))
+                            .rounded(radius::MD)
+                            .border_1()
+                            .border_color(t.border)
+                            .bg(t.bg_panel)
+                            .text_size(text::SM)
+                            .when(c.disabled, |d| d.opacity(0.5))
+                            .when(!c.disabled, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_selected)))
+                            .on_click(move |e, window, cx| {
+                                if select.disabled {
+                                    return;
+                                }
+                                let (mid, select, at) = (mid.clone(), select.clone(), e.position());
+                                view.update(cx, |v, cx| v.open_select_menu(mid, select, at, window, cx)).ok();
+                            })
+                            .child(div().flex_1().truncate().text_color(if chosen.is_empty() { t.text_faint } else { t.text }).child(shown))
+                            .child(icon_sized(Icon::ChevronDown, px(14.)).text_color(t.text_faint)),
+                    );
+                }
+                _ => {}
+            }
+        }
+        rows = rows.child(line);
+    }
+    rows.into_any_element()
+}
+
+/// A bot's card: drawn with the bot's name on it, apart from link previews.
+fn bot_card(ix: usize, n: usize, card: &rhein_proto::Card, bot: &str, api_base: &str, t: &Theme) -> AnyElement {
+    let stripe: Hsla = card.colour.map_or(t.accent.into(), |c| gpui::rgb(c & 0xff_ffff).into());
+    let link = card.url.clone().filter(|u| safe_link(u));
+    let image = card.image.as_ref().and_then(|i| i.source(api_base));
+    let thumb = card.thumbnail.as_ref().and_then(|i| i.source(api_base));
+    let clip = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+    let mut fields = div().flex().flex_wrap().gap_x_4().gap_y_1();
+    for f in card.fields.iter().take(25) {
+        fields = fields.child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .when(f.inline, |d| d.max_w(px(180.)))
+                .when(!f.inline, |d| d.w_full())
+                .child(div().text_size(text::SM).font_weight(FontWeight::SEMIBOLD).child(clip(&f.name, 256)))
+                .child(div().text_size(text::SM).text_color(t.text_muted).child(clip(&f.value, 1024))),
+        );
+    }
+    let footer = [card.footer.as_ref().and_then(|f| f.text.clone().or(f.name.clone())), card.timestamp.map(|ms| format_time(ms, true))]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    div()
+        .max_w(px(IMAGE_MAX_W + 32.))
+        .min_w_0()
+        .flex()
+        .rounded(radius::MD)
+        .bg(t.bg_panel)
+        .overflow_hidden()
+        .child(div().w(px(3.)).flex_none().bg(stripe))
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .gap_3()
+                .p_3()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .gap_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(text::XS)
+                                .text_color(t.text_faint)
+                                .child(icon_sized(Icon::Bot, px(12.)).text_color(t.text_faint))
+                                .child(card.author.as_ref().and_then(|a| a.name.clone()).map_or_else(|| bot.to_owned(), |a| format!("{} · {bot}", clip(&a, 256)))),
+                        )
+                        .children(card.title.clone().map(|title| {
+                            let link = link.clone();
+                            div()
+                                .id(SharedString::from(format!("card-title-{ix}-{n}")))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .when(link.is_some(), |d| d.text_color(t.link).cursor_pointer().hover(|s| s.underline()))
+                                .on_click(move |_, _, cx| {
+                                    if let Some(url) = &link {
+                                        cx.open_url(url);
+                                    }
+                                })
+                                .child(clip(&title, 256))
+                        }))
+                        .children(card.description.clone().map(|d| div().text_size(text::SM).text_color(t.text_muted).child(clip(&d, 4096))))
+                        .when(!card.fields.is_empty(), |d| d.child(fields))
+                        .children(image.map(|src| img(src).mt_1().max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain).rounded(radius::MD)))
+                        .when(!footer.is_empty(), |d| d.child(div().text_size(text::XS).text_color(t.text_faint).child(clip(&footer, 2048)))),
+                )
+                .children(thumb.map(|src| img(src).size(px(64.)).flex_none().rounded(radius::MD).object_fit(ObjectFit::Cover))),
+        )
+        .into_any_element()
 }
 
 fn embed_card(ctx: &RowCtx, ix: usize, n: usize, e: &Embed, t: &Theme, cx: &App) -> AnyElement {

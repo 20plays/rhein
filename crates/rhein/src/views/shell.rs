@@ -182,6 +182,9 @@ impl Shell {
             cx.observe_in(&client, window, |this, _, window, cx| {
                 this.keep_previous_guild_unfolded(cx);
                 this.follow_channel(window, cx);
+                if let Some(modal) = this.client.update(cx, |c, _| c.modal.take()) {
+                    this.open_bot_modal(modal, window, cx);
+                }
                 cx.notify();
             }),
             cx.subscribe_in(&chat, window, |this, _, event: &ChatEvent, window, cx| match event {
@@ -1286,6 +1289,17 @@ impl Shell {
         self.modal = Some(ShellModal::Confirm { title, body, label, danger, action: Rc::new(action) });
         window.focus(&self.modal_focus, cx);
         cx.notify();
+    }
+
+    /// A bot's form: its text inputs, sent back once.
+    fn open_bot_modal(&mut self, modal: rhein_store::BotModal, window: &mut Window, cx: &mut Context<Self>) {
+        let fields = modal
+            .fields
+            .iter()
+            .map(|f| (if f.required { format!("{} (required)", f.label) } else { f.label.clone() }, f.value.clone()))
+            .collect();
+        let (client, title) = (self.client.clone(), modal.title.clone());
+        self.prompt(&title, fields, "Submit", move |values, cx| client.update(cx, |c, cx| c.submit_modal(modal.clone(), values, cx)), window, cx);
     }
 
     fn prompt(&mut self, title: &str, fields: Vec<(String, String)>, label: &str, action: impl Fn(Vec<String>, &mut App) + 'static, window: &mut Window, cx: &mut Context<Self>) {

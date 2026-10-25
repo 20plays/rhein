@@ -841,6 +841,21 @@ impl Api {
         self.post(&format!("/invites/{}/join", urlencoding::encode(code)), &serde_json::json!({})).await
     }
 
+    /// Presses a bot's button or picks from its select (`values`) on a channel message, or on
+    /// a message only we see (`ephemeral`). The bot answers with a callback of its own.
+    pub async fn interact(&self, channel_id: &str, message_id: &str, ephemeral: bool, custom_id: &str, values: &[String]) -> ApiResult<serde_json::Value> {
+        let kind = if ephemeral { "ephemeral" } else { "messages" };
+        let path = format!("/channels/{}/{kind}/{}/interact", urlencoding::encode(channel_id), urlencoding::encode(message_id));
+        let body = if ephemeral { serde_json::json!({ "custom_id": custom_id }) } else { serde_json::json!({ "custom_id": custom_id, "values": values }) };
+        self.post(&path, &body).await
+    }
+
+    /// Submits the form a bot opened (`MODAL_OPEN`): `{custom_id, value}` per field.
+    pub async fn submit_modal(&self, interaction_id: &str, fields: &[(String, String)]) -> ApiResult<serde_json::Value> {
+        let components: Vec<serde_json::Value> = fields.iter().map(|(id, value)| serde_json::json!({ "custom_id": id, "value": value })).collect();
+        self.post(&format!("/interactions/{}/modal", urlencoding::encode(interaction_id)), &serde_json::json!({ "components": components })).await
+    }
+
     /// Follows a guild address (`#name:host`) to the guild that holds it now: the final `active`
     /// answer, with its `host` and `guild_id`.
     pub async fn resolve_guild_address(&self, address: &str) -> ApiResult<serde_json::Value> {

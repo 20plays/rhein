@@ -236,6 +236,57 @@ pub enum ClientEvent {
     Notice(SharedString),
 }
 
+/// A form a bot opened for us (`MODAL_OPEN`): text inputs, answered once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BotModal {
+    pub interaction_id: String,
+    pub channel_id: String,
+    pub title: String,
+    pub fields: Vec<ModalField>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModalField {
+    pub custom_id: String,
+    pub label: String,
+    pub value: String,
+    pub required: bool,
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+}
+
+impl BotModal {
+    /// Reads `MODAL_OPEN`: the interaction it answers and the form, given either flat or under
+    /// `data` as the bot sent it.
+    pub fn parse(d: &serde_json::Value) -> Option<BotModal> {
+        let form = if d.get("components").is_some() { d } else { d.get("data")? };
+        let interaction_id = d["interaction_id"].as_str().or(d["id"].as_str())?.to_owned();
+        let rows: Vec<rhein_proto::Component> = serde_json::from_value(form["components"].clone()).ok()?;
+        let fields: Vec<ModalField> = rows
+            .iter()
+            .flat_map(|row| if row.kind == "action_row" { row.components.clone() } else { vec![row.clone()] })
+            .filter(|c| c.kind == "text_input")
+            .filter_map(|c| {
+                Some(ModalField {
+                    custom_id: c.custom_id.clone()?,
+                    label: c.label.clone().unwrap_or_default(),
+                    value: c.value.clone().unwrap_or_default(),
+                    required: c.required,
+                    min: c.min,
+                    max: c.max,
+                })
+            })
+            .take(5)
+            .collect();
+        (!fields.is_empty()).then(|| BotModal {
+            interaction_id,
+            channel_id: d["channel_id"].as_str().unwrap_or_default().to_owned(),
+            title: form["title"].as_str().unwrap_or("A form").to_owned(),
+            fields,
+        })
+    }
+}
+
 pub struct Client {
     io: Io,
     http: reqwest::Client,
@@ -285,6 +336,12 @@ pub struct Client {
     pub migration_alert: Option<serde_json::Value>,
     /// When we last sent in each channel, for slowmode.
     last_sent: HashMap<String, Instant>,
+    /// Bot controls we pressed and wait to hear back about: `(message id, custom id)`.
+    pub pressing: HashSet<(String, String)>,
+    /// Messages whose bot took a press and answers later.
+    pub deferred: HashSet<String>,
+    /// A form a bot asked us to fill in, until the shell shows it.
+    pub modal: Option<BotModal>,
     /// The voice channel whose chat column is open (its messages count as read only then).
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
@@ -424,6 +481,9 @@ impl Client {
             typing_sent: std::collections::HashSet::new(),
             migration_alert: None,
             last_sent: HashMap::new(),
+            pressing: HashSet::new(),
+            deferred: HashSet::new(),
+            modal: None,
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -1840,13 +1900,42 @@ impl Client {
                 log.messages.push(message);
                 cx.emit(ClientEvent::MessageAppended { channel_id });
             }
-            Event::MessageUpdate { id, channel_id, content, edited_at } => {
+            Event::MessageUpdate { id, channel_id, content, edited_at, components, cards } => {
+                self.pressing.retain(|(m, _)| *m != id);
+                self.deferred.remove(&id);
                 if let Some(log) = self.logs.get_mut(&channel_id)
                     && let Some(i) = log.messages.iter().position(|m| m.id == id) {
                         log.messages[i].content = content;
                         log.messages[i].edited_at = edited_at;
+                        if let Some(components) = components {
+                            log.messages[i].components = components;
+                        }
+                        if let Some(cards) = cards {
+                            log.messages[i].cards = cards;
+                        }
                         cx.emit(ClientEvent::MessageChanged { channel_id, index: i });
                     }
+            }
+            Event::InteractionDeferred { message_id, .. } => {
+                self.pressing.retain(|(m, _)| *m != message_id);
+                self.deferred.insert(message_id);
+            }
+            Event::ModalOpen(d) => self.modal = BotModal::parse(&d),
+            Event::EphemeralUpdate(message) => {
+                self.pressing.retain(|(m, _)| *m != message.id);
+                let channel_id = message.channel_id.clone();
+                if let Some(log) = self.logs.get_mut(&channel_id) {
+                    match log.messages.iter().position(|m| m.id == message.id) {
+                        Some(i) => {
+                            log.messages[i] = message;
+                            cx.emit(ClientEvent::MessageChanged { channel_id, index: i });
+                        }
+                        None => {
+                            log.messages.push(message);
+                            cx.emit(ClientEvent::MessageAppended { channel_id });
+                        }
+                    }
+                }
             }
             Event::MessageDelete { id, channel_id } => {
                 if let Some(log) = self.logs.get_mut(&channel_id)
@@ -2027,6 +2116,62 @@ impl Client {
             Event::MemberListUpdate(_) | Event::Other { .. } => return false,
         }
         true
+    }
+
+    /// Presses a bot's control. Link buttons never come here: they only open their address.
+    pub fn press_component(&mut self, channel_id: String, message_id: String, custom_id: String, values: Vec<String>, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let ephemeral = self.find_message(&channel_id, &message_id).is_some_and(|m| m.ephemeral);
+        let key = (message_id.clone(), custom_id.clone());
+        if !self.pressing.insert(key.clone()) {
+            return;
+        }
+        cx.notify();
+        let io = self.io.clone();
+        cx.spawn(async move |this, cx| {
+            let result = io.spawn(async move { api.interact(&channel_id, &message_id, ephemeral, &custom_id, &values).await }).await;
+            // The answer arrives as its own event; a bot that never answers lets go after a while.
+            let failed = match result {
+                Ok(Ok(_)) => None,
+                Ok(Err(err)) => Some(friendly(&anyhow::Error::new(err))),
+                Err(err) => Some(err.to_string()),
+            };
+            this.update(cx, |this, cx| {
+                if let Some(err) = failed {
+                    this.pressing.remove(&key);
+                    this.flash_notice(format!("The bot didn't take that: {err}"), cx);
+                }
+                cx.notify();
+            })
+            .ok();
+            cx.background_executor().timer(Duration::from_secs(10)).await;
+            this.update(cx, |this, cx| {
+                if this.pressing.remove(&key) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sends what was typed into a bot's form.
+    pub fn submit_modal(&mut self, modal: BotModal, values: Vec<String>, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_channel(&modal.channel_id).or_else(|| self.home.as_ref().map(|h| h.api.clone())) else { return };
+        let fields: Vec<(String, String)> = modal.fields.iter().zip(values).map(|(f, v)| (f.custom_id.clone(), v)).collect();
+        for (field, (_, value)) in modal.fields.iter().zip(&fields) {
+            let len = value.chars().count() as u32;
+            if field.required && value.trim().is_empty() {
+                self.flash_notice(format!("{} is required.", field.label), cx);
+                return;
+            }
+            if field.min.is_some_and(|m| len < m && !value.is_empty()) || field.max.is_some_and(|m| len > m) {
+                self.flash_notice(format!("{} has the wrong length.", field.label), cx);
+                return;
+            }
+        }
+        let id = modal.interaction_id.clone();
+        self.fire(cx, async move { api.submit_modal(&id, &fields).await.map(drop) });
     }
 
     /// Fetches a guild's channels again (what this session may see changed).
@@ -2212,6 +2357,13 @@ impl Client {
     fn api_for_channel(&self, channel_id: &str) -> Option<Api> {
         let server = self.server_of_channel(channel_id)?;
         self.server(server)?.api.clone()
+    }
+
+    /// The API origin of the server that holds a channel (for pictures it serves, such as a bot
+    /// card's camo image).
+    pub fn api_base_of_channel(&self, channel_id: &str) -> Option<String> {
+        let server = self.server_of_channel(channel_id)?;
+        self.server(server)?.api.as_ref().map(|a| a.base().to_owned())
     }
 
     pub fn selected_channel(&self) -> Option<&str> {
@@ -3961,6 +4113,16 @@ mod tests {
             Some(("b.x".into(), "abc".into()))
         );
         assert_eq!(parse_invite("abc", None), None);
+        let modal = BotModal::parse(&serde_json::json!({
+            "id": "i1", "channel_id": "c",
+            "data": { "custom_id": "report", "title": "Report this", "components": [{
+                "type": "action_row",
+                "components": [{ "type": "text_input", "custom_id": "why", "label": "Why?", "style": "paragraph", "required": true, "max": 500 }]
+            }]}
+        }))
+        .unwrap();
+        assert_eq!((modal.interaction_id.as_str(), modal.title.as_str(), modal.fields.len()), ("i1", "Report this", 1));
+        assert!(modal.fields[0].required && modal.fields[0].max == Some(500));
         assert_eq!(parse_invite("#Gaming:guilds.example", None), Some(("guilds.example".into(), "gaming".into())));
         assert_eq!(parse_invite("#:x", None), None);
     }

@@ -224,6 +224,112 @@ pub struct Message {
     pub edited_at: Option<Millis>,
     pub reactions: Vec<Reaction>,
     pub nonce: Option<String>,
+    /// Controls a bot attached (`action_row`s of buttons and selects).
+    pub components: Vec<Component>,
+    /// Structured blocks a bot attached, drawn with its name on them.
+    pub cards: Vec<Card>,
+    /// Shown to one person only, never stored in the channel's history.
+    pub ephemeral: bool,
+}
+
+/// One control of a bot's message (`docs.telium.chat/features/interactivity`). An `action_row`
+/// holds the others; buttons, selects and (in modals) text inputs sit in rows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Component {
+    /// `action_row`, `button`, `select` or `text_input`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Buttons: `primary`, `secondary`, `success`, `danger` or `link`; text inputs: `short` or
+    /// `paragraph`.
+    pub style: Option<String>,
+    pub label: Option<String>,
+    pub custom_id: Option<String>,
+    /// A link button's address (opened here, never sent to the server).
+    pub url: Option<String>,
+    pub disabled: bool,
+    pub placeholder: Option<String>,
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+    pub required: bool,
+    pub value: Option<String>,
+    pub options: Vec<SelectOption>,
+    pub components: Vec<Component>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SelectOption {
+    pub label: String,
+    pub value: String,
+    pub description: Option<String>,
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Card {
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub description: Option<String>,
+    /// 0xRRGGBB.
+    pub colour: Option<u32>,
+    pub author: Option<CardText>,
+    pub fields: Vec<CardField>,
+    pub image: Option<CardImage>,
+    pub thumbnail: Option<CardImage>,
+    pub footer: Option<CardText>,
+    pub timestamp: Option<Millis>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CardText {
+    pub name: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CardField {
+    pub name: String,
+    pub value: String,
+    pub inline: bool,
+}
+
+/// A card's picture: uploaded media (`origin` + `hash`) or a hash in the guild server's media
+/// cache (`camo`). Never a URL of the bot's choosing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CardImage {
+    pub origin: Option<String>,
+    pub hash: Option<String>,
+    pub camo: Option<String>,
+    /// Filled in by servers that hand readers a fetchable address.
+    pub url: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+impl CardImage {
+    /// Where to fetch the picture, given the guild server's API base: its own camo cache, the
+    /// address the server gave, or the origin's media route.
+    pub fn source(&self, api_base: &str) -> Option<String> {
+        // Only an address on the guild server itself: a bot cannot make readers fetch elsewhere.
+        let own = format!("{}/", api_base.trim_end_matches('/'));
+        if let Some(url) = self.url.as_ref().filter(|u| !api_base.is_empty() && u.starts_with(&own)) {
+            return Some(url.clone());
+        }
+        let clean = |h: &str| h.chars().all(|c| c.is_ascii_hexdigit()) && !h.is_empty();
+        if let Some(hash) = self.camo.as_deref().filter(|h| clean(h)) {
+            return Some(format!("{}/_telium/v1/camo/{hash}", api_base.trim_end_matches('/')));
+        }
+        let (origin, hash) = (self.origin.as_deref()?, self.hash.as_deref().filter(|h| clean(h))?);
+        if origin.contains(['/', '?', '#', '@']) {
+            return None;
+        }
+        Some(format!("https://{origin}/_telium/v1/media/{hash}"))
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -275,6 +381,36 @@ pub fn domain_of(user_id: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bot_message_decodes() {
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m", "channel_id": "c", "author": "@ci:bots.example", "content": "Pick",
+            "components": [{ "type": "action_row", "components": [
+                { "type": "button", "style": "primary", "label": "Red", "custom_id": "colour:red" },
+                { "type": "button", "style": "link", "label": "Help", "url": "https://example.com/help" },
+                { "type": "select", "custom_id": "shade", "min": 1, "max": 1, "options": [
+                    { "label": "Pale", "value": "pale" }, { "label": "Deep", "value": "deep", "default": true }
+                ]}
+            ]}],
+            "cards": [{ "title": "Deploy", "colour": 3066993, "fields": [{ "name": "Tests", "value": "1182", "inline": true }],
+                        "image": { "camo": "ab12", "width": 800, "height": 200 } }]
+        }))
+        .unwrap();
+        let row = &m.components[0];
+        assert_eq!((row.kind.as_str(), row.components.len()), ("action_row", 3));
+        assert!(row.components[2].options[1].default);
+        let card = &m.cards[0];
+        assert_eq!(card.image.as_ref().unwrap().source("https://g.example/").as_deref(), Some("https://g.example/_telium/v1/camo/ab12"));
+        let foreign = CardImage { origin: Some("chat.example.com".into()), hash: Some("ff00".into()), ..Default::default() };
+        assert_eq!(foreign.source("x").as_deref(), Some("https://chat.example.com/_telium/v1/media/ff00"));
+        // Nothing a bot names gets to point anywhere else.
+        assert!(CardImage { origin: Some("evil.example/x?".into()), hash: Some("ff".into()), ..Default::default() }.source("x").is_none());
+        assert!(CardImage { camo: Some("../x".into()), ..Default::default() }.source("x").is_none());
+        assert!(CardImage { url: Some("https://tracker.example/p.png".into()), ..Default::default() }.source("https://g.example").is_none());
+        let served = CardImage { url: Some("https://g.example/_telium/v1/camo/ab".into()), ..Default::default() };
+        assert!(served.source("https://g.example").is_some());
+    }
+
     use super::*;
 
     #[test]
