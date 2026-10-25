@@ -2711,6 +2711,13 @@ impl Shell {
                 .strong(mark.is_unread())
                 .muted(mark.muted && !active)
                 .when(mark.mentions > 0, |r| r.trailing(CountBadge(mark.mentions)));
+            if ch.is_forum() {
+                let (id, client) = (ch.id.clone(), self.client.clone());
+                row = row.on_click(move |_, _, cx| {
+                    let id = id.clone();
+                    client.update(cx, |c, cx| c.select_channel(id, cx));
+                });
+            }
             if ch.is_textual() || ch.is_voice() {
                 let (id, voice) = (ch.id.clone(), ch.is_voice());
                 let client = self.client.clone();

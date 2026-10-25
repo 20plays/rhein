@@ -77,6 +77,8 @@ pub struct ChatView {
     pub(crate) menu: MenuHost,
     /// A bot select's picks before they are sent: `(message id, custom id)` to values.
     select_draft: HashMap<(String, String), Vec<String>>,
+    /// A forum's "new post" title.
+    forum_title: Entity<TextInput>,
     confirm_delete: Option<Message>,
     modal_focus: FocusHandle,
     /// Spoilers opened by the user, per (message id, spoiler index).
@@ -243,6 +245,7 @@ impl ChatView {
             suggest: None,
             menu: MenuHost::default(),
             select_draft: HashMap::new(),
+            forum_title: cx.new(|cx| TextInput::new("Title of a new post", cx)),
             confirm_delete: None,
             modal_focus: cx.focus_handle(),
             revealed: HashSet::new(),
@@ -1274,6 +1277,96 @@ impl ChatView {
         self.menu.show(at, entries, |v: &mut ChatView| &mut v.menu, window, cx);
     }
 
+    /// A forum: its posts (threads), the most active first, and a new post by title. A post
+    /// opens like any thread.
+    fn render_forum(&mut self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = cx.theme().clone();
+        let client = self.client.read(cx);
+        let name = client.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
+        let topic = client.channel(channel_id).and_then(|c| c.topic.clone()).filter(|s| !s.trim().is_empty());
+        let can_post = client.can(channel_id, rhein_store::perms::SEND_MESSAGES);
+        let mut posts: Vec<rhein_proto::Thread> = client.threads_of(channel_id).map(<[_]>::to_vec).unwrap_or_default();
+        posts.sort_by_key(|p| std::cmp::Reverse(p.last_active.or(p.created_at).unwrap_or(0)));
+        let chan = channel_id.to_owned();
+        let mut list = div().flex().flex_col().gap_1();
+        if posts.is_empty() {
+            list = list.child(div().text_size(text::SM).text_color(t.text_faint).child("No posts yet."));
+        }
+        for (i, post) in posts.into_iter().enumerate() {
+            let id = post.id.clone();
+            let author = post.owner.as_deref().map(|o| client.display_name(client.guild_of_channel(channel_id).map(|g| g.guild.id.as_str()), o));
+            let meta = [
+                author,
+                Some(if post.message_count == 1 { "1 message".to_owned() } else { format!("{} messages", post.message_count) }),
+                post.archived.then(|| "archived".to_owned()),
+                post.locked.then(|| "locked".to_owned()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+            list = list.child(
+                div()
+                    .id(("forum-post", i))
+                    .p_3()
+                    .rounded(radius::MD)
+                    .bg(t.bg_panel)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg_selected))
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(ChatEvent::OpenThread(id.clone()))))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(post.title.clone()))
+                    .child(div().text_size(text::XS).text_color(t.text_faint).child(meta)),
+            );
+        }
+        let new_post = can_post.then(|| {
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(self.forum_title.clone()))
+                .child(Button::new("forum-new-post", "New post").primary().on_click(cx.listener(move |v, _, _, cx| {
+                    let title = v.forum_title.read(cx).text().trim().to_owned();
+                    if title.is_empty() {
+                        return;
+                    }
+                    v.forum_title.update(cx, |i, cx| i.clear(cx));
+                    let chan = chan.clone();
+                    v.client.update(cx, |c, cx| c.create_thread(chan, title, None, cx));
+                })))
+        });
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(48.))
+                    .flex_none()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .child(icon(Icon::MessagesSquare).text_color(t.text_faint))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+                    .children(topic.map(|topic| div().min_w_0().truncate().text_size(text::SM).text_color(t.text_faint).child(topic))),
+            )
+            .child(
+                div()
+                    .id("forum-posts")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_size(text::SM).text_color(t.text_muted).child("Every post here is a thread of its own."))
+                    .children(new_post)
+                    .child(list),
+            )
+            .into_any_element()
+    }
+
     fn ask_delete(&mut self, message: Message, window: &mut Window, cx: &mut Context<Self>) {
         self.confirm_delete = Some(message);
         window.focus(&self.modal_focus, cx);
@@ -2018,6 +2111,9 @@ impl Render for ChatView {
         let channel = client.channel(&channel_id).cloned();
         if self.fixed.is_none() && channel.as_ref().is_some_and(|c| c.is_voice()) {
             return self.render_voice_stage(&channel_id, cx);
+        }
+        if self.fixed.is_none() && channel.as_ref().is_some_and(|c| c.is_forum()) {
+            return self.render_forum(&channel_id, cx);
         }
         let client = self.client.read(cx);
         let log = client.logs.get(&channel_id);

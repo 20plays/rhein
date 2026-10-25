@@ -2606,9 +2606,11 @@ impl Client {
             mark.mentions = 0;
             mark.first_unread = None;
         }
-        let voice = self.channel(&channel_id).is_some_and(|c| c.is_voice());
-        // Thread chips on messages need the channel's threads (title and message count).
-        let has_threads = self.channel(&channel_id).is_some_and(|c| matches!(c.kind.as_str(), "text" | "announcement"));
+        // Neither a voice channel nor a forum (whose posts are threads) has history of its own.
+        let voice = self.channel(&channel_id).is_some_and(|c| c.is_voice() || c.is_forum());
+        // Thread chips on messages need the channel's threads (title and message count); a
+        // forum lists them as its posts.
+        let has_threads = self.channel(&channel_id).is_some_and(|c| matches!(c.kind.as_str(), "text" | "announcement" | "forum"));
         if has_threads && !self.threads.contains_key(&channel_id) {
             self.threads.insert(channel_id.clone(), Vec::new());
             self.load_threads(channel_id.clone(), cx);

@@ -78,6 +78,11 @@ impl Channel {
     pub fn is_thread(&self) -> bool {
         self.kind == "thread"
     }
+
+    /// A forum: its posts are threads, and it has no messages of its own.
+    pub fn is_forum(&self) -> bool {
+        self.kind == "forum"
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
