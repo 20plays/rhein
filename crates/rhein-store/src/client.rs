@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
-use gpui::{Context, EventEmitter, SharedString, Task, WeakEntity};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, SharedString, Task, WeakEntity};
 use rhein_auth::{DeviceKey, SerenityKsf};
 use rhein_net::gateway::{self, GatewayConfig};
 use rhein_net::{Api, GatewayEvent, GatewayHandle, GatewayStatus, auth, discover};
@@ -32,8 +32,8 @@ mod notify;
 mod signals;
 mod sound;
 pub use gifs::{GifShare, MediaProbe};
-pub use sound::{SoundSource, SoundView};
-pub use call::{ActiveCall, CallMode, CallStatus, VoicePrefs};
+pub use sound::{SoundSource, SoundTick, SoundView};
+pub use call::{ActiveCall, CallMode, CallSpeaking, CallStatus, CallVideo, VoicePrefs};
 pub use rhein_voice::Slot;
 use crate::persist::{self, Saved};
 
@@ -388,6 +388,11 @@ pub struct Client {
     /// it as it was.
     muted_before_deafen: bool,
     speaking_task: Option<Task<()>>,
+    /// The call's pictures and who in it is speaking, each its own entity: they change many
+    /// times a second, and only the views showing them should redraw.
+    pub call_video: Entity<CallVideo>,
+    pub call_speaking: Entity<CallSpeaking>,
+    pub sound_tick: Entity<SoundTick>,
     /// Renews guild sessions before they run out (every minute, see `freshen_sessions`).
     renew_ticker: Option<Task<()>>,
     /// guild id → user id → their voice state (only users in a channel).
@@ -507,6 +512,9 @@ impl Client {
             null_audio: cfg!(debug_assertions) && std::env::var("RHEIN_AUDIO").is_ok_and(|v| v == "null"),
             muted_before_deafen: false,
             speaking_task: None,
+            call_video: cx.new(|_| CallVideo::default()),
+            call_speaking: cx.new(|_| CallSpeaking::default()),
+            sound_tick: cx.new(|_| SoundTick),
             renew_ticker: None,
             signin: None,
             mfa_required: false,

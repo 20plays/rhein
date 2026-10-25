@@ -71,21 +71,61 @@ pub struct ActiveCall {
     pub watching: HashSet<String>,
     engine: Option<Arc<AudioEngine>>,
     commands: Option<mpsc::UnboundedSender<Command>>,
-    speaking: HashSet<String>,
     screen: Option<ScreenShare>,
     /// A test pattern shared in place of a screen (`RHEIN_DEV_SHARE=pattern`).
     test_pattern: Option<rhein_voice::video::TestPattern>,
     /// What we share, for our own eyes (paused while hidden, see `set_own_screen_hidden`).
     own_preview: Option<VideoFeed>,
     videos: HashMap<(String, Slot), VideoFeed>,
-    /// The picture drawn for each video, and which frame it is.
-    images: HashMap<(String, Slot), (u64, Arc<gpui::RenderImage>)>,
     _task: Option<Task<()>>,
 }
 
 impl ActiveCall {
     pub fn engine(&self) -> Option<&Arc<AudioEngine>> {
         self.engine.as_ref()
+    }
+
+    /// Whether someone's camera or screen reaches us (its first picture may still be coming).
+    pub fn has_video(&self, user_id: &str, slot: Slot) -> bool {
+        self.videos.contains_key(&(user_id.to_owned(), slot))
+    }
+}
+
+/// The latest picture of each video in the call. Kept apart from the client: a new picture
+/// thirty times a second redraws only the views that draw it, not everything that reads the
+/// client.
+#[derive(Default)]
+pub struct CallVideo {
+    /// The picture drawn for each video, and which frame it is.
+    images: HashMap<(String, Slot), (u64, Arc<gpui::RenderImage>)>,
+}
+
+impl CallVideo {
+    pub fn picture(&self, user_id: &str, slot: Slot) -> Option<Arc<gpui::RenderImage>> {
+        self.images.get(&(user_id.to_owned(), slot)).map(|(_, image)| image.clone())
+    }
+
+    fn drop_picture(&mut self, key: &(String, Slot), cx: &mut App) -> bool {
+        let Some((_, image)) = self.images.remove(key) else { return false };
+        cx.drop_image(image, None);
+        true
+    }
+
+    fn clear(&mut self, cx: &mut App) {
+        for (_, (_, image)) in self.images.drain() {
+            cx.drop_image(image, None);
+        }
+    }
+}
+
+/// Who in the call is audible right now (our own user included). Apart from the client for the
+/// same reason as [`CallVideo`].
+#[derive(Default)]
+pub struct CallSpeaking(HashSet<String>);
+
+impl CallSpeaking {
+    pub fn is_speaking(&self, user_id: &str) -> bool {
+        self.0.contains(user_id)
     }
 }
 
@@ -146,11 +186,6 @@ impl Client {
 
     pub fn in_call(&self, channel_id: &str) -> bool {
         self.call.as_ref().is_some_and(|c| c.channel_id == channel_id)
-    }
-
-    /// Whether someone in the call is audible right now (our own user included).
-    pub fn is_speaking(&self, user_id: &str) -> bool {
-        self.call.as_ref().is_some_and(|c| c.speaking.contains(user_id))
     }
 
     /// Joins a guild voice channel, leaving any other call first.
@@ -307,9 +342,11 @@ impl Client {
                             }
                             None => {
                                 call.videos.remove(&(user.clone(), slot));
-                                if let Some((_, image)) = call.images.remove(&(user, slot)) {
-                                    cx.drop_image(image, None);
-                                }
+                                this.call_video.update(cx, |v, cx| {
+                                    if v.drop_picture(&(user, slot), cx) {
+                                        cx.notify();
+                                    }
+                                });
                             }
                         },
                         Update::Failed(err) => call.status = CallStatus::Failed(err),
@@ -339,12 +376,10 @@ impl Client {
             watching: HashSet::new(),
             engine: None,
             commands: Some(commands),
-            speaking: HashSet::new(),
             screen: None,
             test_pattern: None,
             own_preview: None,
             videos: HashMap::new(),
-            images: HashMap::new(),
             _task: Some(task),
         });
         self.watch_speaking(cx);
@@ -405,13 +440,18 @@ impl Client {
 
     /// Hangs up.
     pub fn leave_voice(&mut self, cx: &mut Context<Self>) {
-        let Some(mut call) = self.call.take() else { return };
+        let Some(call) = self.call.take() else { return };
         if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Leave);
         }
-        for (_, (_, image)) in call.images.drain() {
-            cx.drop_image(image, None);
-        }
+        self.call_video.update(cx, |v, cx| {
+            v.clear(cx);
+            cx.notify();
+        });
+        self.call_speaking.update(cx, |s, cx| {
+            s.0.clear();
+            cx.notify();
+        });
         if let Some(route) = self.route_of(&call) {
             self.io.spawn(async move { route.leave().await });
         }
@@ -686,11 +726,6 @@ impl Client {
         cx.notify();
     }
 
-    /// The latest picture of someone's camera or screen in the call.
-    pub fn video(&self, user_id: &str, slot: Slot) -> Option<Arc<gpui::RenderImage>> {
-        self.call.as_ref()?.images.get(&(user_id.to_owned(), slot)).map(|(_, image)| image.clone())
-    }
-
     /// Asks the desktop for a screen or window and shares it into the call.
     pub fn start_screen_share(&mut self, cx: &mut Context<Self>) {
         let Some(call) = self.call.as_ref() else { return };
@@ -783,9 +818,11 @@ impl Client {
         let key = (me, Slot::Screen);
         if hidden {
             call.videos.remove(&key);
-            if let Some((_, image)) = call.images.remove(&key) {
-                cx.drop_image(image, None);
-            }
+            self.call_video.update(cx, |v, cx| {
+                if v.drop_picture(&key, cx) {
+                    cx.notify();
+                }
+            });
         } else {
             call.videos.insert(key, preview);
         }
@@ -802,9 +839,11 @@ impl Client {
         call.own_preview = None;
         if let Some(me) = self.home.as_ref().map(|h| h.user_id.clone()) {
             call.videos.remove(&(me.clone(), Slot::Screen));
-            if let Some((_, image)) = call.images.remove(&(me, Slot::Screen)) {
-                cx.drop_image(image, None);
-            }
+            self.call_video.update(cx, |v, cx| {
+                if v.drop_picture(&(me, Slot::Screen), cx) {
+                    cx.notify();
+                }
+            });
         }
         if let Some(commands) = &call.commands {
             let _ = commands.send(Command::Unpublish(Slot::Screen));
@@ -815,61 +854,73 @@ impl Client {
         cx.notify();
     }
 
-    /// Polls the engine for who is audible and the videos for new pictures, and redraws when
-    /// something changed.
+    /// Polls the engine for who is audible and the videos for new pictures. Each goes to its own
+    /// entity, so only the views drawing it redraw. Without videos the poll slows down to the
+    /// pace of who is speaking.
     fn watch_speaking(&mut self, cx: &mut Context<Self>) {
+        const FRAME: Duration = Duration::from_millis(33);
+        const VOICE: Duration = Duration::from_millis(100);
         self.speaking_task = Some(cx.spawn(async move |this, cx| {
-            let mut tick = 0u32;
+            let (mut wait, mut last_voice, mut last_rekey) = (FRAME, Instant::now(), Instant::now());
             loop {
-                cx.background_executor().timer(Duration::from_millis(33)).await;
-                tick += 1;
+                cx.background_executor().timer(wait).await;
                 let Ok(alive) = this.update(cx, |this, cx| {
                     let me = this.home.as_ref().map(|h| h.user_id.clone()).unwrap_or_default();
                     let Some(call) = this.call.as_mut() else { return false };
-                    let mut changed = false;
-                    let mut rekey = None;
-                    if tick.is_multiple_of(3) {
+                    wait = if call.videos.is_empty() { VOICE } else { FRAME };
+                    if last_voice.elapsed() >= VOICE - Duration::from_millis(5) {
+                        last_voice = Instant::now();
                         let now: HashSet<String> = call
                             .engine
                             .as_ref()
                             .map(|e| e.speaking().into_iter().map(|k| if k.is_empty() { me.clone() } else { k }).collect())
                             .unwrap_or_default();
-                        if now != call.speaking {
-                            call.speaking = now;
-                            changed = true;
-                        }
-                    }
-                    let mut stale = Vec::new();
-                    for (key, feed) in &call.videos {
-                        // Taken, not cloned: the next one is a new picture with a new number.
-                        let Some((seq, picture)) = feed.take_latest() else { continue };
-                        if call.images.get(key).is_some_and(|(have, _)| *have == seq) {
-                            continue;
-                        }
-                        if let Some(image) = render_image(picture) {
-                            if let Some((_, old)) = call.images.insert(key.clone(), (seq, image)) {
-                                stale.push(old);
+                        this.call_speaking.update(cx, |speaking, cx| {
+                            if speaking.0 != now {
+                                speaking.0 = now;
+                                cx.notify();
                             }
-                            changed = true;
+                        });
+                    }
+                    let Some(call) = this.call.as_mut() else { return false };
+                    if !call.videos.is_empty() {
+                        let fresh: Vec<_> = call
+                            .videos
+                            .iter()
+                            // Taken, not cloned: the next one is a new picture with a new number.
+                            .filter_map(|(key, feed)| feed.take_latest().map(|(seq, picture)| (key.clone(), seq, picture)))
+                            .collect();
+                        if !fresh.is_empty() {
+                            this.call_video.update(cx, |video, cx| {
+                                let mut changed = false;
+                                for (key, seq, picture) in fresh {
+                                    if video.images.get(&key).is_some_and(|(have, _)| *have == seq) {
+                                        continue;
+                                    }
+                                    let Some(image) = render_image(picture) else { continue };
+                                    if let Some((_, old)) = video.images.insert(key, (seq, image)) {
+                                        cx.drop_image(old, None);
+                                    }
+                                    changed = true;
+                                }
+                                if changed {
+                                    cx.notify();
+                                }
+                            });
                         }
                     }
+                    let Some(call) = this.call.as_mut() else { return false };
                     // A conversation call follows the group's epoch: new keys for hellos and media.
-                    if tick.is_multiple_of(30) && call.conversation {
-                        rekey = Some((call.room_id.clone(), call.epoch));
-                    }
+                    let rekey = (call.conversation && last_rekey.elapsed() >= Duration::from_secs(1)).then(|| {
+                        last_rekey = Instant::now();
+                        (call.room_id.clone(), call.epoch)
+                    });
                     // The desktop's own "stop sharing" ends a share without us.
-                    let ended = call.screen.as_ref().is_some_and(|s| s.ended());
-                    for old in stale {
-                        cx.drop_image(old, None);
-                    }
-                    if ended {
+                    if call.screen.as_ref().is_some_and(|s| s.ended()) {
                         this.stop_screen_share(cx);
                     }
                     if let Some((conversation, epoch)) = rekey {
                         this.follow_epoch(&conversation, epoch);
-                    }
-                    if changed {
-                        cx.notify();
                     }
                     true
                 }) else {

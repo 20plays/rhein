@@ -24,6 +24,8 @@ use rhein_ui::{motion,
 };
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
+use crate::views::live::{LiveVideo, SpeakingFace};
+use crate::views::part::{Part, part};
 use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::media::{self, Media};
 use crate::views::rows::{RowCtx, format_size, message_key, render_row};
@@ -104,6 +106,8 @@ pub struct ChatView {
     glide: Option<gpui::Task<()>>,
     /// A voice channel's own chat, in a column beside its call (closed to begin with).
     voice_chat: Option<(Entity<ChatView>, Subscription)>,
+    /// The call's videos on the stage, each its own view: `(user, slot)` to it.
+    live: HashMap<(String, rhein_store::Slot), Entity<LiveVideo>>,
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
@@ -113,7 +117,12 @@ pub struct ChatView {
     picture_sizes: Rc<RefCell<HashMap<String, (u32, u32)>>>,
     parsed: crate::views::rows::ParsedCache,
     /// A repaint is scheduled for the typing dots' next step.
-    typing_tick: std::cell::Cell<bool>,
+    /// The typing line's pulsing dots, a view that ticks by itself.
+    dots: Entity<TypingDots>,
+    /// The history, drawn as a cached view of its own (see `history`).
+    history: Option<Entity<Part<ChatView>>>,
+    /// Faces in a conversation's call bar, ringed while speaking.
+    faces: HashMap<String, Entity<SpeakingFace>>,
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
     /// state moves on is measured again (see `prefetch`).
     row_progress: HashMap<String, u64>,
@@ -200,6 +209,7 @@ impl ChatView {
             });
         }
         let composer = cx.new(|cx| TextInput::new("message", cx).multiline(COMPOSER_LINES).block_cursor().bare());
+        let speaking = client.read(cx).call_speaking.clone();
         let subs = vec![
             cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Submit => this.submit(window, cx),
@@ -224,6 +234,14 @@ impl ChatView {
             cx.observe(&client, |this, _, cx| {
                 this.sync_channel(cx);
                 cx.notify();
+            }),
+            // The voice stage rings whoever speaks (elsewhere the faces ring themselves).
+            cx.observe(&speaking, |this, _, cx| {
+                let client = this.client.read(cx);
+                let stage = this.fixed.is_none() && this.current().and_then(|c| client.channel(&c)).is_some_and(|c| c.is_voice());
+                if stage {
+                    cx.notify();
+                }
             }),
         ];
         let mut this = Self {
@@ -260,11 +278,14 @@ impl ChatView {
             select_focus: cx.focus_handle(),
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
+            live: HashMap::new(),
             arrived: HashSet::new(),
             hovered_reaction: None,
             picture_sizes: Rc::default(),
             parsed: Rc::default(),
-            typing_tick: Default::default(),
+            dots: cx.new(|_| TypingDots::default()),
+            history: None,
+            faces: HashMap::new(),
             row_progress: HashMap::new(),
             _subs: subs,
         };
@@ -1417,24 +1438,38 @@ impl ChatView {
 
     /// A private conversation's call, while anyone is in it: who, who is speaking, how private
     /// it is, and joining or leaving.
-    fn render_dm_call(&self, conversation: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_dm_call(&mut self, conversation: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let controls = self.call_controls("dm-call", cx);
         let t = cx.theme().clone();
+        // Each face is a view of its own that rings while that person speaks.
+        let looks: Vec<(String, String, Option<String>)> = {
+            let client = self.client.read(cx);
+            client
+                .voice_members(conversation, conversation)
+                .iter()
+                .map(|m| (m.user_id.clone(), client.display_name(None, &m.user_id), client.avatar_url(None, &m.user_id)))
+                .collect()
+        };
+        self.faces.retain(|user, _| looks.iter().any(|(u, _, _)| u == user));
+        let speaking = self.client.read(cx).call_speaking.clone();
+        let faces: Vec<AnyElement> = looks
+            .into_iter()
+            .map(|(user, name, avatar)| {
+                let face = self
+                    .faces
+                    .entry(user.clone())
+                    .or_insert_with(|| cx.new(|cx| SpeakingFace::new(speaking.clone(), user, px(28.), cx)))
+                    .clone();
+                face.update(cx, |f, cx| f.set_look(name, avatar, cx));
+                face.cached(gpui::StyleRefinement::default().size(px(32.)).flex_none()).into_any_element()
+            })
+            .collect();
         let client = self.client.read(cx);
         let members = client.voice_members(conversation, conversation);
         let call = client.call().filter(|c| c.channel_id == conversation);
         if members.is_empty() && call.is_none() {
             return None;
         }
-        let faces = members.iter().map(|state| {
-            let who = client.display_name(None, &state.user_id);
-            let avatar = client.avatar_url(None, &state.user_id);
-            div()
-                .rounded_full()
-                .border_2()
-                .border_color(if client.is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
-                .child(Avatar::new(state.user_id.clone(), who).size(px(28.)).image(avatar.map(Into::into)))
-        });
         let names: Vec<String> = members.iter().map(|m| client.display_name(None, &m.user_id)).collect();
         let line = match call {
             Some(call) => match &call.status {
@@ -1551,10 +1586,45 @@ impl ChatView {
     }
 
     /// A voice channel: who is in it, who is speaking, and joining or leaving it.
-    fn render_voice_stage(&self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_voice_stage(&mut self, channel_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        use rhein_store::Slot;
         let mut controls = Some(self.call_controls("voice", cx));
         let t = cx.theme().clone();
+        // The screen on the stage (someone else's we watch, else our own while we share) and the
+        // cameras, each drawn by a view of its own.
+        let (screen_user, camera_users) = {
+            let client = self.client.read(cx);
+            let me = client.user_id();
+            let members = client
+                .guild_of_channel(channel_id)
+                .map(|g| client.voice_members(&g.guild.id, channel_id))
+                .unwrap_or_default();
+            let call = client.call().filter(|c| c.channel_id == channel_id);
+            let has = |user: &str, slot| call.is_some_and(|c| c.has_video(user, slot));
+            let screen = members
+                .iter()
+                .filter(|m| me != Some(m.user_id.as_str()))
+                .chain(members.iter().filter(|m| me == Some(m.user_id.as_str())))
+                .find(|m| has(&m.user_id, Slot::Screen))
+                .map(|m| m.user_id.clone());
+            let cameras: Vec<String> =
+                members.iter().filter(|m| m.self_video && has(&m.user_id, Slot::Camera)).map(|m| m.user_id.clone()).collect();
+            (screen, cameras)
+        };
+        let mut wanted: HashSet<(String, Slot)> = camera_users.iter().map(|u| (u.clone(), Slot::Camera)).collect();
+        wanted.extend(screen_user.iter().map(|u| (u.clone(), Slot::Screen)));
+        self.live.retain(|key, _| wanted.contains(key));
+        for (user, slot) in wanted {
+            let video = self.client.read(cx).call_video.clone();
+            let cover = slot == Slot::Camera;
+            self.live.entry((user.clone(), slot)).or_insert_with(|| cx.new(|cx| LiveVideo::new(video, user, slot, cover, cx)));
+        }
+        let live = |user: &str, slot| {
+            self.live.get(&(user.to_owned(), slot)).map(|view| view.clone().cached(gpui::StyleRefinement::default().size_full()))
+        };
+        let screen = screen_user.as_deref().and_then(|user| live(user, Slot::Screen).map(|view| (user.to_owned(), view)));
         let client = self.client.read(cx);
+        let speaking = client.call_speaking.read(cx);
         let name = client.channel(channel_id).map(|c| c.name.clone()).unwrap_or_default();
         let guild_id = client.guild_of_channel(channel_id).map(|g| g.guild.id.clone());
         let members = guild_id.as_deref().map(|g| client.voice_members(g, channel_id)).unwrap_or_default();
@@ -1573,14 +1643,8 @@ impl ChatView {
         });
         let me = client.user_id().map(str::to_owned);
         let sfu = call.is_some_and(|c| matches!(c.mode, Some(rhein_store::CallMode::Sfu { .. })));
-        // The screen on the stage: someone else's we watch, else our own while we share.
-        let screen = members
-            .iter()
-            .filter(|m| me.as_deref() != Some(m.user_id.as_str()))
-            .chain(members.iter().filter(|m| me.as_deref() == Some(m.user_id.as_str())))
-            .find_map(|m| client.video(&m.user_id, rhein_store::Slot::Screen).map(|img| (m.user_id.clone(), img)));
         let tiles = members.iter().map(|state| {
-            let camera = client.video(&state.user_id, rhein_store::Slot::Camera).filter(|_| state.self_video);
+            let camera = live(&state.user_id, Slot::Camera);
             let mine = me.as_deref() == Some(state.user_id.as_str());
             let watched = call.is_some_and(|c| c.watching.contains(&state.user_id));
             // On an SFU a screen share has to be asked for; a mesh sends it anyway.
@@ -1603,7 +1667,7 @@ impl ChatView {
                     .justify_center()
                     .child(rhein_ui::icon_sized(glyph, px(14.)).text_color(color.unwrap_or(t.text_muted)))
             };
-            let speaking = client.is_speaking(&state.user_id);
+            let speaking = speaking.is_speaking(&state.user_id);
             div()
                 .w(px(200.))
                 .h(px(if watch.is_some() { 180. } else { 150. }))
@@ -1619,7 +1683,7 @@ impl ChatView {
                 .overflow_hidden()
                 .relative()
                 .child(match camera {
-                    Some(picture) => gpui::img(picture).absolute().inset_0().size_full().object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                    Some(view) => div().absolute().inset_0().size_full().child(view).into_any_element(),
                     None => Avatar::new(state.user_id.clone(), who.clone()).size(px(64.)).image(avatar.map(Into::into)).into_any_element(),
                 })
                 .child(div().font_weight(FontWeight::MEDIUM).child(who))
@@ -1650,7 +1714,15 @@ impl ChatView {
                 )
                 .when(unread, |d| d.child(div().absolute().top_1().right_1().size(px(8.)).rounded_full().bg(t.danger)))
         };
-        let column = self.voice_chat.as_ref().map(|(chat, _)| div().w(px(380.)).flex_none().h_full().border_l_1().border_color(t.border).child(chat.clone()));
+        let column = self.voice_chat.as_ref().map(|(chat, _)| {
+            div()
+                .w(px(380.))
+                .flex_none()
+                .h_full()
+                .border_l_1()
+                .border_color(t.border)
+                .child(chat.clone().cached(gpui::StyleRefinement::default().size_full()))
+        });
         let stage = div()
             .flex_1()
             .min_w_0()
@@ -1697,7 +1769,7 @@ impl ChatView {
                             .bg(t.bg_panel)
                             .overflow_hidden()
                             .relative()
-                            .child(gpui::img(picture).size_full().object_fit(gpui::ObjectFit::Contain))
+                            .child(picture)
                             .child(
                                 div()
                                     .absolute()
@@ -1739,6 +1811,82 @@ impl ChatView {
         div().flex_1().min_w_0().size_full().flex().child(stage).children(column).into_any_element()
     }
 
+    /// The history's part, made the first time it is drawn.
+    fn history_part(&mut self, cx: &mut Context<Self>) -> Entity<Part<ChatView>> {
+        if let Some(history) = &self.history {
+            return history.clone();
+        }
+        let this = cx.entity();
+        let client = self.client.clone();
+        let sound = client.read(cx).sound_tick.clone();
+        let history = part(&this, |chat, window, cx| chat.history(window, cx), cx);
+        history.update(cx, |p, cx| {
+            p.watch(&client, cx);
+            // A sound file playing moves its bar.
+            p.watch(&sound, cx);
+        });
+        self.history = Some(history.clone());
+        history
+    }
+
+    /// The messages, with the jump to the present over them: everything that moves as the
+    /// history scrolls. A cached part of its own (see `part`), so typing in the message bar or a
+    /// pulse of the typing line does not draw the history again.
+    fn history(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(channel_id) = self.current() else { return div().into_any_element() };
+        self.prefetch(cx);
+
+        // Wheel glides move the list without its scroll handler, so older messages are also
+        // asked for here once the top comes near.
+        if !self.list.is_following_tail() && self.list.logical_scroll_top().item_ix <= 2
+            && let Some(id) = self.current()
+        {
+            let client = self.client.clone();
+            cx.defer(move |cx| {
+                client.update(cx, |client, cx| {
+                    if client.logs.get(&id).is_some_and(|l| l.loaded && !l.loading && !l.reached_start && l.error.is_none()) {
+                        client.load_history(id, true, cx);
+                    }
+                })
+            });
+        }
+
+        let row_ctx = Rc::new(RowCtx {
+            client: self.client.clone(),
+            view: cx.weak_entity(),
+            channel_id: channel_id.clone(),
+            picture_sizes: self.picture_sizes.clone(),
+            scale_factor: window.scale_factor(),
+            parsed: self.parsed.clone(),
+        });
+        let messages = rhein_ui::smooth_scroll(
+            "history-glide",
+            rhein_ui::ScrollTarget::List(self.list.clone()),
+            list(self.list.clone(), move |ix, window, cx| render_row(&row_ctx, ix, window, cx)).size_full(),
+        );
+
+        let behind = !self.list.is_following_tail() && self.count(cx) > 0;
+        let jump = behind.then(|| {
+            div().absolute().bottom(px(8.)).right(px(16.)).child(
+                Button::new("jump-present", "Jump to present")
+                    .icon(Icon::ArrowDown)
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.glide_to_end(cx))),
+            )
+        });
+
+        div()
+            .relative()
+            .size_full()
+            // Room for the typing line between the last message and the message bar, with as
+            // much space above it as below.
+            .pb(HISTORY_BOTTOM)
+            // Switching channels fades the new history in instead of swapping it hard.
+            .child(motion::fade_in(div().size_full().child(messages), SharedString::from(format!("history-{channel_id}")), motion::FAST))
+            .children(jump)
+            .into_any_element()
+    }
+
     fn render_picker(&self) -> Option<AnyElement> {
         let (picker, at, target, _) = self.picker.as_ref()?;
         let anchor = match target {
@@ -1761,26 +1909,7 @@ impl ChatView {
         let typing: Vec<String> = client.typing_in(channel_id).iter().map(|u| client.display_name(guild_id.as_deref(), u)).collect();
         // Who is typing, just above the message bar, as in Discord: floating over the end of the
         // list, so the chat does not move when it comes and goes.
-        // The dots pulse in steps of TYPING_STEP rather than every display frame: each step
-        // repaints the window, and someone may type for a long while.
-        const TYPING_STEP: Duration = Duration::from_millis(120);
-        if !typing.is_empty() && !self.typing_tick.replace(true) {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(TYPING_STEP).await;
-                this.update(cx, |this, cx| {
-                    this.typing_tick.set(false);
-                    cx.notify();
-                })
-                .ok();
-            })
-            .detach();
-        }
-        let delta = (typing_epoch().elapsed().as_secs_f32() / 1.2).fract();
         let typing_line = typing_label(&typing).map(|label| {
-            let dot = |i: usize| {
-                let phase = (delta * std::f32::consts::TAU - i as f32 * 0.9).sin() * 0.5 + 0.5;
-                div().size(px(5.)).rounded_full().bg(t.text_muted).opacity(0.3 + 0.7 * phase)
-            };
             div()
                 .absolute()
                 .left(px(20.))
@@ -1795,7 +1924,7 @@ impl ChatView {
                 .gap_1p5()
                 .text_size(text::XS)
                 .text_color(t.text_muted)
-                .child(div().flex().items_center().gap(px(3.)).child(dot(0)).child(dot(1)).child(dot(2)))
+                .child(self.dots.clone().cached(gpui::StyleRefinement::default().w(px(21.)).h(px(5.))))
                 .child(label)
         });
 
@@ -2231,47 +2360,6 @@ impl Render for ChatView {
             None
         };
 
-        self.prefetch(cx);
-
-        // Wheel glides move the list without its scroll handler, so older messages are also
-        // asked for here once the top comes near.
-        if !self.list.is_following_tail() && self.list.logical_scroll_top().item_ix <= 2
-            && let Some(id) = self.current()
-        {
-            let client = self.client.clone();
-            cx.defer(move |cx| {
-                client.update(cx, |client, cx| {
-                    if client.logs.get(&id).is_some_and(|l| l.loaded && !l.loading && !l.reached_start && l.error.is_none()) {
-                        client.load_history(id, true, cx);
-                    }
-                })
-            });
-        }
-
-        let row_ctx = Rc::new(RowCtx {
-            client: self.client.clone(),
-            view: cx.weak_entity(),
-            channel_id: channel_id.clone(),
-            picture_sizes: self.picture_sizes.clone(),
-            scale_factor: window.scale_factor(),
-            parsed: self.parsed.clone(),
-        });
-        let messages = rhein_ui::smooth_scroll(
-            "history-glide",
-            rhein_ui::ScrollTarget::List(self.list.clone()),
-            list(self.list.clone(), move |ix, window, cx| render_row(&row_ctx, ix, window, cx)).size_full(),
-        );
-
-        let behind = !self.list.is_following_tail() && self.count(cx) > 0;
-        let jump = behind.then(|| {
-            div().absolute().bottom(px(8.)).right(px(16.)).child(
-                Button::new("jump-present", "Jump to present")
-                    .icon(Icon::ArrowDown)
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| this.glide_to_end(cx))),
-            )
-        });
-
         // A message request: someone we don't know wrote first. Accept or decline before replying.
         let request = self.client.read(cx).conversations.iter().find(|c| c.id == channel_id).filter(|c| {
             c.request_state.as_deref() == Some("pending") && c.creator.as_deref() != self.client.read(cx).user_id()
@@ -2300,6 +2388,7 @@ impl Render for ChatView {
                     accept.update(cx, |c, cx| c.answer_request(a, true, cx));
                 }))
         });
+        let dm_call = if is_dm { self.render_dm_call(&channel_id, cx) } else { None };
         let composer = self.render_composer(&channel_id, window, cx);
         let lightbox = self.render_lightbox(window, cx);
         let suggestions = self.render_suggestions(cx);
@@ -2374,24 +2463,9 @@ impl Render for ChatView {
                 this.stage_paths(drop_channel.clone(), paths.paths().to_vec(), cx);
             }))
             .child(header)
-            .children(is_dm.then(|| self.render_dm_call(&channel_id, cx)).flatten())
+            .children(dm_call)
             .children(top_note.map(|note| div().px_4().pt_3().text_size(text::SM).text_color(t.text_faint).child(note)))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    // Room for the typing line between the last message and the message bar,
-                    // with as much space above it as below.
-                    .pb(HISTORY_BOTTOM)
-                    // Switching channels fades the new history in instead of swapping it hard.
-                    .child(motion::fade_in(
-                        div().size_full().child(messages),
-                        SharedString::from(format!("history-{channel_id}")),
-                        motion::FAST,
-                    ))
-                    .children(jump),
-            )
+            .child(self.history_part(cx).cached(gpui::StyleRefinement::default().flex_1().min_h_0()))
             .children(request_bar)
             .child(composer)
             .children(suggestions)
@@ -2419,6 +2493,50 @@ fn picker_key(target: &PickerTarget) -> String {
     match target {
         PickerTarget::Composer => "composer".into(),
         PickerTarget::React { message_id, .. } => format!("react-{message_id}"),
+    }
+}
+
+/// The three dots of the typing line. They pulse in steps of `STEP` rather than every display
+/// frame, and only themselves: someone may type for a long while.
+#[derive(Default)]
+struct TypingDots {
+    ticking: Option<gpui::Task<()>>,
+    drawn: Option<std::time::Instant>,
+}
+
+impl Render for TypingDots {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        const STEP: Duration = Duration::from_millis(120);
+        self.drawn = Some(std::time::Instant::now());
+        if self.ticking.is_none() {
+            self.ticking = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(STEP).await;
+                    // Off screen once the typing line has gone: stop until drawn again.
+                    let going = this
+                        .update(cx, |this, cx| {
+                            let shown = this.drawn.is_some_and(|at| at.elapsed() < STEP * 3);
+                            if shown {
+                                cx.notify();
+                            } else {
+                                this.ticking = None;
+                            }
+                            shown
+                        })
+                        .unwrap_or(false);
+                    if !going {
+                        return;
+                    }
+                }
+            }));
+        }
+        let t = cx.theme();
+        let delta = (typing_epoch().elapsed().as_secs_f32() / 1.2).fract();
+        let dot = |i: usize| {
+            let phase = (delta * std::f32::consts::TAU - i as f32 * 0.9).sin() * 0.5 + 0.5;
+            div().size(px(5.)).rounded_full().bg(t.text_muted).opacity(0.3 + 0.7 * phase)
+        };
+        div().flex().items_center().gap(px(3.)).child(dot(0)).child(dot(1)).child(dot(2))
     }
 }
 

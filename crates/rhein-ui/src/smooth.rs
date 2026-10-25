@@ -128,8 +128,9 @@ impl Element for SmoothScroll {
             ScrollTarget::List(_) => LIST_LINE,
             ScrollTarget::Handle(_) => f32::from(window.line_height()),
         };
-        // The view this sits in: it has to render again for the glide to take its next step
-        // (a window refresh alone reuses the cached view, and nothing would move).
+        // The view this sits in: it has to render again for the glide to take its next step.
+        // Only it: a window refresh would draw every cached view afresh on each turn of the
+        // wheel.
         let view = window.current_view();
         // Bubbling goes from the front to the back, and this handler comes after the container's
         // own, so it sees the step first, and the frontmost glide takes it (an overlay over the
@@ -156,7 +157,6 @@ impl Element for SmoothScroll {
                 g.last = Some(Instant::now());
             }
             cx.notify(view);
-            window.refresh();
         });
     }
 }

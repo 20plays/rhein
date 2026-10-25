@@ -27,6 +27,10 @@ pub struct SoundView {
     pub error: Option<String>,
 }
 
+/// Ticks a few times a second while a sound file plays, for the views showing where it is: they
+/// watch this instead of the whole client.
+pub struct SoundTick;
+
 pub struct Sound {
     key: String,
     loading: bool,
@@ -117,15 +121,16 @@ impl Client {
         }
     }
 
-    /// Redraws a few times a second while a sound plays.
+    /// Ticks `sound_tick` a few times a second while a sound plays.
     fn tick_sound(&mut self, cx: &mut Context<Self>) {
         let Some(sound) = self.sound.as_mut() else { return };
         let key = sound.key.clone();
+        let tick = self.sound_tick.clone();
         sound._ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(200)).await;
                 let Ok(going) = this.update(cx, |this, cx| {
-                    cx.notify();
+                    tick.update(cx, |_, cx| cx.notify());
                     this.sound(&key).is_some_and(|s| s.playing || s.loading)
                 }) else {
                     return;

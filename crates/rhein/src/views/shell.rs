@@ -1,7 +1,7 @@
 //! The signed-in window: sidebar tree with your profile | chat over a status line | side panel,
 //! plus its modals.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Instant;
@@ -20,6 +20,7 @@ use rhein_ui::{
 
 use crate::views::chat::{ChatEvent, ChatView, PanelKind};
 use crate::views::home::HomeView;
+use crate::views::part::{Clock, Part, part};
 use crate::views::{activity, profile};
 use crate::views::panels::{PanelEvent, PinsPanel, SearchPanel, ThreadsPanel};
 use crate::views::guild_settings::{GUILD_SETTINGS_CONTEXT, GuildSettingsEvent, GuildSettingsView, Pane as GuildPane};
@@ -96,7 +97,15 @@ pub struct Shell {
     client: Entity<Client>,
     /// The sidebar tree's and the member list's scrolling, for smooth wheel steps.
     tree_scroll: gpui::ScrollHandle,
-    members_scroll: gpui::ScrollHandle,
+    members_list: gpui::ListState,
+    /// The member list's rows as last laid out (see `members`).
+    member_rows: Rc<RefCell<Vec<MemberRow>>>,
+    /// The sidebar and the member list, each drawn as a cached view of its own (see `part`):
+    /// made at the first render, which has the shell's own entity to hand them.
+    parts: Option<ShellParts>,
+    /// Ticks once a second while a profile card is open, for its activity clocks: redrawing the
+    /// card, not the whole shell.
+    card_clock: Entity<Clock>,
     chat: Entity<ChatView>,
     home: Entity<HomeView>,
     dialog: Option<DialogTab>,
@@ -131,6 +140,11 @@ pub struct Shell {
     last_input: Rc<Cell<Instant>>,
     _idle_watch: gpui::Task<()>,
     _subs: Vec<Subscription>,
+}
+
+struct ShellParts {
+    sidebar: Entity<Part<Shell>>,
+    members: Entity<Part<Shell>>,
 }
 
 /// How long without input to this window before you show as idle.
@@ -452,7 +466,10 @@ impl Shell {
         Self {
             client,
             tree_scroll: gpui::ScrollHandle::new(),
-            members_scroll: gpui::ScrollHandle::new(),
+            members_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(400.)),
+            member_rows: Rc::default(),
+            parts: None,
+            card_clock: cx.new(|_| Clock),
             chat,
             home,
             dialog: None,
@@ -480,6 +497,23 @@ impl Shell {
             _idle_watch: idle_watch,
             _subs: subs,
         }
+    }
+
+    fn parts(&mut self, cx: &mut Context<Self>) -> &ShellParts {
+        if self.parts.is_none() {
+            let shell = cx.entity();
+            let client = self.client.clone();
+            let sidebar = part(&shell, |s, _, cx| s.sidebar(cx), cx);
+            let members = part(&shell, |s, window, cx| s.members(window, cx), cx);
+            for p in [&sidebar, &members] {
+                p.update(cx, |p, cx| p.watch(&client, cx));
+            }
+            // The sidebar's call bar shows who is speaking.
+            let speaking = client.read(cx).call_speaking.clone();
+            sidebar.update(cx, |p, cx| p.watch(&speaking, cx));
+            self.parts = Some(ShellParts { sidebar, members });
+        }
+        self.parts.as_ref().expect("made above")
     }
 
     fn active_kind(&self) -> Option<PanelKind> {
@@ -597,14 +631,15 @@ impl Shell {
         }
     }
 
-    fn render_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = cx.theme().clone();
         let (content, width): (AnyElement, gpui::Pixels) = match &self.panel {
-            Panel::None => return self.members(cx),
-            Panel::Pins { view, .. } => (view.clone().into_any_element(), px(320.)),
-            Panel::Threads { view, .. } => (view.clone().into_any_element(), px(320.)),
-            Panel::Search { view, .. } => (view.clone().into_any_element(), px(380.)),
-            Panel::Thread { view } => (view.clone().into_any_element(), px(420.)),
+            Panel::None => return self.members_shown(cx).then(|| self.parts(cx).members.clone().cached(gpui::StyleRefinement::default().w(size::PANEL).h_full().flex_none()).into_any_element()),
+            // Cached: each panel draws again when it or the client changes.
+            Panel::Pins { view, .. } => (view.clone().cached(fill()).into_any_element(), px(320.)),
+            Panel::Threads { view, .. } => (view.clone().cached(fill()).into_any_element(), px(320.)),
+            Panel::Search { view, .. } => (view.clone().cached(fill()).into_any_element(), px(380.)),
+            Panel::Thread { view } => (view.clone().cached(fill()).into_any_element(), px(420.)),
         };
         Some(
             div()
@@ -1472,15 +1507,12 @@ impl Shell {
         });
         self.profile_card = Some((user_id, guild, at));
         // Activity clocks tick once a second, only while a card is open.
+        let clock = self.card_clock.clone();
         self.card_ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
-                let open = this
-                    .update(cx, |v, cx| {
-                        cx.notify();
-                        v.profile_card.is_some()
-                    })
-                    .unwrap_or(false);
+                clock.update(cx, |_, cx| cx.notify());
+                let open = this.read_with(cx, |v, _| v.profile_card.is_some()).unwrap_or(false);
                 if !open {
                     break;
                 }
@@ -1491,6 +1523,8 @@ impl Shell {
 
     fn render_profile_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (user_id, guild_id, at) = self.profile_card.clone()?;
+        // Read so that its ticks draw the shell again (the shell itself is not cached).
+        self.card_clock.read(cx);
         let t = cx.theme().clone();
         let profile = self.client.update(cx, |c, cx| c.profile(&user_id, cx));
         // What they are doing, from the guild's member list or the friends list.
@@ -2767,7 +2801,7 @@ impl Shell {
                                 div()
                                     .rounded_full()
                                     .border_2()
-                                    .border_color(if client.is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
+                                    .border_color(if client.call_speaking.read(cx).is_speaking(&state.user_id) { t.success } else { gpui::transparent_black().into() })
                                     .child(Avatar::new(state.user_id.clone(), name.clone()).size(px(24.)).image(avatar.map(Into::into))),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(name))
@@ -2787,17 +2821,22 @@ impl Shell {
         rows
     }
 
-    fn members(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.show_members {
-            return None;
-        }
+    /// Whether the member list shows: no other panel open, a guild selected and its roster in.
+    fn members_shown(&self, cx: &App) -> bool {
+        let client = self.client.read(cx);
+        matches!(self.panel, Panel::None)
+            && self.show_members
+            && !client.showing_home
+            && client.selected_guild.as_ref().is_some_and(|gid| client.members.contains_key(gid))
+    }
+
+    /// The member list, as a virtual list: only the rows in view are drawn, however large the
+    /// guild. The order is worked out here; each row reads its member when it is drawn.
+    fn members(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = cx.theme().clone();
         let client = self.client.read(cx);
-        if client.showing_home {
-            return None;
-        }
-        let gid = client.selected_guild.clone()?;
-        let members = client.members.get(&gid)?;
+        let Some(gid) = client.selected_guild.clone() else { return div().into_any_element() };
+        let Some(members) = client.members.get(&gid) else { return div().into_any_element() };
         let (online, offline): (Vec<_>, Vec<_>) = members.iter().partition(|m| m.status() != "offline");
         // Roles shown separately each get a heading, highest first, and an online member stands
         // under exactly one: the highest of them they hold (as the web client groups them).
@@ -2813,25 +2852,40 @@ impl Shell {
                 None => ungrouped.push(m),
             }
         }
-        let this = cx.weak_entity();
-        let row = |m: &rhein_proto::Member| {
+        let mut rows = Vec::new();
+        let named = hoisted.iter().map(|r| r.name.clone()).zip(groups);
+        for (label, list) in named.chain([("Online".to_owned(), ungrouped), ("Offline".to_owned(), offline)]) {
+            if list.is_empty() {
+                continue;
+            }
+            rows.push(MemberRow::Heading { label: format!("{label} — {}", list.len()), first: rows.is_empty() });
+            rows.extend(list.into_iter().map(|m| MemberRow::Member { user_id: m.user_id.clone(), two_lines: member_subtitle(m).is_some() }));
+        }
+        // Measured again only when the rows or their heights change.
+        if *self.member_rows.borrow() != rows {
+            let old = self.members_list.item_count();
+            self.members_list.splice(0..old, rows.len());
+            *self.member_rows.borrow_mut() = rows;
+        }
+        let (rows, client, this) = (self.member_rows.clone(), self.client.clone(), cx.weak_entity());
+        let row = move |ix: usize, _: &mut Window, cx: &mut App| -> AnyElement {
+            let Some(row) = rows.borrow().get(ix).cloned() else { return div().into_any_element() };
+            let user_id = match row {
+                MemberRow::Heading { label, first } => {
+                    let heading = section_label(label, cx);
+                    return if first { heading.pt_2() } else { heading }.into_any_element();
+                }
+                MemberRow::Member { user_id, .. } => user_id,
+            };
+            let client = client.read(cx);
+            let Some(m) = client.member(&gid, &user_id) else { return div().into_any_element() };
             let name = m.shown_name().to_owned();
             let presence = Presence::parse(m.status());
             let (uid, uid2) = (m.user_id.clone(), m.user_id.clone());
             let (weak, weak2) = (this.clone(), this.clone());
-            // A custom status is what the person chose to say, so it takes the second line;
-            // without one, what they are playing or listening to.
-            let subtitle = m
-                .presence
-                .as_ref()
-                .and_then(|p| p.get("custom_status"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .or_else(|| m.activities().first().map(|a| a.summary()));
             ListRow::new(SharedString::from(format!("member-{}", m.user_id)), name.clone())
                 .label_color(client.name_color(&gid, &m.user_id).map(|c| gpui::rgb(c).into()))
-                .subtitle(subtitle)
+                .subtitle(member_subtitle(m))
                 .leading(Avatar::new(m.user_id.clone(), name).size(px(28.)).image(client.avatar_url(Some(&gid), &m.user_id).map(Into::into)).presence(Some(presence)))
                 .muted(presence == Presence::Offline)
                 .when(m.is_bot, |r| r.trailing(Tag("BOT")))
@@ -2843,53 +2897,35 @@ impl Shell {
                     let (u, at) = (uid2.clone(), e.position);
                     weak2.update(cx, |v, cx| v.member_menu(u, at, window, cx)).ok();
                 })
+                .into_any_element()
         };
-        let mut sections: Vec<AnyElement> = Vec::new();
-        let named = hoisted.iter().map(|r| r.name.clone()).zip(groups);
-        for (label, list) in named.chain([("Online".to_owned(), ungrouped), ("Offline".to_owned(), offline)]) {
-            if list.is_empty() {
-                continue;
-            }
-            let heading = section_label(format!("{label} — {}", list.len()), cx);
-            sections.push(if sections.is_empty() { heading.pt_2() } else { heading }.into_any_element());
-            sections.extend(list.into_iter().map(|m| row(m).into_any_element()));
-        }
-        Some(
-            div()
-                .w(size::PANEL)
-                .h_full()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .bg(t.bg_panel)
-                .border_l_1()
-                .border_color(t.border)
-                .child(
-                    div()
-                        .h(size::HEADER)
-                        .flex_none()
-                        .px_4()
-                        .flex()
-                        .items_center()
-                        .border_b_1()
-                        .border_color(t.border)
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("Members"),
-                )
-                .child(rhein_ui::smooth_scroll(
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg_panel)
+            .border_l_1()
+            .border_color(t.border)
+            .child(
+                div()
+                    .h(size::HEADER)
+                    .flex_none()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Members"),
+            )
+            .child(
+                div().flex_1().min_h_0().px_2().child(rhein_ui::smooth_scroll(
                     "members-glide",
-                    rhein_ui::ScrollTarget::Handle(self.members_scroll.clone()),
-                    div()
-                        .id("members")
-                        .flex_1()
-                        .min_h_0()
-                        .px_2()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.members_scroll)
-                        .children(sections),
-                ))
-                .into_any_element(),
-        )
+                    rhein_ui::ScrollTarget::List(self.members_list.clone()),
+                    gpui::list(self.members_list.clone(), row).size_full(),
+                )),
+            )
+            .into_any_element()
     }
 
     fn dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3126,6 +3162,31 @@ const CHANNEL_GAP: f32 = 3.;
 /// What a row of the full profile does when clicked.
 type RowAction = Box<dyn Fn(&mut Shell, &mut Context<Shell>)>;
 
+/// The style of a cached view filling a panel's column below its edge.
+fn fill() -> gpui::StyleRefinement {
+    gpui::StyleRefinement::default().flex_1().min_h_0().w_full()
+}
+
+/// One row of the member list: a heading, or a member (with whether their row has a second
+/// line, which changes its height).
+#[derive(Clone, PartialEq)]
+enum MemberRow {
+    Heading { label: String, first: bool },
+    Member { user_id: String, two_lines: bool },
+}
+
+/// A member's second line: a custom status is what the person chose to say, so it comes first;
+/// without one, what they are playing or listening to.
+fn member_subtitle(m: &rhein_proto::Member) -> Option<String> {
+    m.presence
+        .as_ref()
+        .and_then(|p| p.get("custom_status"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| m.activities().first().map(|a| a.summary()))
+}
+
 fn presence_of(status: &str) -> Presence {
     match status {
         "idle" => Presence::Idle,
@@ -3149,7 +3210,7 @@ fn presence_dot(presence: Presence, cx: &App) -> AnyElement {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sidebar = self.sidebar(cx);
+        let sidebar = self.parts(cx).sidebar.clone().cached(gpui::StyleRefinement::default().w(size::SIDEBAR).h_full().flex_none());
         let status = StatusLine::new(self.client.clone());
         let members = self.render_panel(cx);
         let dialog = self.dialog(cx);
@@ -3252,7 +3313,7 @@ impl Render for Shell {
                                 // Cached: the chat draws again when it or the client changes, not whenever the
                                 // sidebar or member list around it does.
                                 if client.showing_home && client.home_conversation.is_none() {
-                                    d.child(self.home.clone())
+                                    d.child(self.home.clone().cached(gpui::StyleRefinement::default().flex_1().min_w_0().h_full()))
                                 } else {
                                     d.child(self.chat.clone().cached(gpui::StyleRefinement::default().flex_1().min_w_0().h_full()))
                                 }
