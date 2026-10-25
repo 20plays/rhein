@@ -14,8 +14,18 @@ pub struct Io(Arc<Runtime>);
 impl Global for Io {}
 
 impl Io {
+    /// At most `WORKERS` threads: the work here is mostly waiting on sockets, and what blocks
+    /// (decoding sound, opening devices, screen capture) goes to tokio's blocking threads. One
+    /// per core, as tokio starts by default, was dozens of idle threads on a large machine.
     pub fn new() -> Result<Self> {
-        Ok(Self(Arc::new(Runtime::new()?)))
+        const WORKERS: usize = 4;
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(cores.clamp(2, WORKERS))
+            .thread_name("rhein-io")
+            .enable_all()
+            .build()?;
+        Ok(Self(Arc::new(runtime)))
     }
 
     pub fn global(cx: &App) -> Self {

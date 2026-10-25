@@ -2,7 +2,7 @@
 //! quote, header, rich text, attachments, link previews, reactions and hover actions.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gpui::{
@@ -121,7 +121,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let client = ctx.client.read(cx);
     let channel_id = ctx.channel_id.as_str();
     let Some(log) = client.logs.get(channel_id) else { return div().into_any_element() };
-    let Some(message) = log.messages.get(ix).cloned() else { return div().into_any_element() };
+    let Some(message) = log.messages.get(ix) else { return div().into_any_element() };
     let prev = ix.checked_sub(1).and_then(|p| log.messages.get(p));
     let divider_here = client.divider_index(channel_id) == Some(ix);
     let new_day = prev.is_none_or(|p| day_of(p.created_at) != day_of(message.created_at));
@@ -148,7 +148,9 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         let v = v.read(cx);
         let selected = v.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range()));
         let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
-        (v.revealed.clone(), v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(&message)).copied(), (selected, hovered))
+        // Only this message's spoilers, not a copy of every one revealed.
+        let revealed: HashSet<(String, usize)> = v.revealed.iter().filter(|(m, _)| *m == message.id).cloned().collect();
+        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(&message)).copied(), (selected, hovered))
     });
     let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
