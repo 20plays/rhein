@@ -47,7 +47,7 @@ impl Root {
         let sweep = cx.spawn_in(window, async move |_, cx| {
             loop {
                 cx.background_executor().timer(images::SWEEP_EVERY).await;
-                if cx.update(|window, cx| images::sweep(window, cx)).is_err() {
+                if cx.update(images::sweep).is_err() {
                     return;
                 }
             }
