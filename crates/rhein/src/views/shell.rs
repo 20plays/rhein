@@ -992,6 +992,26 @@ impl Shell {
                 c.update(cx, |c, cx| c.message_user(u, cx));
             }).with_icon(Icon::MessageSquare));
         }
+        // In a call: how loud this person (and their screen's sound) is for us alone.
+        if !myself && client.call().is_some() {
+            for (label, key) in [("Voice volume", user_id.clone()), ("Screen volume", format!("{user_id}#screen"))] {
+                let current = client.user_volume(&key);
+                let choices = [0u32, 25, 50, 100, 150, 200]
+                    .into_iter()
+                    .map(|percent| {
+                        let (c, key) = (self.client.clone(), key.clone());
+                        MenuEntry::item(if percent == 0 { "Off".to_owned() } else { format!("{percent} %") }, move |_, cx| {
+                            c.update(cx, |c, cx| {
+                                c.set_user_volume(&key, percent);
+                                cx.notify();
+                            })
+                        })
+                        .checked(current == percent)
+                    })
+                    .collect();
+                entries.push(MenuEntry::expand(format!("{label}: {current} %"), choices));
+            }
+        }
         if !myself && client.friend_state(&user_id).is_none() {
             let (c, u) = (self.client.clone(), user_id.clone());
             entries.push(MenuEntry::item("Add friend", move |_, cx| {

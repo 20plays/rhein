@@ -165,9 +165,15 @@ impl Client {
         let (http, channel) = (self.http.clone(), channel_id.clone());
         let route = Route::Channel { api: api.clone(), channel: channel_id.clone() };
         let mut keys = self.guild_keys(&channel_id, &api);
+        // A channel set to a region by hand is never probed: the server uses that region.
+        let fixed = self.channel(&channel_id).and_then(|c| c.voice_region.clone()).is_some_and(|r| !r.is_empty() && r != "auto");
         let dial = async move {
-            let published = api.voice_regions().await.unwrap_or(Value::Null);
-            let region = rhein_voice::region::choose(&http, &published, None).await;
+            let region = if fixed {
+                None
+            } else {
+                let published = api.voice_regions().await.unwrap_or(Value::Null);
+                rhein_voice::region::choose(&http, &published, None).await
+            };
             // Offered with every join: only the server knows whether the channel is on an SFU,
             // where the call is end-to-end encrypted and a join without one is refused.
             let package = keys.as_mut().and_then(|k| k.offer().ok());
