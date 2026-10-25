@@ -122,7 +122,7 @@ impl Client {
         let device = voice.null_devices.then(|| "alsa:null".to_owned()).or(voice.output.clone());
         let io = self.io.clone();
         cx.spawn(async move |this, cx| {
-            let started = join(io.spawn(async move { tokio::task::spawn_blocking(move || Playback::start(sound.to_vec(), Some("mp3"), device)).await? })).await;
+            let started = join(io.spawn(async move { tokio::task::spawn_blocking(move || Playback::start(Arc::from(sound), Some("mp3"), device)).await? })).await;
             match started {
                 Ok(playback) => {
                     this.update(cx, |this, _| this.alerts.playing = Some(Arc::new(playback))).ok();

@@ -9,7 +9,7 @@ Rhein talks to Telium servers directly and is meant to work next to the official
 | Milestone | State |
 | --- | --- |
 | M0 – workspace, local test servers | done |
-| M1 – login (OPAQUE), guild chat | done: history, sending, editing, deleting, reactions, typing, members, file upload |
+| M1 – login (OPAQUE), guild chat | done: history, sending, editing, deleting, reactions, typing, members, file upload; files saved straight into the downloads folder, H.264 videos (MP4, MOV) played in the chat with OpenH264 (vendored, decoder only) |
 | UI phases 1–6 | done: friends (requests, accept, block), conversation list, voice stage with live voice states; settings (account, devices, servers, appearance), status, guild/channel/member menus, profile cards, Ctrl+K switcher, keyboard navigation; emoji picker, autocomplete, message context menu, pins, threads, search; design system, layout with unread/mentions, rich text (web-client markdown), images, link previews through the guild server, replies, multi-line composer, paste and drag & drop uploads |
 | M2 – multiple servers (federation) | done: extra servers, invites across servers, one gateway per server |
 | Profiles and rich presence | done: banners, accents and card themes (shown and edited); activities of others with artwork through camo; sharing your own from a Discord-compatible RPC server (IPC and WebSocket), game detection and MPRIS |

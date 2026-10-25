@@ -14,7 +14,7 @@ use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::client::GifShare;
 use rhein_store::gif_links::MediaKind;
 use rhein_store::MediaProbe;
-use rhein_store::{Client, EmbedState, gif_links, markdown};
+use rhein_store::{Client, DownloadView, EmbedState, MediaSource, gif_links, markdown};
 use rhein_ui::images::{self, Fitted, fitted};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
@@ -59,6 +59,8 @@ pub struct RowCtx {
     pub scale_factor: f32,
     /// Each message's parsed text, kept between frames (see `parsed`).
     pub parsed: ParsedCache,
+    /// The player of the video playing, shown in its row.
+    pub movie: Entity<crate::views::live::LiveMovie>,
 }
 
 /// What a message's text parses to, which depends on nothing but the text: worked out once,
@@ -150,12 +152,12 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
         // Only this message's spoilers, not a copy of every one revealed.
         let revealed: HashSet<(String, usize)> = v.revealed.iter().filter(|(m, _)| *m == message.id).cloned().collect();
-        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(&message)).copied(), (selected, hovered))
+        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(message)).copied(), (selected, hovered))
     });
     let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
-    let parsed = parsed(&ctx.parsed, &message);
+    let parsed = parsed(&ctx.parsed, message);
     let doc = &parsed.doc;
     // Called on: by name, @everyone, a role we hold, or a reply to one of our messages.
     let mentions_me = me.as_deref().is_some_and(|me| {
@@ -205,7 +207,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     // What a bot attached: its cards, and the controls under them.
     let api_base = client.api_base_of_channel(channel_id).unwrap_or_default();
     let bot_cards: Vec<AnyElement> = message.cards.iter().take(5).enumerate().map(|(n, card)| bot_card(ix, n, card, &author_name, &api_base, &t)).collect();
-    let controls = (!message.components.is_empty()).then(|| bot_controls(ctx, ix, &message, client, &t));
+    let controls = (!message.components.is_empty()).then(|| bot_controls(ctx, ix, message, client, &t));
     let deferred = client.deferred.contains(&message.id);
 
     // GIF links: the picture itself (a share page once its provider has named it).
@@ -363,10 +365,12 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .when(edited_line, |d| d.child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(message_text::EDITED)))
         .children(images.into_iter().map(|(i, a)| image_attachment(ctx, ix, i, &message.id, a, &t, cx)))
         .children(files.into_iter().map(|(i, a)| {
-            if rhein_voice::playback::playable(&a.filename, &a.mime) {
+            if rhein_voice::movie::playable(&a.filename, &a.mime) {
+                video_attachment(ctx, ix, i, &message.id, a, &t, cx)
+            } else if rhein_voice::playback::playable(&a.filename, &a.mime) {
                 sound_chip(ctx, ix, i, &message.id, a, &t, cx)
             } else {
-                file_chip(ctx, ix, i, &message.id, a, &t).into_any_element()
+                file_chip(ctx, ix, i, &message.id, a, &t, cx).into_any_element()
             }
         }))
         .when(!gifs.is_empty(), |d| d.child(div().flex().flex_wrap().gap_2().children(gifs)))
@@ -411,7 +415,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             )
         })
         // A little room under the chips, which are taller than a line of text.
-        .when(!message.reactions.is_empty(), |d| d.child(div().pb_0p5().child(reactions(ctx, ix, &message, client, guild_id.as_deref(), &t, cx))))
+        .when(!message.reactions.is_empty(), |d| d.child(div().pb_0p5().child(reactions(ctx, ix, message, client, guild_id.as_deref(), &t, cx))))
         .children(thread_chip);
 
     let group = message_group(ix);
@@ -441,7 +445,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .into_any_element()
     };
 
-    let actions = (!pending).then(|| hover_actions(ctx, ix, &message, &group, client, guild_id.as_deref(), &t));
+    let actions = (!pending).then(|| hover_actions(ctx, ix, message, &group, client, guild_id.as_deref(), &t));
 
     let row_bg: Option<Hsla> = if highlighted {
         Some(t.accent_soft.into())
@@ -496,7 +500,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     // history moves up) and the message fades in. History renders as it is.
     let element = match fresh {
         Some(None) => {
-            let (view, key) = (ctx.view.clone(), message_key(&message).to_owned());
+            let (view, key) = (ctx.view.clone(), message_key(message).to_owned());
             div()
                 .w_full()
                 .relative()
@@ -513,7 +517,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
                 .into_any_element()
         }
         Some(Some(height)) => {
-            let id = SharedString::from(format!("fresh-{}", message_key(&message)));
+            let id = SharedString::from(format!("fresh-{}", message_key(message)));
             motion::expand_then_fade_in(div().w_full().overflow_hidden().child(element), id, height).into_any_element()
         }
         None => element.into_any_element(),
@@ -908,7 +912,7 @@ fn download_button(ctx: &RowCtx, id: String, group: SharedString, media: Media, 
 }
 
 fn image_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
-    let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t).into_any_element() };
+    let Some(url) = a.url.clone() else { return file_chip(ctx, ix, i, message_id, a, t, cx).into_any_element() };
     // The size the attachment says it has, else the one it turned out to have once it arrived.
     let natural = match (a.width, a.height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as u32, h as u32)),
@@ -977,10 +981,7 @@ fn sound_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachmen
         (Some(s), None) if s.loading => "Loading…".to_owned(),
         _ => format_size(a.size),
     };
-    let source = match &a.url {
-        Some(url) => rhein_store::SoundSource::Url(url.clone()),
-        None => rhein_store::SoundSource::Dm { conversation: ctx.channel_id.clone(), message: message_id.to_owned(), index: i },
-    };
+    let source = attachment_source(ctx, message_id, i, a);
     let (client, toggle_key, name) = (ctx.client.clone(), key.clone(), a.filename.clone());
     let (seek_client, seek_key) = (ctx.client.clone(), key);
     // Where the bar is on screen, for turning a click into a position.
@@ -1046,10 +1047,27 @@ fn sound_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachmen
         .into_any_element()
 }
 
-fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme) -> impl IntoElement {
-    let url = a.url.clone();
-    // An encrypted DM attachment has no URL to open: the client fetches and opens it.
-    let (client, conversation, message) = (ctx.client.clone(), ctx.channel_id.clone(), message_id.to_owned());
+/// Where an attachment's bytes come from: its link, or, encrypted in a DM, its message.
+fn attachment_source(ctx: &RowCtx, message_id: &str, i: usize, a: &Attachment) -> MediaSource {
+    match &a.url {
+        Some(url) => MediaSource::Url(url.clone()),
+        None => MediaSource::Dm { conversation: ctx.channel_id.clone(), message: message_id.to_owned(), index: i },
+    }
+}
+
+/// How far a download has come, for showing in place of the file's size.
+fn download_progress(download: DownloadView) -> String {
+    match download.total {
+        Some(total) => format!("Downloading… {}%", download.got * 100 / total.max(1)),
+        None => format!("Downloading… {}", format_size(download.got as i64)),
+    }
+}
+
+/// Clicking a file saves it into the downloads folder; while it downloads the chip says how far.
+fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> impl IntoElement {
+    let key = format!("{message_id}#{i}");
+    let download = ctx.client.read(cx).download(&key);
+    let (client, source, name) = (ctx.client.clone(), attachment_source(ctx, message_id, i, a), a.filename.clone());
     div()
         .id(SharedString::from(format!("att-{ix}-{i}")))
         .max_w(px(420.))
@@ -1064,13 +1082,109 @@ fn file_chip(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment
         .items_center()
         .cursor_pointer()
         .hover(|s| s.bg(t.bg_selected))
-        .on_click(move |_, _, cx| match &url {
-            Some(url) => cx.open_url(url),
-            None => client.update(cx, |c, cx| c.open_dm_attachment(&conversation, &message, i, cx)),
+        .tooltip(tooltip("Download"))
+        .on_click(move |_, _, cx| {
+            let (key, source, name) = (key.clone(), source.clone(), name.clone());
+            client.update(cx, |c, cx| c.download_file(key, source, name, cx));
         })
         .child(icon(if a.is_image() { Icon::Image } else { Icon::File }).text_color(t.text_muted))
         .child(div().flex_1().truncate().text_color(t.accent).child(a.filename.clone()))
-        .child(div().text_size(text::XS).text_color(t.text_faint).child(format_size(a.size)))
+        .child(div().text_size(text::XS).text_color(t.text_faint).child(download.map_or_else(|| format_size(a.size), download_progress)))
+        .child(icon(Icon::Download).text_color(t.text_muted))
+}
+
+/// The box a video takes in the chat: its own shape (16:9 until known), fitted into this.
+const VIDEO_MAX: (f32, f32) = (560., 360.);
+
+/// A video: a poster with a play button until it is played, then the chat's player, in a box of
+/// the video's shape. Saving it sits in the top right corner, shown while it is hovered.
+fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Attachment, t: &Theme, cx: &App) -> AnyElement {
+    let key = format!("{message_id}#{i}");
+    let source = attachment_source(ctx, message_id, i, a);
+    let player = ctx.client.read(cx).movie_player.read(cx);
+    let loaded = player.key() == Some(key.as_str());
+    let natural = match (a.width, a.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as f32, h as f32)),
+        _ => player.view().filter(|_| loaded).and_then(|v| v.size).filter(|(w, h)| *w > 0 && *h > 0).map(|(w, h)| (w as f32, h as f32)),
+    };
+    let (w, h) = natural.unwrap_or((16., 9.));
+    let scale = (VIDEO_MAX.0 / w).min(VIDEO_MAX.1 / h);
+    let size = gpui::size(px(w * scale), px(h * scale));
+    let group = SharedString::from(format!("video-group-{ix}-{i}"));
+    let body = if loaded {
+        ctx.movie.clone().into_any_element()
+    } else {
+        let (client, key, source) = (ctx.client.clone(), key.clone(), source.clone());
+        let download = ctx.client.read(cx).download(&key);
+        div()
+            .id(SharedString::from(format!("video-poster-{ix}-{i}")))
+            .size_full()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                let (key, source) = (key.clone(), source.clone());
+                client.update(cx, |c, cx| c.toggle_movie(key, source, cx));
+            })
+            .child(
+                div()
+                    .size(px(56.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(gpui::Hsla::from(t.bg_base).opacity(0.85))
+                    .child(icon_sized(Icon::Play, px(24.)).text_color(t.text)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .px_3()
+                    .py_1p5()
+                    .flex()
+                    .gap_2()
+                    .text_size(text::XS)
+                    .bg(gpui::Hsla::from(t.bg_base).opacity(0.85))
+                    .child(div().flex_1().min_w_0().truncate().text_color(t.text).child(a.filename.clone()))
+                    .child(div().flex_none().font_family(FONT_MONO).text_color(t.text_faint).child(download.map_or_else(|| format_size(a.size), download_progress))),
+            )
+            .into_any_element()
+    };
+    picture_box(div(), Some(size))
+        .id(SharedString::from(format!("video-{ix}-{i}")))
+        .group(group.clone())
+        .relative()
+        .rounded(radius::LG)
+        .overflow_hidden()
+        .bg(gpui::black())
+        .child(body)
+        .child(save_button(ctx, format!("video-save-{ix}-{i}"), group, key, source, a.filename.clone(), t))
+        .into_any_element()
+}
+
+/// Saving an attachment into the downloads folder, from a button in its top right corner shown
+/// while it is hovered.
+fn save_button(ctx: &RowCtx, id: String, group: SharedString, key: String, source: MediaSource, name: String, t: &Theme) -> AnyElement {
+    let client = ctx.client.clone();
+    div()
+        .absolute()
+        .top_1p5()
+        .right_1p5()
+        .rounded(radius::MD)
+        .bg(t.bg_base)
+        .invisible()
+        .group_hover(group, |s| s.visible())
+        .child(IconButton::new(SharedString::from(id), Icon::Download).tooltip("Download").on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            let (key, source, name) = (key.clone(), source.clone(), name.clone());
+            client.update(cx, |c, cx| c.download_file(key, source, name, cx));
+        }))
+        .into_any_element()
 }
 
 /// Only `https:` links without credentials reach a bot's buttons and cards.

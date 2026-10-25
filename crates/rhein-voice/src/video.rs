@@ -135,7 +135,7 @@ impl PreviewSink {
     }
 }
 
-fn to_picture(buffer: &dyn VideoBuffer, max_width: u32) -> Picture {
+pub(crate) fn to_picture(buffer: &dyn VideoBuffer, max_width: u32) -> Picture {
     let mut i420 = buffer.to_i420();
     let (w, h) = (i420.width(), i420.height());
     if w > max_width && max_width > 0 {

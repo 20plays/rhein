@@ -386,7 +386,7 @@ impl Shell {
                                     });
                                     let Some((message, i, a)) = found else { return false };
                                     let Some(url) = a.url.clone() else { return false };
-                                    v.client.update(cx, |c, cx| c.toggle_sound(format!("{message}#{i}"), rhein_store::SoundSource::Url(url), a.filename.clone(), cx));
+                                    v.client.update(cx, |c, cx| c.toggle_sound(format!("{message}#{i}"), rhein_store::MediaSource::Url(url), a.filename.clone(), cx));
                                     true
                                 })
                                 .unwrap_or(true);

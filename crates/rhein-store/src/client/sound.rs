@@ -6,16 +6,6 @@ use std::sync::Arc;
 use rhein_voice::playback::Playback;
 
 use super::*;
-use crate::conversations::Engine;
-
-/// Where a sound file's bytes come from.
-#[derive(Clone)]
-pub enum SoundSource {
-    /// A guild attachment.
-    Url(String),
-    /// An encrypted DM attachment: the conversation, the message, its index.
-    Dm { conversation: String, message: String, index: usize },
-}
 
 /// What the row of a sound file shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,10 +16,6 @@ pub struct SoundView {
     pub duration: Option<f64>,
     pub error: Option<String>,
 }
-
-/// Ticks a few times a second while a sound file plays, for the views showing where it is: they
-/// watch this instead of the whole client.
-pub struct SoundTick;
 
 pub struct Sound {
     key: String,
@@ -55,7 +41,7 @@ impl Client {
     }
 
     /// Plays or pauses the sound file `key`; another one playing stops.
-    pub fn toggle_sound(&mut self, key: String, source: SoundSource, filename: String, cx: &mut Context<Self>) {
+    pub fn toggle_sound(&mut self, key: String, source: MediaSource, filename: String, cx: &mut Context<Self>) {
         if let Some(sound) = self.sound.as_ref().filter(|s| s.key == key) {
             if let Some(playback) = &sound.playback {
                 if playback.ended() {
@@ -69,29 +55,16 @@ impl Client {
             }
             return;
         }
+        // One thing plays at a time.
+        self.stop_movie(cx);
         let device = self.voice_prefs().null_devices.then(|| "alsa:null".to_owned()).or_else(|| self.prefs.voice.output.clone());
-        let (io, http) = (self.io.clone(), self.http.clone());
-        let (engine, api) = (self.dm_engine.clone(), self.home.as_ref().map(|h| h.api.clone()));
+        let (io, fetcher) = (self.io.clone(), self.fetcher());
         let extension = filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
         let wanted = key.clone();
         let task = cx.spawn(async move |this, cx| {
             let started = join(io.spawn(async move {
-                let bytes = match source {
-                    SoundSource::Url(url) => http.get(&url).send().await?.error_for_status()?.bytes().await?.to_vec(),
-                    SoundSource::Dm { conversation, message, index } => {
-                        let (Some(engine), Some(api)) = (engine, api) else { anyhow::bail!("encrypted messages are not open on this device") };
-                        let attachment = {
-                            let engine = engine.lock().await;
-                            engine
-                                .conversation(&conversation)
-                                .and_then(|c| c.messages.iter().find(|m| m.id == message))
-                                .and_then(|m| m.body.attachments.get(index).cloned())
-                                .ok_or_else(|| anyhow!("that sound file is gone"))?
-                        };
-                        Engine::fetch_attachment(&api, &attachment).await?
-                    }
-                };
-                let playback = tokio::task::spawn_blocking(move || Playback::start(bytes, extension.as_deref(), device)).await??;
+                let bytes = fetcher.fetch(source).await?;
+                let playback = tokio::task::spawn_blocking(move || Playback::start(bytes.into(), extension.as_deref(), device)).await??;
                 Ok(Arc::new(playback))
             }))
             .await;
@@ -121,11 +94,11 @@ impl Client {
         }
     }
 
-    /// Ticks `sound_tick` a few times a second while a sound plays.
+    /// Ticks `media_tick` a few times a second while a sound plays.
     fn tick_sound(&mut self, cx: &mut Context<Self>) {
         let Some(sound) = self.sound.as_mut() else { return };
         let key = sound.key.clone();
-        let tick = self.sound_tick.clone();
+        let tick = self.media_tick.clone();
         sound._ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(200)).await;

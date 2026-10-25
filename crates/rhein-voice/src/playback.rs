@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -63,7 +63,7 @@ pub struct Playback {
 impl Playback {
     /// Starts playing `bytes`. `extension` helps recognise the format; `device` is a cpal output
     /// id (`None` for the default, `Some("alsa:null")` for silence).
-    pub fn start(bytes: Vec<u8>, extension: Option<&str>, device: Option<String>) -> Result<Playback> {
+    pub fn start(bytes: Arc<[u8]>, extension: Option<&str>, device: Option<String>) -> Result<Playback> {
         let control = Arc::new(Control::default());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
         let extension = extension.map(str::to_owned);
@@ -99,8 +99,11 @@ impl Playback {
         self.control.ended.store(false, Ordering::Relaxed);
     }
 
-    /// How far it has played, in seconds.
+    /// How far it has played, in seconds (where a seek goes, until the decoder has made it).
     pub fn position(&self) -> f64 {
+        if let Some(to) = *self.control.seek.lock().unwrap() {
+            return to;
+        }
         let base = f64::from_bits(self.control.base.load(Ordering::Relaxed));
         let rate = self.control.device_rate.load(Ordering::Relaxed).max(1) as f64;
         let at = base + self.control.played.load(Ordering::Relaxed) as f64 / rate;
@@ -131,7 +134,7 @@ impl Drop for Playback {
     }
 }
 
-fn run(bytes: Vec<u8>, extension: Option<String>, device: Option<String>, control: &Arc<Control>, ready: &std::sync::mpsc::Sender<Result<()>>) -> Result<()> {
+fn run(bytes: Arc<[u8]>, extension: Option<String>, device: Option<String>, control: &Arc<Control>, ready: &std::sync::mpsc::Sender<Result<()>>) -> Result<()> {
     // The file first, so a format we cannot read is said before any device is opened.
     let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
     let mut hint = Hint::new();
@@ -142,7 +145,8 @@ fn run(bytes: Vec<u8>, extension: Option<String>, device: Option<String>, contro
         .format(&hint, source, &FormatOptions { enable_gapless: true, ..Default::default() }, &MetadataOptions::default())
         .map_err(|e| anyhow!("this sound file cannot be read: {e}"))?;
     let mut format = probed.format;
-    let track = format.default_track().ok_or_else(|| anyhow!("this file has no sound in it"))?.clone();
+    // The first track with a codec symphonia knows: a video's sound sits next to its pictures.
+    let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).ok_or_else(|| anyhow!("this file has no sound in it"))?.clone();
     let track_id = track.id;
     let source_rate = track.codec_params.sample_rate.ok_or_else(|| anyhow!("this file does not say its sample rate"))?;
     if let (Some(frames), Some(tb)) = (track.codec_params.n_frames, track.codec_params.time_base) {
@@ -320,7 +324,7 @@ mod tests {
             eprintln!("no alsa:null; skipping");
             return;
         };
-        let playback = Playback::start(wav(0.6, 44_100), Some("wav"), Some(device)).unwrap();
+        let playback = Playback::start(Arc::from(wav(0.6, 44_100)), Some("wav"), Some(device)).unwrap();
         let duration = playback.duration().expect("a WAV says how long it is");
         assert!((duration - 0.6).abs() < 0.01, "{duration}");
         std::thread::sleep(Duration::from_millis(150));
@@ -337,7 +341,7 @@ mod tests {
 
     #[test]
     fn what_is_not_sound_says_so() {
-        assert!(Playback::start(b"not a sound file at all".to_vec(), Some("mp3"), null()).is_err());
+        assert!(Playback::start(Arc::from(&b"not a sound file at all"[..]), Some("mp3"), null()).is_err());
         assert!(playable("song.mp3", "application/octet-stream"));
         assert!(playable("x", "audio/ogg"));
         assert!(!playable("clip.mp4", "video/mp4"));

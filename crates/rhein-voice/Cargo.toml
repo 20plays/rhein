@@ -24,6 +24,8 @@ futures.workspace = true
 # the screen capturer needs on Wayland to talk to the desktop portal.
 libwebrtc = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", features = ["glib-main-loop"] }
 livekit = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false, features = ["native", "rustls-tls-webpki-roots"] }
+openh264 = "0.9"
+re_mp4 = "0.5"
 
 [dev-dependencies]
 livekit-api = { git = "https://github.com/livekit/rust-sdks", rev = "c20fa7c37e50cb97f1a588a6ad50534b53c2037e", default-features = false, features = ["access-token", "rustls-tls-webpki-roots"] }

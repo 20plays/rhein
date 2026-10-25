@@ -75,6 +75,8 @@ strip = true
 # openmls with Telium's GroupInfo external_pub encoding; see vendor/openmls/RHEIN.md.
 [patch.crates-io]
 openmls = { path = "vendor/openmls" }
+# OpenH264's decoder only, kept apart from the encoder libwebrtc links; see vendor/openh264-sys2/RHEIN.md.
+openh264-sys2 = { path = "vendor/openh264-sys2" }
 
 # libwebrtc with RtpTransceiver::set_direction for mesh calls; see vendor/libwebrtc/RHEIN.md.
 [patch."https://github.com/livekit/rust-sdks"]

@@ -249,50 +249,6 @@ impl Client {
 }
 
 impl Client {
-    /// Opens an encrypted attachment: downloads it, opens it with its key, saves it to the
-    /// downloads folder and hands it to the system.
-    pub fn open_dm_attachment(&mut self, conversation: &str, message_id: &str, index: usize, cx: &mut Context<Self>) {
-        let (Some(engine), Some(api)) = (self.dm_engine.clone(), self.home.as_ref().map(|h| h.api.clone())) else { return };
-        let (conv, id) = (conversation.to_owned(), message_id.to_owned());
-        let io = self.io.clone();
-        cx.spawn(async move |this, cx| {
-            let result = join(io.spawn(async move {
-                let attachment = {
-                    let engine = engine.lock().await;
-                    engine
-                        .conversation(&conv)
-                        .and_then(|c| c.messages.iter().find(|m| m.id == id))
-                        .and_then(|m| m.body.attachments.get(index).cloned())
-                        .ok_or_else(|| anyhow::anyhow!("that attachment is gone"))?
-                };
-                let bytes = Engine::fetch_attachment(&api, &attachment).await?;
-                let name = attachment["name"].as_str().unwrap_or("attachment").replace(['/', '\\'], "_");
-                let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
-                let mut path = dir.join(&name);
-                let mut n = 1;
-                while path.exists() {
-                    path = dir.join(format!("{n}-{name}"));
-                    n += 1;
-                }
-                tokio::fs::write(&path, bytes).await?;
-                Ok(path)
-            }))
-            .await;
-            this.update(cx, |this, cx| {
-                match result {
-                    Ok(path) => {
-                        this.notice = Some(format!("Saved to {}", path.display()).into());
-                        cx.open_with_system(&path);
-                    }
-                    Err(err) => this.error = Some(friendly(&err).into()),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     /// Opens the one-to-one conversation with someone, starting it (and its group) if there is
     /// none yet.
     pub fn message_user(&mut self, user_id: String, cx: &mut Context<Self>) {

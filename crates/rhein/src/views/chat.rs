@@ -24,7 +24,7 @@ use rhein_ui::{motion,
 };
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
-use crate::views::live::{LiveVideo, SpeakingFace};
+use crate::views::live::{LiveMovie, LiveVideo, SpeakingFace};
 use crate::views::part::{Part, part};
 use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::media::{self, Media};
@@ -108,6 +108,8 @@ pub struct ChatView {
     voice_chat: Option<(Entity<ChatView>, Subscription)>,
     /// The call's videos on the stage, each its own view: `(user, slot)` to it.
     live: HashMap<(String, rhein_store::Slot), Entity<LiveVideo>>,
+    /// The player of the video playing from a message, shown in its row.
+    movie: Entity<LiveMovie>,
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
@@ -244,6 +246,7 @@ impl ChatView {
                 }
             }),
         ];
+        let movie = cx.new(|cx| LiveMovie::new(client.clone(), cx));
         let mut this = Self {
             client,
             list,
@@ -279,6 +282,7 @@ impl ChatView {
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
             live: HashMap::new(),
+            movie,
             arrived: HashSet::new(),
             hovered_reaction: None,
             picture_sizes: Rc::default(),
@@ -1818,7 +1822,7 @@ impl ChatView {
         }
         let this = cx.entity();
         let client = self.client.clone();
-        let sound = client.read(cx).sound_tick.clone();
+        let sound = client.read(cx).media_tick.clone();
         let history = part(&this, |chat, window, cx| chat.history(window, cx), cx);
         history.update(cx, |p, cx| {
             p.watch(&client, cx);
@@ -1858,6 +1862,7 @@ impl ChatView {
             picture_sizes: self.picture_sizes.clone(),
             scale_factor: window.scale_factor(),
             parsed: self.parsed.clone(),
+            movie: self.movie.clone(),
         });
         let messages = rhein_ui::smooth_scroll(
             "history-glide",

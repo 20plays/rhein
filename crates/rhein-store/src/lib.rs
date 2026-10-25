@@ -23,5 +23,5 @@ pub mod social;
 pub mod sync_store;
 
 pub use client::banners::{Banner, BannerAction};
-pub use client::{now_ms, BotModal, ModalField, ActiveCall, CallMode, CallSpeaking, CallStatus, CallVideo, Client, ClientEvent, MediaProbe, Slot, SoundSource, SoundTick, SoundView, VoicePrefs, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
+pub use client::{now_ms, BotModal, ModalField, ActiveCall, CallMode, CallSpeaking, CallStatus, CallVideo, Client, ClientEvent, MediaProbe, Slot, DownloadView, MediaSource, MediaTick, MoviePlayer, MovieView, SoundView, free_download_path, safe_file_name, VoicePrefs, Divider, EmbedState, FriendAction, GuildEntry, Phase, ReadMark, SearchState, ServerStatus, Staged, StagedState};
 pub use io::Io;

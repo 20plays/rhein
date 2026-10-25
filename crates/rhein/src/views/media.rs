@@ -1,8 +1,6 @@
 //! Saving a picture from the chat to the downloads folder, or copying it to the clipboard. Both
 //! fetch the file itself (not GPUI's decoded copy), so a GIF keeps its animation.
 
-use std::path::PathBuf;
-
 use anyhow::{Context as _, Result, anyhow, ensure};
 use gpui::http_client::AsyncBody;
 use gpui::{App, AppContext as _, ClipboardItem, Entity, Image, ImageFormat};
@@ -29,7 +27,7 @@ pub fn download(client: &Entity<Client>, media: Media, cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = async {
             let bytes = fetch.await?;
-            let path = free_path(&file_name(&media, &bytes));
+            let path = rhein_store::free_download_path(&file_name(&media, &bytes));
             std::fs::write(&path, &bytes).with_context(|| format!("couldn't write {}", path.display()))?;
             Ok::<_, anyhow::Error>(path)
         }
@@ -121,18 +119,6 @@ fn file_name(media: &Media, bytes: &[u8]) -> String {
         name = format!("{name}.{}", extension(format));
     }
     name
-}
-
-/// `name` in the downloads folder, numbered when that file exists already.
-fn free_path(name: &str) -> PathBuf {
-    let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir);
-    let mut path = dir.join(name);
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("{n}-{name}"));
-        n += 1;
-    }
-    path
 }
 
 #[cfg(test)]

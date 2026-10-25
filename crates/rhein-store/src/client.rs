@@ -30,9 +30,13 @@ mod covers;
 mod gifs;
 mod notify;
 mod signals;
+mod media;
+mod movie;
 mod sound;
 pub use gifs::{GifShare, MediaProbe};
-pub use sound::{SoundSource, SoundTick, SoundView};
+pub use media::{DownloadView, MediaSource, MediaTick, free_download_path, safe_file_name};
+pub use movie::{MoviePlayer, MovieView};
+pub use sound::SoundView;
 pub use call::{ActiveCall, CallMode, CallSpeaking, CallStatus, CallVideo, VoicePrefs};
 pub use rhein_voice::Slot;
 use crate::persist::{self, Saved};
@@ -382,6 +386,8 @@ pub struct Client {
     sync: Option<std::sync::Arc<tokio::sync::Mutex<crate::sync_store::SyncStore>>>,
     /// The sound file loaded from a message.
     sound: Option<sound::Sound>,
+    /// Attachments being saved to the downloads folder, by message id and attachment index.
+    downloads: HashMap<String, media::Download>,
     /// `RHEIN_AUDIO=null`: calls open ALSA's null devices.
     null_audio: bool,
     /// Whether the microphone was already muted when deafening muted it, so undeafening leaves
@@ -392,7 +398,9 @@ pub struct Client {
     /// times a second, and only the views showing them should redraw.
     pub call_video: Entity<CallVideo>,
     pub call_speaking: Entity<CallSpeaking>,
-    pub sound_tick: Entity<SoundTick>,
+    pub media_tick: Entity<MediaTick>,
+    /// The video playing from a message, apart from the client for the same reason.
+    pub movie_player: Entity<MoviePlayer>,
     /// Renews guild sessions before they run out (every minute, see `freshen_sessions`).
     renew_ticker: Option<Task<()>>,
     /// guild id → user id → their voice state (only users in a channel).
@@ -514,7 +522,9 @@ impl Client {
             speaking_task: None,
             call_video: cx.new(|_| CallVideo::default()),
             call_speaking: cx.new(|_| CallSpeaking::default()),
-            sound_tick: cx.new(|_| SoundTick),
+            media_tick: cx.new(|_| MediaTick),
+            movie_player: cx.new(|_| MoviePlayer::default()),
+            downloads: HashMap::new(),
             renew_ticker: None,
             signin: None,
             mfa_required: false,
@@ -745,6 +755,7 @@ impl Client {
         }
         let next = me.and_then(|id| persist::remove(&id));
         self.reset();
+        self.stop_movie(cx);
         self.returning_to = None;
         match next {
             Some(_) => {
@@ -773,6 +784,7 @@ impl Client {
         }
         log::info!("switching to {user_id}");
         self.reset();
+        self.stop_movie(cx);
         self.returning_to = None;
         self.phase = Phase::Restoring;
         self.restore(cx);
@@ -784,6 +796,7 @@ impl Client {
     pub fn add_account(&mut self, cx: &mut Context<Self>) {
         let back = self.home.as_ref().map(|h| (h.user_id.clone(), h.display_name.clone().unwrap_or_else(|| localpart(&h.user_id).to_owned())));
         self.reset();
+        self.stop_movie(cx);
         self.returning_to = back;
         self.phase = Phase::SignedOut;
         cx.notify();
@@ -851,6 +864,7 @@ impl Client {
         self.signin = None;
         self.call = None;
         self.sound = None;
+        self.downloads.clear();
         self.gif_favorites.clear();
         self.gif_shares.clear();
         self.media_kinds.clear();
