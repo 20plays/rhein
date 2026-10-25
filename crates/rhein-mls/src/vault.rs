@@ -189,6 +189,9 @@ pub fn new_vault_body(keyring: &Keyring, wrapper: &Key) -> Value {
         "mode": "opaque_custody",
         "ciphertext": seal(wrapper, &keyring.encode()),
         "independent_ciphertext": null,
+        // Compare-and-swap: written only if the account has no vault yet, so a vault another
+        // device made meanwhile is never overwritten.
+        "expected_version": 0,
     })
 }
 

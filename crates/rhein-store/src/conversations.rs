@@ -290,11 +290,13 @@ impl Engine {
     pub async fn verify_claimed(&mut self, api: &Api, user: &str, device: &str, key_b64: &str) -> Option<bool> {
         let list = api.device_list(user).await.ok()?;
         let identity_key = list["identity_key"].as_str()?.to_owned();
+        let mut chain = None;
         if let Ok(doc) = api.identity_document(user).await {
             match trust::verify_identity_document(&doc, Some(user)) {
                 Ok(Some(c)) => match trust::check_pin(self.stored.pins.get(user), &c) {
                     Ok(pin) if c.current_key == identity_key => {
                         self.stored.pins.insert(user.to_owned(), pin);
+                        chain = Some(c);
                     }
                     _ => return Some(false),
                 },
@@ -302,6 +304,12 @@ impl Engine {
                 Ok(None) => {}
                 Err(_) => return Some(false),
             }
+        }
+        // A key the account's root revoked is never trusted again: no KeyPackage, no rejoin.
+        let revoked = trust::revoked_keys(user, chain.as_ref(), Some(&identity_key), &list["revocations"]);
+        if revoked.contains(key_b64) {
+            log::warn!("{user}'s device {device} uses a revoked key");
+            return Some(false);
         }
         let entry = list["devices"].as_array()?.iter().find(|d| d["device_id"] == device)?;
         Some(entry["mls_key"] == key_b64 && trust::device_is_vouched(user, &identity_key, entry))

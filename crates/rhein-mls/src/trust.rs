@@ -156,6 +156,33 @@ pub fn device_is_vouched(user_id: &str, identity_key_b64: &str, device: &Value) 
     device["active"].as_bool() != Some(false) && verifies(identity_key_b64, &device_payload(user_id, device_id, mls_key), sig)
 }
 
+/// The MLS keys an account revoked: statements (`revocations` on `GET /crosssigning` and
+/// `GET /users/{id}/devices`) signed by a root of the account's verified chain over
+/// `telium-device-revoke:v1|{user}|{tid}|{device}|{mls_key}`. A server can withhold a statement
+/// but not forge one, so only verified ones count. Without a continuity document the account's
+/// published identity key is its only root.
+pub fn revoked_keys(user_id: &str, continuity: Option<&Continuity>, identity_key: Option<&str>, statements: &Value) -> std::collections::HashSet<String> {
+    let roots: Vec<String> = match continuity {
+        Some(c) => c.keys.values().cloned().collect(),
+        None => identity_key.map(str::to_owned).into_iter().collect(),
+    };
+    let tid = match continuity {
+        Some(c) => Some(c.immutable_id.clone()),
+        None => identity_key.and_then(|k| immutable_id(k).ok()),
+    };
+    let Some(tid) = tid else { return Default::default() };
+    statements
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            let (device, key, sig) = (s["device_id"].as_str()?, s["mls_key"].as_str()?, s["signature"].as_str()?);
+            let payload = revoke_payload(user_id, &tid, device, key);
+            roots.iter().any(|root| verifies(root, &payload, sig)).then(|| key.to_owned())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guardian {
     pub user_id: String,
@@ -389,6 +416,29 @@ pub fn check_pin(pinned: Option<&Pin>, c: &Continuity) -> Result<Pin, &'static s
         }
     }
     Ok(next)
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+
+    #[test]
+    fn only_root_signed_revocations_count() {
+        let root = IdentityKey::from_secret(&[3; 32]).unwrap();
+        let other = IdentityKey::from_secret(&[4; 32]).unwrap();
+        let public = root.public_b64();
+        let tid = immutable_id(&public).unwrap();
+        let good = root.revoke_device("@a:x", &tid, "D1", "KEY1");
+        let forged = other.revoke_device("@a:x", &tid, "D2", "KEY2");
+        let statements = serde_json::json!([
+            { "device_id": "D1", "mls_key": "KEY1", "signature": good },
+            { "device_id": "D2", "mls_key": "KEY2", "signature": forged },
+            { "device_id": "D3", "mls_key": "KEY3", "signature": good },
+        ]);
+        let revoked = revoked_keys("@a:x", None, Some(&public), &statements);
+        assert_eq!(revoked.into_iter().collect::<Vec<_>>(), vec!["KEY1".to_owned()]);
+        assert!(revoked_keys("@a:x", None, None, &statements).is_empty());
+    }
 }
 
 #[cfg(test)]
