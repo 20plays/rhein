@@ -77,7 +77,7 @@ impl RenderOnce for Avatar {
             .font_weight(FontWeight::SEMIBOLD)
             .child(letter);
         let face = match self.image {
-            Some(url) => img(crate::scaled_image::scaled(url, size, window))
+            Some(url) => img(crate::images::scaled(url, size, window))
                 .size(size)
                 .rounded_full()
                 .object_fit(ObjectFit::Cover)

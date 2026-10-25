@@ -379,7 +379,7 @@ fn jumbo(doc: &Document, ctx: &Context, t: &Theme, cx: &App) -> AnyElement {
                         Some(url) => {
                             let pic = n;
                             n += 1;
-                            row = row.child(img(url).id(("jumbo", pic)).size(px(48.)).with_fallback({
+                            row = row.child(img(rhein_ui::images::source(url)).id(("jumbo", pic)).size(px(48.)).with_fallback({
                                 let name = name.clone();
                                 move || div().text_size(text::MD).child(format!(":{name}:")).into_any_element()
                             }))

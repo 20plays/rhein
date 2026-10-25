@@ -6,6 +6,7 @@ use gpui::{
     StyledImage as _, div, img, prelude::*, px,
 };
 use rhein_proto::Activity;
+use rhein_ui::images;
 use rhein_ui::theme::{FONT_MONO, radius, text};
 use rhein_ui::{Button, Icon, Theme, icon_sized};
 
@@ -30,7 +31,7 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
         .items_center()
         .justify_center()
         .child(match large {
-            Some(url) => img(url).size(px(ART)).rounded(radius::MD).object_fit(ObjectFit::Cover).into_any_element(),
+            Some(url) => img(images::source(url)).size(px(ART)).rounded(radius::MD).object_fit(ObjectFit::Cover).into_any_element(),
             None => icon_sized(glyph, px(24.)).text_color(t.text_faint).into_any_element(),
         })
         .children(small.map(|url| {
@@ -41,7 +42,7 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
                 .p(px(2.))
                 .rounded_full()
                 .bg(t.bg_panel)
-                .child(img(url).size(px(SMALL_ART)).rounded_full().object_fit(ObjectFit::Cover))
+                .child(img(images::source(url)).size(px(SMALL_ART)).rounded_full().object_fit(ObjectFit::Cover))
         }));
 
     let line = |s: &Option<String>| s.clone().map(|s| div().text_size(text::SM).text_color(t.text_muted).truncate().child(s));

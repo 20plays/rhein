@@ -577,13 +577,10 @@ impl ChatView {
         }
         for picture in pictures {
             self.prefetched.insert(picture.clone());
-            let resource = gpui::Resource::Uri(gpui::SharedUri::from(picture.clone()));
-            let (task, _) = cx.fetch_asset::<gpui::ImgResourceLoader>(&resource);
+            // Only its size, from the header: the picture itself is decoded when drawn.
+            let task = rhein_ui::images::probe(picture.clone(), cx);
             cx.spawn(async move |this, cx| {
-                let size = task.await.ok().map(|image| {
-                    let size = image.size(0);
-                    (size.width.0.max(0) as u32, size.height.0.max(0) as u32)
-                });
+                let size = task.await;
                 this.update(cx, |this, cx| {
                     if let Some(size) = size {
                         this.picture_sizes.borrow_mut().insert(picture.clone(), size);
@@ -1066,7 +1063,7 @@ impl ChatView {
                             .size(px(24.))
                             .image(url.clone().map(Into::into))
                             .into_any_element(),
-                        (_, Some(url), _) => img(url.clone()).size(px(22.)).into_any_element(),
+                        (_, Some(url), _) => img(rhein_ui::images::source(url.clone())).size(px(22.)).into_any_element(),
                         (_, _, Some(i)) => icon(i).text_color(t.text_muted).into_any_element(),
                         _ => div().w(px(24.)).text_size(px(18.)).font_family(rhein_ui::theme::FONT_EMOJI).child(item.insert.clone()).into_any_element(),
                     };
@@ -1844,9 +1841,9 @@ impl ChatView {
                     StagedState::Failed(err) => (format!("Failed: {err}"), t.danger),
                 };
                 let thumb: Option<gpui::AnyElement> = match (&s.preview, &s.state) {
-                    (Some(image), _) => Some(img(image.clone()).size(px(40.)).rounded(radius::SM).object_fit(ObjectFit::Cover).into_any_element()),
+                    (Some(image), _) => Some(img(rhein_ui::images::local(image.clone(), px(40.), window)).size(px(40.)).rounded(radius::SM).object_fit(ObjectFit::Cover).into_any_element()),
                     (None, StagedState::Ready(a)) if a.is_image() => a.url.clone().map(|u| {
-                        img(u).size(px(40.)).rounded(radius::SM).object_fit(ObjectFit::Cover).into_any_element()
+                        img(rhein_ui::images::source(u)).size(px(40.)).rounded(radius::SM).object_fit(ObjectFit::Cover).into_any_element()
                     }),
                     _ => None,
                 };
@@ -2000,7 +1997,7 @@ impl ChatView {
         let viewport = window.viewport_size();
         // Room left by the padding (`p_8`), the caption row and the gap above it.
         let bound = gpui::size(viewport.width - px(64.), (viewport.height - px(64.) - px(48.)) * 0.95);
-        let picture = rhein_ui::scaled_image::fit(url, bound, window, cx);
+        let picture = rhein_ui::images::fit(url, bound, window, cx);
         let overlay = div()
             .id("lightbox")
             .occlude()
@@ -2142,7 +2139,7 @@ impl Render for ChatView {
                 let tile = div().size(side).flex_none().ml(px(-16.)).mr_1().overflow_hidden().bg(t.bg_selected).flex().items_center().justify_center();
                 match client.guild_icon_url(&g.guild.id) {
                     // Shrunk properly to the pixels it covers: GPUI's own sampling is jagged.
-                    Some(url) => tile.child(gpui::img(rhein_ui::scaled_image::scaled(url, side, window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
+                    Some(url) => tile.child(gpui::img(rhein_ui::images::scaled(url, side, window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
                     None => tile
                         .text_size(text::LG)
                         .font_weight(FontWeight::SEMIBOLD)

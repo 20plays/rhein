@@ -11,6 +11,7 @@ use gpui::{
 };
 use rhein_store::Client;
 use rhein_store::emoji::{self, GROUPS};
+use rhein_ui::images;
 use rhein_ui::theme::{FONT_EMOJI, radius, text};
 use rhein_ui::{ActiveTheme as _, Dismiss, InputEvent, TextInput, tooltip};
 
@@ -351,7 +352,7 @@ fn glyph(g: &Glyph) -> AnyElement {
         Glyph::Unicode(s) => div().font_family(FONT_EMOJI).child(s.clone()).into_any_element(),
         Glyph::Custom { url, name } => {
             let name = name.clone();
-            img(url.clone())
+            img(images::source(url.clone()))
                 .size(px(24.))
                 .with_fallback(move || div().text_size(text::XS).child(format!(":{name}:")).into_any_element())
                 .into_any_element()

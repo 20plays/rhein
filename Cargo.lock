@@ -7081,6 +7081,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "bytes",
  "dirs",
  "env_logger",
  "gpui",
@@ -7224,6 +7225,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "emojis",
+ "futures",
  "gpui",
  "image",
  "log",

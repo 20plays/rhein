@@ -132,7 +132,7 @@ impl GuildSettingsView {
                 .flex_col()
                 .items_center()
                 .gap_1()
-                .child(div().size(px(size)).flex().items_center().justify_center().children(url.map(|u| img(u).size_full().object_fit(gpui::ObjectFit::Contain))))
+                .child(div().size(px(size)).flex().items_center().justify_center().children(url.map(|u| img(rhein_ui::images::source(u)).size_full().object_fit(gpui::ObjectFit::Contain))))
                 .child(div().w_full().truncate().text_center().text_size(text::XS).text_color(t.text_muted).child(format!(":{name}:")))
                 .when(deletable, |d| {
                     d.child(

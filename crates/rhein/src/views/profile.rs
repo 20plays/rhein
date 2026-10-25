@@ -7,6 +7,7 @@ use gpui::{
     linear_color_stop, linear_gradient, px,
 };
 use rhein_ui::Theme;
+use rhein_ui::images;
 use rhein_ui::theme::radius;
 
 /// The web client's curated accents; each reads well behind a white name.
@@ -105,7 +106,7 @@ pub fn header_sized(look: &Look, face: AnyElement, face_size: f32, banner_h: f32
                 .h(px(banner_h))
                 .bg(fill)
                 .overflow_hidden()
-                .children(look.banner.clone().map(|url| img(url).size_full().object_fit(ObjectFit::Cover))),
+                .children(look.banner.clone().map(|url| img(images::source(url)).size_full().object_fit(ObjectFit::Cover))),
         )
         .child(
             div()

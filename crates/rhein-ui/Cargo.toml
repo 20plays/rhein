@@ -7,11 +7,12 @@ description = "Rhein's design system: theme tokens, fonts, icons and components 
 
 [dependencies]
 anyhow.workspace = true
+futures.workspace = true
 gpui.workspace = true
 log.workspace = true
 unicode-segmentation.workspace = true
 emojis.workspace = true
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

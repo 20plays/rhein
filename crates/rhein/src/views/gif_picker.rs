@@ -13,7 +13,7 @@ use rhein_store::Client;
 use rhein_store::MediaProbe;
 use rhein_store::client::GifShare;
 use rhein_store::gif_links;
-use rhein_ui::scaled_image::{self, Fitted};
+use rhein_ui::images::{self, Fitted};
 use rhein_ui::theme::{radius, text};
 use rhein_ui::{ActiveTheme as _, Dismiss, Icon, IconButton, InputEvent, TextInput, Theme};
 
@@ -170,7 +170,7 @@ fn tile(idx: usize, url: String, preview: Preview, t: &Theme, view: WeakEntity<G
     let name = url.rsplit('/').next().unwrap_or(&url).to_owned();
     let picture = match preview {
         // Not loaded yet: only a width, GPUI's img takes the height from the aspect ratio.
-        Preview::Image(media) => img(media)
+        Preview::Image(media) => img(images::source(media))
             .id("pic")
             .w(px(TILE_W))
             .with_loading(move || note("Loading…", faint))
@@ -282,7 +282,7 @@ impl Render for GifPicker {
                     let preview = match preview {
                         Preview::Image(media) => {
                             let bound = gpui::size(px(TILE_W), px(f32::MAX));
-                            match scaled_image::fit(media.clone(), bound, window, cx) {
+                            match images::fit(media.clone(), bound, window, cx) {
                                 fitted @ Fitted { size: Some(_), .. } => Preview::Fitted(fitted),
                                 _ => Preview::Image(media),
                             }

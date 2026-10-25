@@ -18,11 +18,12 @@ pub mod status;
 pub mod switcher;
 
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window,
-    div,
+    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Subscription, Task,
+    Window, div,
 };
 use rhein_store::{Client, Phase};
 use rhein_ui::ActiveTheme as _;
+use rhein_ui::images;
 use rhein_ui::theme::{FONT_UI, text};
 
 use login::LoginView;
@@ -34,12 +35,22 @@ pub struct Root {
     login: Option<Entity<LoginView>>,
     shell: Option<Entity<Shell>>,
     _sub: Subscription,
+    _sweep: Task<()>,
 }
 
 impl Root {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sub = cx.observe_in(&client, window, |this, _, window, cx| this.sync(window, cx));
-        let mut this = Self { client, login: None, shell: None, _sub: sub };
+        // Pictures off screen for a while are dropped even when nothing redraws.
+        let sweep = cx.spawn_in(window, async move |_, cx| {
+            loop {
+                cx.background_executor().timer(images::SWEEP_EVERY).await;
+                if cx.update(|window, cx| images::sweep(window, cx)).is_err() {
+                    return;
+                }
+            }
+        });
+        let mut this = Self { client, login: None, shell: None, _sub: sub, _sweep: sweep };
         this.sync(window, cx);
         this
     }
@@ -51,6 +62,7 @@ impl Root {
         if !signed_in {
             self.shell = None;
         }
+        let had = (self.login.is_some(), self.shell.is_some());
         if signed_in && self.shell.is_none() {
             let client = self.client.clone();
             self.shell = Some(cx.new(|cx| Shell::new(client, window, cx)));
@@ -60,12 +72,16 @@ impl Root {
             self.login = Some(cx.new(|cx| LoginView::new(client, window, cx)));
             self.shell = None;
         }
-        cx.notify();
+        // Only a swap of screens is ours to draw; everything else redraws the view it is in.
+        if had != (self.login.is_some(), self.shell.is_some()) {
+            cx.notify();
+        }
     }
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        images::begin_frame(window, cx);
         let t = cx.theme();
         let root = div()
             .size_full()

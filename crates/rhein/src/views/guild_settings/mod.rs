@@ -333,7 +333,7 @@ pub(crate) fn guild_face(name: &str, url: Option<String>, size: f32, t: &Theme, 
         .text_color(t.text);
     match url {
         // Shrunk properly to the pixels it covers: GPUI's own sampling is jagged.
-        Some(url) => tile.child(img(rhein_ui::scaled_image::scaled(url, px(size), window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
+        Some(url) => tile.child(img(rhein_ui::images::scaled(url, px(size), window)).size_full().object_fit(gpui::ObjectFit::Cover)).into_any_element(),
         None => tile.child(initial).into_any_element(),
     }
 }

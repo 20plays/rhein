@@ -15,7 +15,7 @@ use rhein_store::client::GifShare;
 use rhein_store::gif_links::MediaKind;
 use rhein_store::MediaProbe;
 use rhein_store::{Client, EmbedState, gif_links, markdown};
-use rhein_ui::scaled_image::{Fitted, fitted};
+use rhein_ui::images::{self, Fitted, fitted};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
 
@@ -769,7 +769,7 @@ fn reaction_emoji(emoji: &str, id: (usize, usize), client: &Client, guild_id: Op
         return div().child(format!(":{name}:")).into_any_element();
     };
     let name = name.clone();
-    img(url)
+    img(images::source(url))
         .id(SharedString::from(format!("react-emoji-{}-{}", id.0, id.1)))
         .size(px(18.))
         .object_fit(ObjectFit::Contain)
@@ -1230,10 +1230,10 @@ fn bot_card(ix: usize, n: usize, card: &rhein_proto::Card, bot: &str, api_base: 
                         }))
                         .children(card.description.clone().map(|d| div().text_size(text::SM).text_color(t.text_muted).child(clip(&d, 4096))))
                         .when(!card.fields.is_empty(), |d| d.child(fields))
-                        .children(image.map(|src| img(src).mt_1().max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain).rounded(radius::MD)))
+                        .children(image.map(|src| img(images::source(src)).mt_1().max_w(px(IMAGE_MAX_W)).max_h(px(PICTURE_MAX_H)).object_fit(ObjectFit::Contain).rounded(radius::MD)))
                         .when(!footer.is_empty(), |d| d.child(div().text_size(text::XS).text_color(t.text_faint).child(clip(&footer, 2048)))),
                 )
-                .children(thumb.map(|src| img(src).size(px(64.)).flex_none().rounded(radius::MD).object_fit(ObjectFit::Cover))),
+                .children(thumb.map(|src| img(images::source(src)).size(px(64.)).flex_none().rounded(radius::MD).object_fit(ObjectFit::Cover))),
         )
         .into_any_element()
 }

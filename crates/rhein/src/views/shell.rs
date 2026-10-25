@@ -2530,7 +2530,7 @@ impl Shell {
                         .items_center()
                         .justify_center()
                         .child(match art {
-                            Some(url) => gpui::img(url).size(px(40.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
+                            Some(url) => gpui::img(rhein_ui::images::source(url)).size(px(40.)).object_fit(gpui::ObjectFit::Cover).into_any_element(),
                             None => icon_sized(glyph, px(18.)).text_color(t.text_faint).into_any_element(),
                         }),
                 )
