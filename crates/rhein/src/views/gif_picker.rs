@@ -338,7 +338,8 @@ impl Render for GifPicker {
                     .into_any_element()
             }
         };
-        let toggle = IconButton::new("gif-expand", Icon::Maximize)
+        // The picker grows to the left: the arrow points where it goes.
+        let toggle = IconButton::new("gif-expand", if wide { Icon::ArrowRight } else { Icon::ArrowLeft })
             .active(wide)
             .tooltip(if wide { "Two columns" } else { "Four columns" })
             .on_click(cx.listener(|this, _, _, cx| {

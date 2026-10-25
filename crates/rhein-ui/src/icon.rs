@@ -7,6 +7,8 @@ use crate::theme::size;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     ArrowDown,
+    ArrowLeft,
+    ArrowRight,
     AtSign,
     Ban,
     Bot,
@@ -39,6 +41,7 @@ pub enum Icon {
     LoaderCircle,
     Lock,
     Maximize,
+    Minimize,
     LogIn,
     LogOut,
     Mail,
@@ -86,6 +89,8 @@ impl Icon {
     pub fn path(self) -> &'static str {
         match self {
             Icon::ArrowDown => "icons/arrow-down.svg",
+            Icon::ArrowLeft => "icons/arrow-left.svg",
+            Icon::ArrowRight => "icons/arrow-right.svg",
             Icon::AtSign => "icons/at-sign.svg",
             Icon::Bell => "icons/bell.svg",
             Icon::Check => "icons/check.svg",
@@ -152,6 +157,7 @@ impl Icon {
             Icon::Clock => "icons/clock.svg",
             Icon::ScreenShareOff => "icons/screen-share-off.svg",
             Icon::Maximize => "icons/maximize-2.svg",
+            Icon::Minimize => "icons/minimize-2.svg",
             Icon::UserCheck => "icons/user-check.svg",
             Icon::Bot => "icons/bot.svg",
             Icon::Inbox => "icons/inbox.svg",

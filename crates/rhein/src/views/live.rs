@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    Bounds, Context, Entity, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Pixels, Render, SharedString,
+    Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Window, canvas, div, img, prelude::FluentBuilder as _,
     px, relative,
 };
@@ -82,14 +82,28 @@ impl Render for SpeakingFace {
 pub struct LiveMovie {
     client: Entity<Client>,
     player: Entity<MoviePlayer>,
+    /// Shown large over the window instead of in its row.
+    big: bool,
     _watch: Subscription,
 }
+
+/// The player's button asks for it to be shown large, or back in its row.
+pub struct ToggleBig;
+
+impl EventEmitter<ToggleBig> for LiveMovie {}
 
 impl LiveMovie {
     pub fn new(client: Entity<Client>, cx: &mut Context<Self>) -> Self {
         let player = client.read(cx).movie_player.clone();
         let watch = cx.observe(&player, |_, _, cx| cx.notify());
-        Self { client, player, _watch: watch }
+        Self { client, player, big: false, _watch: watch }
+    }
+
+    pub fn set_big(&mut self, big: bool, cx: &mut Context<Self>) {
+        if self.big != big {
+            self.big = big;
+            cx.notify();
+        }
     }
 }
 
@@ -174,7 +188,12 @@ impl Render for LiveMovie {
                                 c3.update(cx, |c, cx| c.seek_movie(&key, fraction, cx));
                             }),
                     )
-                    .child(div().flex_none().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_muted).child(SharedString::from(times))),
+                    .child(div().flex_none().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_muted).child(SharedString::from(times)))
+                    .child(
+                        IconButton::new("movie-big", if self.big { Icon::Minimize } else { Icon::Maximize })
+                            .tooltip(if self.big { "Back into the chat" } else { "Enlarge" })
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ToggleBig))),
+                    ),
             )
     }
 }

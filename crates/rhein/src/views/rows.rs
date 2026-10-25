@@ -61,6 +61,8 @@ pub struct RowCtx {
     pub parsed: ParsedCache,
     /// The player of the video playing, shown in its row.
     pub movie: Entity<crate::views::live::LiveMovie>,
+    /// The player is shown large over the window, not in its row.
+    pub movie_big: bool,
 }
 
 /// What a message's text parses to, which depends on nothing but the text: worked out once,
@@ -1111,7 +1113,9 @@ fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let scale = (VIDEO_MAX.0 / w).min(VIDEO_MAX.1 / h);
     let size = gpui::size(px(w * scale), px(h * scale));
     let group = SharedString::from(format!("video-group-{ix}-{i}"));
-    let body = if loaded {
+    let body = if loaded && ctx.movie_big {
+        div().size_full().flex().items_center().justify_center().text_size(text::SM).text_color(gpui::white()).child("Playing enlarged").into_any_element()
+    } else if loaded {
         ctx.movie.clone().into_any_element()
     } else {
         let (client, key, source) = (ctx.client.clone(), key.clone(), source.clone());

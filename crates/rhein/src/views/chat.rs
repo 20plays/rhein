@@ -24,7 +24,7 @@ use rhein_ui::{motion,
 };
 
 use crate::views::emoji_picker::{EmojiPicker, Picked};
-use crate::views::live::{LiveMovie, LiveVideo, SpeakingFace};
+use crate::views::live::{LiveMovie, LiveVideo, SpeakingFace, ToggleBig};
 use crate::views::part::{Part, part};
 use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::media::{self, Media};
@@ -110,6 +110,8 @@ pub struct ChatView {
     live: HashMap<(String, rhein_store::Slot), Entity<LiveVideo>>,
     /// The player of the video playing from a message, shown in its row.
     movie: Entity<LiveMovie>,
+    /// The player is shown large over the window instead (its button, like a picture's lightbox).
+    movie_big: bool,
     /// Pictures asked for ahead of the view, and the ones that have arrived.
     prefetched: HashSet<String>,
     arrived: HashSet<String>,
@@ -212,7 +214,7 @@ impl ChatView {
         }
         let composer = cx.new(|cx| TextInput::new("message", cx).multiline(COMPOSER_LINES).block_cursor().bare());
         let speaking = client.read(cx).call_speaking.clone();
-        let subs = vec![
+        let mut subs = vec![
             cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Submit => this.submit(window, cx),
                 InputEvent::Changed => {
@@ -247,6 +249,7 @@ impl ChatView {
             }),
         ];
         let movie = cx.new(|cx| LiveMovie::new(client.clone(), cx));
+        subs.push(cx.subscribe_in(&movie, window, |this, _, _: &ToggleBig, window, cx| this.set_movie_big(!this.movie_big, window, cx)));
         let mut this = Self {
             client,
             list,
@@ -283,6 +286,7 @@ impl ChatView {
             prefetched: HashSet::new(),
             live: HashMap::new(),
             movie,
+            movie_big: false,
             arrived: HashSet::new(),
             hovered_reaction: None,
             picture_sizes: Rc::default(),
@@ -751,6 +755,57 @@ impl ChatView {
         self.lightbox = Some((url, name));
         window.focus(&self.lightbox_focus, cx);
         cx.notify();
+    }
+
+    fn set_movie_big(&mut self, big: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.movie_big = big;
+        self.movie.update(cx, |m, cx| m.set_big(big, cx));
+        let focus = if big { self.lightbox_focus.clone() } else { self.composer_focus(cx) };
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// The playing video, large over the window: the chat's one player, taken out of its row.
+    fn render_movie_big(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !self.movie_big {
+            return None;
+        }
+        let Some(view) = self.client.read(cx).movie_player.read(cx).view() else {
+            // The video was stopped meanwhile.
+            self.movie_big = false;
+            self.movie.update(cx, |m, cx| m.set_big(false, cx));
+            return None;
+        };
+        let t = cx.theme().clone();
+        let viewport = window.viewport_size();
+        let (w, h) = view.size.filter(|(w, h)| *w > 0 && *h > 0).map_or((16., 9.), |(w, h)| (w as f32, h as f32));
+        // Within the padding (`p_8`), as large as fits.
+        let scale = (f32::from(viewport.width - px(64.)) / w).min(f32::from(viewport.height - px(64.)) / h);
+        let overlay = div()
+            .id("movie-big")
+            .occlude()
+            .track_focus(&self.lightbox_focus)
+            .key_context(LIGHTBOX_CONTEXT)
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.set_movie_big(false, window, cx)))
+            .w(viewport.width)
+            .h(viewport.height)
+            .bg(t.overlay)
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .on_click(cx.listener(|this, _, window, cx| this.set_movie_big(false, window, cx)))
+            .child(
+                div()
+                    .id("movie-big-box")
+                    .w(px(w * scale))
+                    .h(px(h * scale))
+                    .rounded(rhein_ui::theme::radius::LG)
+                    .overflow_hidden()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(self.movie.clone()),
+            );
+        Some(deferred(anchored().position(gpui::point(px(0.), px(0.))).child(overlay)).with_priority(3).into_any_element())
     }
 
     fn close_lightbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1863,6 +1918,7 @@ impl ChatView {
             scale_factor: window.scale_factor(),
             parsed: self.parsed.clone(),
             movie: self.movie.clone(),
+            movie_big: self.movie_big,
         });
         let messages = rhein_ui::smooth_scroll(
             "history-glide",
@@ -2396,6 +2452,7 @@ impl Render for ChatView {
         let dm_call = if is_dm { self.render_dm_call(&channel_id, cx) } else { None };
         let composer = self.render_composer(&channel_id, window, cx);
         let lightbox = self.render_lightbox(window, cx);
+        let movie_big = self.render_movie_big(window, cx);
         let suggestions = self.render_suggestions(cx);
         let delete_confirm = self.render_delete_confirm(cx);
         let picker = self.render_picker();
@@ -2413,7 +2470,7 @@ impl Render for ChatView {
                     // A click into the chat focuses it (an input clicked takes the focus back as
                     // the event reaches it), so typing afterwards goes to the message bar. An
                     // open overlay keeps the focus it has.
-                    if this.lightbox.is_none() && this.picker.is_none() && this.gif_picker.is_none() {
+                    if this.lightbox.is_none() && !this.movie_big && this.picker.is_none() && this.gif_picker.is_none() {
                         window.focus(&this.select_focus, cx);
                     }
                 }
@@ -2475,6 +2532,7 @@ impl Render for ChatView {
             .child(composer)
             .children(suggestions)
             .children(lightbox)
+            .children(movie_big)
             .children(delete_confirm)
             .children(picker)
             .children(gif_picker)
