@@ -171,7 +171,10 @@ impl Client {
             }
             // New words from someone else, in a conversation not in front of you.
             let open = self.home_conversation.as_deref() == Some(id) && self.window_active;
-            if !open && !self.is_request(id) {
+            // A conversation muted here or in the web client (the shared `muted` preference, or
+            // the home server's own mute) stays quiet.
+            let muted = self.is_muted(id) || self.conversations.iter().any(|c| c.id == id && c.muted);
+            if !open && !self.is_request(id) && !muted {
                 for (author, text) in fresh {
                     let sender = self.display_name(None, &author);
                     self.alert(notify::Alert::Direct, &sender, None, &text, cx);

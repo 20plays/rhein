@@ -9,7 +9,7 @@ use zbus::zvariant::{OwnedValue, Value as ZValue};
 use zbus::{Connection, Proxy};
 
 use crate::detect::now_ms;
-use crate::{PRIORITY_DETECTED, Report, Reports, SourceEvent};
+use crate::{PRIORITY_MEDIA, Report, Reports, SourceEvent};
 
 const PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PATH: &str = "/org/mpris/MediaPlayer2";
@@ -19,6 +19,7 @@ const SEEK_TOLERANCE_MS: u64 = 2500;
 const BROWSERS: [&str; 9] = ["firefox", "mozilla", "chrom", "brave", "vivaldi", "opera", "edge", "zen", "librewolf"];
 const MUSIC_SITES: [&str; 6] = ["music.youtube.com", "open.spotify.com", "soundcloud.com", "bandcamp.com", "music.apple.com", "deezer.com"];
 const VIDEO_SITES: [&str; 6] = ["youtube.com", "youtu.be", "twitch.tv", "netflix.com", "vimeo.com", "primevideo.com"];
+const VIDEO_FILES: [&str; 9] = ["mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "flv", "m3u8"];
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Track {
@@ -28,6 +29,8 @@ pub struct Track {
     pub album: Option<String>,
     pub art: Option<String>,
     pub url: Option<String>,
+    /// `xesam:mimeType`, when the player names what it plays.
+    pub mime: Option<String>,
     pub length_ms: Option<u64>,
     pub position_ms: u64,
 }
@@ -42,7 +45,20 @@ pub fn activity(track: &Track, start: u64) -> Option<Value> {
     let host = track.url.as_deref().and_then(|u| url::Url::parse(u).ok()).and_then(|u| u.host_str().map(str::to_owned));
     let on = |sites: &[&str]| host.as_deref().is_some_and(|h| sites.iter().any(|s| h == *s || h.ends_with(&format!(".{s}"))));
     let browser = BROWSERS.iter().any(|b| track.player.to_lowercase().contains(b));
-    let video = if browser { !on(&MUSIC_SITES) } else { on(&VIDEO_SITES) };
+    let file_is_video = track
+        .url
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.path().rsplit('.').next().map(str::to_ascii_lowercase))
+        .is_some_and(|ext| VIDEO_FILES.contains(&ext.as_str()));
+    // A player that names the media type is believed first.
+    let video = match track.mime.as_deref().map(str::to_ascii_lowercase) {
+        Some(m) if m.starts_with("video/") => true,
+        Some(m) if m.starts_with("audio/") => false,
+        _ if file_is_video => true,
+        _ if browser => !on(&MUSIC_SITES),
+        _ => on(&VIDEO_SITES),
+    };
     let mut timestamps = json!({ "start": start });
     if let Some(length) = track.length_ms.filter(|l| *l > 0) {
         timestamps["end"] = json!(start + length);
@@ -121,6 +137,7 @@ async fn playing(conn: &Connection) -> zbus::Result<(Vec<String>, Option<Track>)
             album: get("xesam:album").and_then(text),
             art: get("mpris:artUrl").and_then(text),
             url: get("xesam:url").and_then(text),
+            mime: get("xesam:mimeType").and_then(text),
             length_ms: get("mpris:length").and_then(number).map(|us| us / 1000),
             position_ms: u64::try_from(position).unwrap_or(0) / 1000,
         });
@@ -154,7 +171,7 @@ pub async fn run(reports: Reports) {
                 });
                 if next != last {
                     let activity = next.as_ref().and_then(|(t, start)| activity(t, *start));
-                    let _ = reports.send(SourceEvent::Report(Report { key: "mpris".into(), activity, priority: PRIORITY_DETECTED }));
+                    let _ = reports.send(SourceEvent::Report(Report { key: "mpris".into(), activity, priority: PRIORITY_MEDIA }));
                     last = next;
                 }
             }
@@ -176,6 +193,7 @@ mod tests {
             album: Some("Album".into()),
             art: Some("https://i.scdn.co/image/x".into()),
             url: None,
+            mime: None,
             length_ms: Some(200_000),
             position_ms: 0,
         }
@@ -198,6 +216,16 @@ mod tests {
         let spotify_web = Track { url: Some("https://open.spotify.com/track/x".into()), ..firefox.clone() };
         assert_eq!(activity(&spotify_web, 0).unwrap()["type"], 2);
         assert_eq!(activity(&Track { url: None, ..firefox }, 0).unwrap()["type"], 3);
+    }
+
+    #[test]
+    fn the_media_type_decides_first() {
+        let mpv = Track { player: "mpv".into(), url: Some("file:///home/a/talk.mkv".into()), ..track() };
+        assert_eq!(activity(&mpv, 0).unwrap()["type"], 3);
+        let named = Track { mime: Some("audio/flac".into()), ..mpv.clone() };
+        assert_eq!(activity(&named, 0).unwrap()["type"], 2);
+        let firefox_audio = Track { player: "Mozilla Firefox".into(), mime: Some("audio/mpeg".into()), url: None, ..track() };
+        assert_eq!(activity(&firefox_audio, 0).unwrap()["type"], 2);
     }
 
     #[test]

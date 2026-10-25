@@ -1,7 +1,8 @@
 //! Local covers in shared activities. A player that offers its cover only as a file on this
 //! machine (Sonora over MPRIS, for one) would show none to anybody else, so the cover is shrunk,
-//! uploaded once to the account's home server, and that copy is shared. A local path never
-//! leaves the device: until the copy is up, the activity goes out without a picture.
+//! uploaded to the account's home server as short-lived profile media, and that copy is shared
+//! for six hours, after which it is uploaded again if still playing. A local path never leaves
+//! the device: until the copy is up, the activity goes out without a picture.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -13,11 +14,15 @@ use super::*;
 
 /// The side covers are shrunk to (plenty for a 64 px card on a sharp screen).
 const COVER_SIDE: u32 = 512;
+/// How long an uploaded cover is shared before it is sent again (activity artwork is
+/// short-lived profile media).
+const COVER_LIFE_MS: i64 = 6 * 60 * 60 * 1000;
 
 /// What is known about local covers: uploaded copies, and the ones being uploaded or failed.
 #[derive(Default)]
 pub struct Covers {
-    uploaded: HashMap<String, String>,
+    /// Local path to the shared copy's address and when it was uploaded.
+    uploaded: HashMap<String, (String, i64)>,
     pending: HashSet<String>,
 }
 
@@ -62,7 +67,7 @@ impl Client {
                 if let Some(assets) = activity.assets.as_mut() {
                     for image in [&mut assets.large_image, &mut assets.small_image] {
                         let Some(local) = image.as_deref().and_then(|u| u.strip_prefix("file://")).map(str::to_owned) else { continue };
-                        *image = self.covers.uploaded.get(&local).cloned();
+                        *image = self.covers.uploaded.get(&local).filter(|(_, at)| now_ms() - at < COVER_LIFE_MS).map(|(url, _)| url.clone());
                         if image.is_none() {
                             self.upload_cover(local, cx);
                         }
@@ -93,7 +98,7 @@ impl Client {
                 Ok(reference) => {
                     let Some(url) = this.home_media_url(&reference) else { return };
                     this.covers.pending.remove(&path);
-                    this.covers.uploaded.insert(path, url);
+                    this.covers.uploaded.insert(path, (url, now_ms()));
                     this.covers.store();
                     // Shared again, now with the picture.
                     this.share_local(cx);

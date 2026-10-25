@@ -2718,7 +2718,13 @@ impl Client {
         if message.author == me {
             return;
         }
-        let mention = mentions_user(&message.content, &me);
+        // As the server notifies: a mention of you or a role you hold, @everyone or @here (not
+        // inside code), or a reply to one of your messages.
+        let roles = self.guild_of_channel(&message.channel_id).map(|g| self.my_roles(&g.guild.id)).unwrap_or_default();
+        let replied = message.reply_author.as_deref().or_else(|| {
+            message.reply_to.as_deref().and_then(|p| self.find_message(&message.channel_id, p)).map(|p| p.author.as_str())
+        }) == Some(me.as_str());
+        let mention = replied || crate::markdown::mentions_me(&crate::markdown::parse(&message.content), &me, &roles);
         // A voice channel is in front of you only with its chat open.
         let voice = self.channel(&message.channel_id).is_some_and(|c| c.is_voice());
         let here = self.selected_channel() == Some(message.channel_id.as_str()) && (!voice || self.voice_chat_open.as_deref() == Some(message.channel_id.as_str()));
@@ -3983,10 +3989,6 @@ fn apply_reaction(
 }
 
 /// Mirrors the server's mention rule: a literal `@user:server`, or `@everyone` / `@here`.
-fn mentions_user(content: &str, user_id: &str) -> bool {
-    content.contains(user_id) || content.contains("@everyone") || content.contains("@here")
-}
-
 enum Upload {
     Bytes(Vec<u8>),
     Path(std::path::PathBuf),

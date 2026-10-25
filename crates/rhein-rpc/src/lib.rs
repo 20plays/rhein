@@ -34,8 +34,11 @@ pub struct Report {
     pub priority: u8,
 }
 
+/// Within a slot the richest source wins: an application's own Rich Presence, then the
+/// system's media session (MPRIS), then generic program detection.
 pub const PRIORITY_DETECTED: u8 = 1;
-pub const PRIORITY_RPC: u8 = 2;
+pub const PRIORITY_MEDIA: u8 = 2;
+pub const PRIORITY_RPC: u8 = 3;
 
 /// Sources talk to the service through this.
 pub type Reports = tokio::sync::mpsc::UnboundedSender<SourceEvent>;
