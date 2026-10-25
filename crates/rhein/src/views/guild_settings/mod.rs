@@ -3,6 +3,7 @@
 //! has exactly one authority; the list only shows the pages this account may use there, and the
 //! server checks each call again.
 
+mod automod;
 mod bots;
 mod channels;
 mod expressions;
@@ -34,6 +35,7 @@ pub enum Pane {
     Channels,
     Bots,
     Gates,
+    AutoMod,
     Queue,
     Purge,
     Bans,
@@ -44,12 +46,13 @@ pub enum Pane {
 }
 
 impl Pane {
-    pub const ALL: [Pane; 12] = [
+    pub const ALL: [Pane; 13] = [
         Pane::Overview,
         Pane::Roles,
         Pane::Channels,
         Pane::Bots,
         Pane::Gates,
+        Pane::AutoMod,
         Pane::Queue,
         Pane::Purge,
         Pane::Bans,
@@ -66,6 +69,7 @@ impl Pane {
             Pane::Channels => "Channel permissions",
             Pane::Bots => "Bots",
             Pane::Gates => "Join gate",
+            Pane::AutoMod => "AutoMod",
             Pane::Queue => "Moderation queue",
             Pane::Purge => "Purge messages",
             Pane::Bans => "Bans",
@@ -83,6 +87,7 @@ impl Pane {
             Pane::Channels => Icon::Lock,
             Pane::Bots => Icon::Bot,
             Pane::Gates => Icon::Shield,
+            Pane::AutoMod => Icon::Ban,
             Pane::Queue => Icon::Inbox,
             Pane::Purge => Icon::Trash,
             Pane::Bans => Icon::Ban,
@@ -98,7 +103,7 @@ impl Pane {
         Some(match self {
             Pane::Overview => return None,
             Pane::Roles | Pane::Channels => perms::MANAGE_ROLES,
-            Pane::Bots | Pane::Gates | Pane::Invites | Pane::Voice => perms::MANAGE_GUILD,
+            Pane::Bots | Pane::Gates | Pane::AutoMod | Pane::Invites | Pane::Voice => perms::MANAGE_GUILD,
             Pane::Queue => perms::MODERATE_MEMBERS,
             Pane::Purge => perms::MANAGE_MESSAGES,
             Pane::Bans => perms::BAN_MEMBERS,
@@ -133,6 +138,7 @@ pub struct GuildSettingsView {
     pub(crate) expressions: expressions::State,
     pub(crate) moderation: moderation::State,
     pub(crate) bots: bots::State,
+    pub(crate) automod: automod::State,
     pub(crate) crop: Option<(Entity<CropDialog>, Subscription)>,
     crop_focus: bool,
     pub(crate) subs: Vec<Subscription>,
@@ -161,6 +167,7 @@ impl GuildSettingsView {
         let expressions = expressions::State::new();
         let moderation = moderation::State::new(cx);
         let bots = bots::State::new(cx);
+        let automod = automod::State::new(cx);
         let mut view = Self {
             client,
             guild_id,
@@ -175,6 +182,7 @@ impl GuildSettingsView {
             expressions,
             moderation,
             bots,
+            automod,
             crop: None,
             crop_focus: false,
             subs,
@@ -212,6 +220,7 @@ impl GuildSettingsView {
             Pane::Voice => self.load_regions(cx),
             Pane::Expressions => self.load_expressions(cx),
             Pane::Gates => self.load_gates(cx),
+            Pane::AutoMod => self.load_automod(cx),
             Pane::Queue => self.load_queue(cx),
             Pane::Bots => self.load_bots(cx),
             _ => {}
@@ -393,6 +402,7 @@ impl Render for GuildSettingsView {
             Pane::Voice => self.voice_page(&t, cx),
             Pane::Expressions => self.expressions_page(&t, cx),
             Pane::Gates => self.gates_page(&t, cx),
+            Pane::AutoMod => self.automod_page(&t, cx),
             Pane::Queue => self.queue_page(&t, cx),
             Pane::Bots => self.bots_page(&t, cx),
         };

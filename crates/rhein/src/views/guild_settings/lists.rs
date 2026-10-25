@@ -16,7 +16,7 @@ pub(crate) enum Load<T> {
 }
 
 impl<T> Load<T> {
-    fn from(result: Result<T, String>) -> Self {
+    pub(crate) fn from(result: Result<T, String>) -> Self {
         match result {
             Ok(v) => Load::Ready(v),
             Err(e) => Load::Failed(e),
@@ -70,11 +70,11 @@ impl State {
 }
 
 /// A row of a list page.
-fn row(t: &Theme) -> gpui::Div {
+pub(crate) fn row(t: &Theme) -> gpui::Div {
     div().py_2().flex().items_center().gap_3().border_b_1().border_color(t.border)
 }
 
-fn loading<T>(load: &Load<T>, what: &str, t: &Theme) -> Option<AnyElement> {
+pub(crate) fn loading<T>(load: &Load<T>, what: &str, t: &Theme) -> Option<AnyElement> {
     match load {
         Load::Loading => Some(hint("Loading…", t).into_any_element()),
         Load::Failed(e) => Some(hint(format!("Couldn't load {what}: {e}"), t).into_any_element()),

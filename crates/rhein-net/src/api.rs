@@ -962,6 +962,24 @@ impl Api {
         self.delete(&format!("/guilds/{guild_id}/invites/{}", urlencoding::encode(code))).await
     }
 
+    /// AutoMod rules (`MANAGE_GUILD`).
+    pub async fn automod_rules(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/automod")).await
+    }
+
+    pub async fn create_automod_rule(&self, guild_id: &str, rule: &serde_json::Value) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{guild_id}/automod"), rule).await
+    }
+
+    pub async fn delete_automod_rule(&self, guild_id: &str, rule_id: &str) -> ApiResult<serde_json::Value> {
+        self.delete(&format!("/guilds/{guild_id}/automod/{}", urlencoding::encode(rule_id))).await
+    }
+
+    /// What AutoMod caught, with a short excerpt each (`MANAGE_MESSAGES`).
+    pub async fn automod_hits(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guilds/{guild_id}/automod-hits")).await
+    }
+
     pub async fn audit_log(&self, guild_id: &str) -> ApiResult<AuditLog> {
         self.get(&format!("/guilds/{guild_id}/audit-log")).await
     }
