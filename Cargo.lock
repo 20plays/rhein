@@ -7195,6 +7195,7 @@ dependencies = [
  "env_logger",
  "gpui",
  "image",
+ "jiff",
  "log",
  "openmls",
  "openmls_rust_crypto",

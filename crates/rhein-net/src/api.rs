@@ -236,6 +236,22 @@ impl Api {
         Err(ApiError::Status { status: status.as_u16(), body })
     }
 
+    /// A GET whose answer is kept as it came (a download): the bytes and their content type.
+    pub async fn get_raw(&self, path: &str) -> ApiResult<(Vec<u8>, Option<String>)> {
+        let mut req = self.http.get(self.url(path));
+        if let Some(token) = self.token.read().await.as_deref() {
+            req = req.bearer_auth(token);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.json::<ErrorBody>().await.unwrap_or_else(|_| ErrorBody { error: status.canonical_reason().unwrap_or("error").into(), ..Default::default() });
+            return Err(ApiError::Status { status: status.as_u16(), body });
+        }
+        let kind = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        Ok((resp.bytes().await?.to_vec(), kind))
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
         self.send(self.http.get(self.url(path))).await
     }

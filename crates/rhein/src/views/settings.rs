@@ -1228,7 +1228,7 @@ impl SettingsView {
         let password = self.security.password.read(cx).text().to_owned();
         let code = self.security.code.read(cx).text().trim().to_owned();
         let email = self.security.email.read(cx).text().trim().to_owned();
-        let needs_password = !matches!(action, SecurityAction::EnableMfa | SecurityAction::SignOutAll);
+        let needs_password = !matches!(action, SecurityAction::EnableMfa | SecurityAction::SignOutAll | SecurityAction::Export);
         if needs_password && password.is_empty() {
             self.security.status = Some((false, "Enter your password first.".into()));
             cx.notify();
@@ -1292,6 +1292,8 @@ impl SettingsView {
             SecurityAction::SetEmail => c.set_recovery_email(password, Some(email), move |r, cx| finish(r, cx, "Saved. Confirm the address from the mail sent to it."), cx),
             SecurityAction::RemoveEmail => c.set_recovery_email(password, None, move |r, cx| finish(r, cx, "The recovery address is removed."), cx),
             SecurityAction::Close { delete } => c.close_account(password, delete, move |r, cx| finish(r, cx, "Done."), cx),
+            SecurityAction::Export => c.save_account_data(None, move |r, cx| finish(r, cx, "Saved to your Downloads folder."), cx),
+            SecurityAction::Bundle => c.save_account_data(Some(password), move |r, cx| finish(r, cx, "The signed bundle is in your Downloads folder."), cx),
             SecurityAction::SignOutAll => {}
         });
         cx.notify();
@@ -1406,6 +1408,23 @@ impl SettingsView {
                     .child(heading("Sessions", t))
                     .child(div().text_size(text::SM).text_color(t.text_muted).child("Signs out every device of this account, this one too. The Devices page lists them one by one."))
                     .child(div().flex().child(action("sign-out-all", "Sign out everywhere", SecurityAction::SignOutAll, cx).danger())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(heading("Your data", t))
+                    .child(div().text_size(text::SM).text_color(t.text_muted).child(
+                        "A copy of what your home server holds about the account. Guild history on other servers is not in it. The signed bundle (it asks for your password) is the record to keep when a server shuts down.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(action("account-export", "Download your data", SecurityAction::Export, cx))
+                            .child(action("account-bundle", "Download signed bundle", SecurityAction::Bundle, cx)),
+                    ),
             )
             .child(
                 div()
@@ -1909,6 +1928,10 @@ enum SecurityAction {
     RemoveEmail,
     SignOutAll,
     Close { delete: bool },
+    /// Saves what the home server holds about the account.
+    Export,
+    /// Saves the signed account bundle (password needed), for a server that shuts down.
+    Bundle,
 }
 
 /// A QR code for an authenticator app, drawn module by module on white.

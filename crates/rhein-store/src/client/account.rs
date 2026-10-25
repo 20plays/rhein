@@ -87,6 +87,40 @@ impl Client {
         );
     }
 
+    /// Saves what the home server holds for the account (`GET /account/export`) into
+    /// Downloads; with `password`, the signed account bundle instead (`POST /account/bundle`), the
+    /// record to keep when a server shuts down. Answers `{path}`.
+    pub fn save_account_data(&mut self, password: Option<String>, done: impl FnOnce(Result<Value, String>, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
+        let local: String = self.user_id().unwrap_or("account").trim_start_matches('@').chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        self.home_call(
+            move |api| async move {
+                let (bytes, name) = match password {
+                    Some(password) => {
+                        let proof = auth::reauth_proof(&api, &password, &SerenityKsf::memory_constrained()).await?;
+                        let bundle = api.post::<_, Value>("/account/bundle", &proof).await?;
+                        (serde_json::to_vec_pretty(&bundle)?, format!("telium-account-bundle-{local}.json"))
+                    }
+                    None => {
+                        // Kept as the server sends it (JSON, or an archive).
+                        let (bytes, kind) = api.get_raw("/account/export").await?;
+                        let ext = match kind.as_deref().unwrap_or_default() {
+                            k if k.contains("zip") => "zip",
+                            k if k.contains("json") => "json",
+                            _ => "bin",
+                        };
+                        (bytes, format!("telium-account-export-{local}.{ext}"))
+                    }
+                };
+                let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir);
+                let path = dir.join(name);
+                crate::persist::write_private(&path, &bytes)?;
+                Ok(serde_json::json!({ "path": path.display().to_string() }))
+            },
+            move |_, r, cx| done(r, cx),
+            cx,
+        );
+    }
+
     /// Ends every session of the account on every device, then this one here.
     pub fn sign_out_everywhere(&mut self, cx: &mut Context<Self>) {
         self.home_call(

@@ -20,6 +20,7 @@ use rhein_proto::{
 
 use crate::io::{Io, join};
 
+pub mod banners;
 mod call;
 mod dm_view;
 mod people;
@@ -342,6 +343,8 @@ pub struct Client {
     pub deferred: HashSet<String>,
     /// A form a bot asked us to fill in, until the shell shows it.
     pub modal: Option<BotModal>,
+    /// Banners closed in this session (by key).
+    dismissed_banners: HashSet<String>,
     /// The voice channel whose chat column is open (its messages count as read only then).
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
@@ -484,6 +487,7 @@ impl Client {
             pressing: HashSet::new(),
             deferred: HashSet::new(),
             modal: None,
+            dismissed_banners: HashSet::new(),
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -844,6 +848,7 @@ impl Client {
         self.read_flush = None;
         self.account_prefs = serde_json::Value::Object(Default::default());
         self.migration_alert = None;
+        self.dismissed_banners.clear();
         self.sync = None;
         self.speaking_task = None;
         self.renew_ticker = None;
@@ -1820,6 +1825,7 @@ impl Client {
         if self.home.as_ref().is_some_and(|h| h.doc.server_name == server) {
             self.load_friends(cx);
             self.load_conversations(cx);
+            self.load_pending_moves(cx);
         }
         // READY replaces everything this server said before: there is no resume.
         let insert_at = self

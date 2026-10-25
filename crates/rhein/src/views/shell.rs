@@ -3027,6 +3027,49 @@ impl Shell {
         )
     }
 
+    /// Notices about the servers themselves (a scheduled move, a shutdown, a server this build
+    /// can't talk to), one strip each above the chat until closed.
+    fn banners(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let t = cx.theme().clone();
+        self.client
+            .read(cx)
+            .banners()
+            .into_iter()
+            .map(|banner| {
+                let color = if banner.urgent { t.danger } else { t.accent };
+                let (c1, c2, key) = (self.client.clone(), self.client.clone(), banner.key.clone());
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_1p5()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(t.border)
+                    .bg(gpui::Hsla::from(color).opacity(0.12))
+                    .text_size(text::SM)
+                    .child(icon_sized(if banner.urgent { Icon::CircleAlert } else { Icon::Info }, px(16.)).text_color(color))
+                    .child(div().flex_1().min_w_0().child(banner.text))
+                    .children(banner.action.map(|(label, action)| {
+                        Button::new(SharedString::from(format!("banner-act-{}", banner.key)), label)
+                            .small()
+                            .kind(if banner.urgent { rhein_ui::ButtonKind::Danger } else { rhein_ui::ButtonKind::Secondary })
+                            .on_click(move |_, _, cx| {
+                                let action = action.clone();
+                                c1.update(cx, |c, cx| c.banner_action(action, cx));
+                            })
+                    }))
+                    .child(
+                        IconButton::new(SharedString::from(format!("banner-close-{}", banner.key)), Icon::X)
+                            .tooltip("Hide until next time")
+                            .on_click(move |_, _, cx| c2.update(cx, |c, cx| c.dismiss_banner(&key, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let client = self.client.read(cx);
         let (text, kind) = match (&client.error, &client.warning, &client.notice) {
@@ -3085,6 +3128,7 @@ impl Render for Shell {
         let dialog = self.dialog(cx);
         let sign_out = self.sign_out_dialog(cx);
         let toast = self.toast(cx);
+        let banners = self.banners(cx);
         let ringing = self.ringing_card(cx);
         let modal = self.render_modal(cx);
         let card = self.render_profile_card(cx);
@@ -3169,6 +3213,7 @@ impl Render for Shell {
                     .h_full()
                     .flex()
                     .flex_col()
+                    .children(banners)
                     .child(
                         div()
                             .flex_1()
