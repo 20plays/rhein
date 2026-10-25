@@ -15,7 +15,7 @@ use rhein_net::gateway::{self, GatewayConfig};
 use rhein_net::{Api, GatewayEvent, GatewayHandle, GatewayStatus, auth, discover};
 use rhein_proto::{
     Attachment, Channel, Discovery, Event, Guild, Member, Message, PresenceState, Ready, SendMessage,
-    USER_INTENTS, localpart,
+    USER_INTENTS, close, localpart,
 };
 
 use crate::io::{Io, join};
@@ -103,6 +103,9 @@ pub struct Server {
     pub error: Option<String>,
     /// Round trip of the last gateway heartbeat; cleared while disconnected.
     pub latency: Option<std::time::Duration>,
+    /// The last close code the gateway got, and how many closes there were (diagnostics).
+    pub last_close: Option<u16>,
+    pub closes: u32,
     gateway: Option<GatewayHandle>,
     connect: Option<Task<()>>,
 }
@@ -1546,6 +1549,8 @@ impl Client {
             status: ServerStatus::Connecting,
             error: None,
             latency: None,
+            last_close: None,
+            closes: 0,
             gateway: None,
             connect: None,
         });
@@ -1811,9 +1816,15 @@ impl Client {
                 }
             }
             GatewayEvent::Closed { code, reason } => {
-                log::warn!("gateway {server} closed {code}: {reason}");
+                log::info!("gateway {server} closed {code}: {reason}");
                 if let Some(s) = self.server_mut(server) {
-                    s.error = Some(reason);
+                    s.last_close = Some(code);
+                    s.closes = s.closes.saturating_add(1);
+                    // A refusal says what to do about it.
+                    let refusal = matches!(code, close::PROTOCOL_INCOMPATIBLE | close::MALFORMED | close::AUTH_FAILED | close::IDENTIFY_EXPECTED);
+                    if refusal && !reason.is_empty() {
+                        s.error = Some(reason);
+                    }
                 }
             }
         }

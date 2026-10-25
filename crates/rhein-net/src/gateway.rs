@@ -30,7 +30,7 @@ pub enum GatewayEvent {
     Dispatch(Box<Event>),
     /// Round trip of the last heartbeat, measured to its acknowledgement.
     Latency(Duration),
-    /// The server refused the connection and said why.
+    /// The server closed the connection, with its close code and reason (often empty).
     Closed { code: u16, reason: String },
 }
 
@@ -341,11 +341,8 @@ async fn session(
                         let code = close.as_ref().map(|c| u16::from(c.code)).unwrap_or(1006);
                         let outcome = classify(code);
                         // A refusal's reason names the remedy (update the client, sign in again).
-                        if let Some(reason) = close.map(|c| c.reason.to_string()).filter(|r| !r.is_empty())
-                            && matches!(outcome, Outcome::Incompatible | Outcome::Rejected)
-                        {
-                            let _ = events.send(GatewayEvent::Closed { code, reason });
-                        }
+                        let reason = close.map(|c| c.reason.to_string()).unwrap_or_default();
+                        let _ = events.send(GatewayEvent::Closed { code, reason });
                         return outcome;
                     }
                     WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) | WsMessage::Frame(_) => {}

@@ -47,6 +47,60 @@ fn move_banner(d: &Value) -> Option<Banner> {
 }
 
 impl Client {
+    /// What a server's state means and who can do something about it, as the web client tells
+    /// it (`docs.telium.chat/start/clients`, "Connection problems").
+    pub fn server_advice(&self, name: &str) -> Option<String> {
+        let server = self.servers.iter().find(|s| s.name == name)?;
+        let home = self.home.as_ref().is_some_and(|h| h.doc.server_name == name);
+        Some(match server.status {
+            ServerStatus::Ready | ServerStatus::Connecting => return None,
+            ServerStatus::Reconnecting => "Rhein keeps trying; nothing to do.".into(),
+            ServerStatus::Renewing => "Signing in to it again.".into(),
+            ServerStatus::Incompatible => "This server speaks another protocol version: update Rhein.".into(),
+            ServerStatus::Failed if home => "Your home server isn't answering. If it stays that way, its operator has to fix it.".into(),
+            ServerStatus::Failed => "This server isn't answering. Its operator can fix it; your other servers keep working.".into(),
+        })
+    }
+
+    /// A report for bug reports: versions, how each connection fares and recent close codes.
+    /// No messages, drafts, names, server addresses or credentials, so it is safe to post.
+    pub fn diagnostics(&self) -> String {
+        let mut out = format!(
+            "Rhein {} ({} {}, {})\nprotocol {} (min {})\n",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            if cfg!(debug_assertions) { "debug" } else { "release" },
+            rhein_proto::PROTOCOL_VERSION,
+            rhein_proto::MIN_SUPPORTED_PROTOCOL_VERSION,
+        );
+        let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
+        for (i, s) in self.servers.iter().enumerate() {
+            let label = if home.as_deref() == Some(s.name.as_str()) { "home".to_owned() } else { format!("server {i}") };
+            let window = s.doc.as_ref().and_then(|d| d.protocol.as_ref()).map_or("-".to_owned(), |p| format!("{}..{}", p.min_supported, p.version));
+            let guilds = self.guilds.iter().filter(|g| g.server == s.name).count();
+            out.push_str(&format!(
+                "{label}: {:?}, protocol {window}, {guilds} guild(s), latency {}, last close {}, closes {}, relayed {}\n",
+                s.status,
+                s.latency.map_or("-".to_owned(), |d| format!("{} ms", d.as_millis())),
+                s.last_close.map_or("-".to_owned(), |c| c.to_string()),
+                s.closes,
+                self.relays.keys().any(|k| *k == s.name),
+            ));
+        }
+        if let Some(dm) = &self.dm {
+            out.push_str(&format!(
+                "encryption: vault {}, locked {}, cross-signed {}, identity problem {}\n",
+                dm.vault_mode,
+                dm.locked.is_some(),
+                dm.cross_signed,
+                dm.identity_problem.is_some()
+            ));
+        }
+        out.push_str(&format!("call: {}\n", if self.call().is_some() { "in a call" } else { "none" }));
+        out
+    }
+
     /// The banners to show now, most urgent first, without the dismissed ones.
     pub fn banners(&self) -> Vec<Banner> {
         let mut out = Vec::new();

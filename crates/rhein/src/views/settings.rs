@@ -1012,7 +1012,9 @@ impl SettingsView {
                                 s.doc.as_ref().map(|d| d.api.clone()).unwrap_or_else(|| s.input.clone()),
                                 s.status.label(),
                                 if guilds == 1 { "" } else { "s" }
-                            ))),
+                            )))
+                            .children(client.server_advice(&s.name).map(|a| div().text_size(text::XS).text_color(t.text_muted).child(a)))
+                            .children(s.error.clone().filter(|_| s.status != ServerStatus::Ready).map(|e| div().text_size(text::XS).text_color(t.danger).child(e))),
                     )
                     .when(!is_home, |d| {
                         d.child(Button::new(("remove-server", i), "Remove").small().ghost().on_click(cx.listener(move |v, _, _, cx| {
@@ -1028,6 +1030,15 @@ impl SettingsView {
             .gap_3()
             .child(div().text_color(t.text_muted).child("Your account lives on your home server. Other servers host guilds you joined; Rhein signs in to them with your account."))
             .child(list)
+            .child(
+                div().flex().items_center().gap_2().child(
+                    Button::new("copy-diagnostics", "Copy diagnostics").small().icon(Icon::Copy).on_click(cx.listener(|v, _, _, cx| {
+                        let report = v.client.read(cx).diagnostics();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(report));
+                        v.client.update(cx, |c, cx| c.flash_notice("Diagnostics copied: versions and connection states, no messages or names.", cx));
+                    })),
+                ),
+            )
             .child(
                 div()
                     .flex()
