@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, anyhow};
+use livekit::e2ee::EncryptionType;
 use livekit::e2ee::key_provider::KeyProvider;
+use livekit::publication::RemoteTrackPublication;
 use livekit::options::TrackPublishOptions;
 use livekit::id::TrackSid;
 use livekit::track::{LocalAudioTrack, LocalTrack, LocalVideoTrack, RemoteTrack, TrackSource};
@@ -51,6 +53,12 @@ fn is_screen(source: TrackSource) -> bool {
     matches!(source, TrackSource::Screenshare | TrackSource::ScreenshareAudio)
 }
 
+/// Whether a remote track may be received: in an encrypted room only one LiveKit reports as
+/// encrypted, so a participant cannot slip media in the clear past the others.
+fn acceptable(publication: &RemoteTrackPublication, encrypted: bool) -> bool {
+    !encrypted || publication.encryption_type() != EncryptionType::None
+}
+
 /// One participant's side of an SFU call.
 /// The participant attribute the SFU stamps with its clamp of the guild's ceiling.
 const MAX_BITRATE_ATTRIBUTE: &str = "telium.max_bitrate";
@@ -63,6 +71,8 @@ pub struct SfuCall {
     /// The key slot our media is sent under (`epoch % 16`); LiveKit itself leaves every sender
     /// at slot 0, where a receiver keyed by epoch has nothing.
     send_slot: Option<i32>,
+    /// The room runs frame encryption: a track published in the clear is never subscribed.
+    encrypted: bool,
 }
 
 impl SfuCall {
@@ -74,20 +84,21 @@ impl SfuCall {
         options.auto_subscribe = false;
         options.adaptive_stream = true;
         options.dynacast = true;
+        let encrypted = e2ee.is_some();
         if let Some(provider) = e2ee {
             crate::e2ee::encrypt(&mut options, provider);
         }
         let (room, room_events) = Room::connect(&session.url, &session.token, options).await.context("joining the LiveKit room")?;
         let (events, rx) = mpsc::unbounded_channel();
-        let mut call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new(), send_slot: None };
+        let mut call = SfuCall { room, session, watching: HashSet::new(), published: HashMap::new(), send_slot: None, encrypted };
         // What was already in the room before we came.
         for participant in call.room.remote_participants().values() {
             let _ = events.send(CallEvent::Link { user: participant.identity().to_string(), up: true });
             for publication in participant.track_publications().values() {
-                publication.set_subscribed(!is_screen(publication.source()));
+                publication.set_subscribed(!is_screen(publication.source()) && acceptable(publication, encrypted));
             }
         }
-        tokio::spawn(pump(room_events, events));
+        tokio::spawn(pump(room_events, events, encrypted));
 
         let track = LocalAudioTrack::create_audio_track("microphone", RtcAudioSource::Native(microphone));
         call.room
@@ -117,7 +128,7 @@ impl SfuCall {
             }
             for publication in participant.track_publications().values() {
                 if is_screen(publication.source()) {
-                    publication.set_subscribed(on);
+                    publication.set_subscribed(on && acceptable(publication, self.encrypted));
                 }
             }
         }
@@ -195,14 +206,14 @@ impl SfuCall {
 }
 
 /// Turns the room's events into call events, and subscribes to what arrives later.
-async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc::UnboundedSender<CallEvent>) {
+async fn pump(mut room_events: mpsc::UnboundedReceiver<RoomEvent>, events: mpsc::UnboundedSender<CallEvent>, encrypted: bool) {
     while let Some(event) = room_events.recv().await {
         let out = match event {
             RoomEvent::ParticipantConnected(p) => Some(CallEvent::Link { user: p.identity().to_string(), up: true }),
             RoomEvent::ParticipantDisconnected(p) => Some(CallEvent::Link { user: p.identity().to_string(), up: false }),
             RoomEvent::TrackPublished { publication, .. } => {
                 // Screens wait for Watch; everything else is heard and seen.
-                publication.set_subscribed(!is_screen(publication.source()));
+                publication.set_subscribed(!is_screen(publication.source()) && acceptable(&publication, encrypted));
                 None
             }
             RoomEvent::TrackSubscribed { track, publication, participant } => slot_of(publication.source()).map(|slot| {

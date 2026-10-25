@@ -19,6 +19,8 @@ use opaque_ke::{
 };
 use rand::rngs::OsRng;
 
+pub mod signed;
+
 pub fn b64u(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }

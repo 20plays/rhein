@@ -281,6 +281,10 @@ pub struct Client {
     alerts: notify::Alerts,
     /// Conversations we told we are typing in, until we say we stopped.
     typing_sent: std::collections::HashSet<String>,
+    /// The latest `MIGRATION_ALERT`: a move of this account or an owned guild is scheduled.
+    pub migration_alert: Option<serde_json::Value>,
+    /// When we last sent in each channel, for slowmode.
+    last_sent: HashMap<String, Instant>,
     /// The voice channel whose chat column is open (its messages count as read only then).
     voice_chat_open: Option<String>,
     /// Per conversation, our newest message someone else has read.
@@ -418,6 +422,8 @@ impl Client {
             dm_seen: HashMap::new(),
             voice_chat_open: None,
             typing_sent: std::collections::HashSet::new(),
+            migration_alert: None,
+            last_sent: HashMap::new(),
             read_flush: None,
             account_prefs: serde_json::Value::Object(Default::default()),
             gif_favorites: Vec::new(),
@@ -474,9 +480,14 @@ impl Client {
                     Ok((doc, api, me)) => {
                         let avatar_ref = me.profile.as_ref().and_then(|p| p.avatar_ref.clone());
                         let display_name = me.profile.and_then(|p| p.display_name);
+                        // A relocated home is remembered under its new name once the session
+                        // proved still good there.
+                        if let Some(new) = &doc.relocated_to {
+                            log::info!("home server moved: {} is now {new}", saved.home);
+                        }
                         let home = Home {
                             avatar_ref,
-                            input: saved.home.clone(),
+                            input: doc.relocated_to.clone().unwrap_or_else(|| saved.home.clone()),
                             doc,
                             api,
                             user_id: saved.user_id.clone(),
@@ -645,6 +656,14 @@ impl Client {
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
         log::info!("signing out");
         let me = self.home.as_ref().map(|h| h.user_id.clone());
+        // The server ends this session too; signing out locally does not wait for it.
+        if let Some(api) = self.home.as_ref().map(|h| h.api.clone()) {
+            self.io.spawn(async move {
+                if let Err(err) = api.logout().await {
+                    log::debug!("logout: {err}");
+                }
+            });
+        }
         if let Some(me) = &me {
             crate::dm::Secrets::remove(me);
             crate::conversations::Engine::remove(me);
@@ -764,6 +783,7 @@ impl Client {
         self.dm_seen.clear();
         self.read_flush = None;
         self.account_prefs = serde_json::Value::Object(Default::default());
+        self.migration_alert = None;
         self.sync = None;
         self.speaking_task = None;
         self.renew_ticker = None;
@@ -1170,15 +1190,52 @@ impl Client {
         .detach();
     }
 
+    /// Signs a device out. Holding the account root, this device also revokes the device's MLS
+    /// key with a statement the root signs, so every client stops trusting it; without the root
+    /// (or for a device that never had a signed key) only its sessions end.
     pub fn revoke_device(&mut self, device_id: String, cx: &mut Context<Self>) {
-        let Some(api) = self.home.as_ref().map(|h| h.api.clone()) else { return };
-        self.fire(cx, async move { api.revoke_device(&device_id).await.map(drop) });
+        let Some(home) = &self.home else { return };
+        let (api, user) = (home.api.clone(), home.user_id.clone());
+        let root = crate::dm::Secrets::load(&user)
+            .cross_signing
+            .and_then(|s| rhein_mls::vault::unb64(&s).ok())
+            .and_then(|b| rhein_mls::trust::IdentityKey::from_secret(&b).ok());
+        let tid = self.dm.as_ref().and_then(|d| d.immutable_id.clone());
+        self.fire(cx, async move {
+            let signed = match (root, tid) {
+                (Some(root), Some(tid)) => {
+                    let rows = api.cross_signing().await?;
+                    let key = rows["devices"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|d| d["device_id"] == device_id.as_str())
+                        .and_then(|d| d["mls_key"].as_str())
+                        .map(str::to_owned);
+                    key.map(|key| {
+                        let signature = root.revoke_device(&user, &tid, &device_id, &key);
+                        serde_json::json!({ "mls_key": key, "signature": signature })
+                    })
+                }
+                _ => None,
+            };
+            match api.revoke_device(&device_id, signed.as_ref()).await {
+                // No identity anchor on the account: the statement means nothing to it yet.
+                Err(err) if signed.is_some() && err.status() == Some(409) => api.revoke_device(&device_id, None).await.map(drop),
+                other => other.map(drop),
+            }
+        });
     }
 
     // ---------------------------------------------------------------- guild, channel & member actions
 
     pub fn guild_can(&self, guild_id: &str, bit: u64) -> bool {
         let Some(entry) = self.guild(guild_id) else { return false };
+        // A timeout outranks everything, ownership included: reading is all that is left.
+        let me = entry.guild.me.as_ref();
+        if me.and_then(|m| m.get("timeout_until")).and_then(|v| v.as_i64()).is_some_and(|until| until > now_ms()) {
+            return bit & (crate::perms::VIEW_CHANNEL | crate::perms::READ_MESSAGE_HISTORY) == bit;
+        }
         if entry.guild.owner.as_deref() == self.user_id() {
             return true;
         }
@@ -1247,9 +1304,10 @@ impl Client {
         .detach();
     }
 
-    pub fn edit_channel(&mut self, channel_id: String, name: String, topic: String, cx: &mut Context<Self>) {
+    /// Changes a channel's settings (`name`, `topic`, `slowmode`, `bitrate`, `user_limit`,
+    /// `voice_region`).
+    pub fn edit_channel(&mut self, channel_id: String, patch: serde_json::Value, cx: &mut Context<Self>) {
         let Some(api) = self.api_for_channel(&channel_id) else { return };
-        let patch = serde_json::json!({ "name": name.trim(), "topic": topic.trim() });
         self.fire(cx, async move { api.patch_channel(&channel_id, &patch).await.map(drop) });
     }
 
@@ -1260,7 +1318,9 @@ impl Client {
 
     pub fn set_nickname(&mut self, guild_id: String, user_id: String, nickname: String, cx: &mut Context<Self>) {
         let Some(api) = self.api_for_guild(&guild_id) else { return };
-        let patch = serde_json::json!({ "nickname": nickname.trim() });
+        // Nicknames hold at most 32 characters.
+        let nickname: String = nickname.trim().chars().take(32).collect();
+        let patch = serde_json::json!({ "nickname": nickname });
         self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
     }
 
@@ -1297,9 +1357,11 @@ impl Client {
         self.fire(cx, async move { api.reorder_channels(&gid, &places).await.map(drop) });
     }
 
+    /// Times a member out for `minutes`; 0 ends a timeout (a time in the past clears it).
     pub fn timeout_member(&mut self, guild_id: String, user_id: String, minutes: i64, cx: &mut Context<Self>) {
         let Some(api) = self.api_for_guild(&guild_id) else { return };
-        let patch = serde_json::json!({ "timeout_until": now_ms() + minutes * 60_000 });
+        let until = if minutes > 0 { now_ms() + minutes * 60_000 } else { now_ms() - 1 };
+        let patch = serde_json::json!({ "timeout_until": until });
         self.fire(cx, async move { api.patch_member(&guild_id, &user_id, &patch).await.map(drop) });
     }
 
@@ -1548,6 +1610,9 @@ impl Client {
                     Ok((doc, api, handle, events, _)) => {
                         let real = doc.server_name.clone();
                         server.name = real.clone();
+                        if let Some(new) = doc.relocated_to.clone() {
+                            server.input = new;
+                        }
                         server.doc = Some(doc);
                         server.api = Some(api);
                         server.gateway = Some(handle);
@@ -1680,6 +1745,12 @@ impl Client {
                     s.latency = Some(rtt);
                 }
             }
+            GatewayEvent::Closed { code, reason } => {
+                log::warn!("gateway {server} closed {code}: {reason}");
+                if let Some(s) = self.server_mut(server) {
+                    s.error = Some(reason);
+                }
+            }
         }
         true
     }
@@ -1717,6 +1788,8 @@ impl Client {
         let ids: Vec<String> = incoming.iter().map(|g| g.guild.id.clone()).collect();
         self.guilds.splice(at..at, incoming);
         for id in ids {
+            // Members may have come and gone while we were away: fetched again when shown.
+            self.members.remove(&id);
             self.load_read_state(id, cx);
         }
 
@@ -1794,7 +1867,7 @@ impl Client {
                 }
             }
             Event::TypingStart { channel_id, user_id } => {
-                if Some(user_id.as_str()) == self.user_id() {
+                if Some(user_id.as_str()) == self.user_id() || self.is_request(&channel_id) {
                     return false;
                 }
                 let entry = self.typing.entry(channel_id).or_default();
@@ -1919,7 +1992,7 @@ impl Client {
             }
             Event::FriendRemove { user_id } => crate::social::remove_friend(&mut self.friends, &user_id),
             Event::ConversationActivity { conversation_id, message } => {
-                if message && self.home_conversation.as_deref() != Some(conversation_id.as_str()) {
+                if message && self.home_conversation.as_deref() != Some(conversation_id.as_str()) && !self.is_request(&conversation_id) {
                     self.unread_conversations.insert(conversation_id.clone());
                 }
                 // Keep every conversation's group current, not only the one on screen: its
@@ -1934,9 +2007,71 @@ impl Client {
             Event::VoiceServerUpdate(data) => self.on_voice_server(data),
             // Screen watchers matter with M4.2.
             Event::VoiceWatchersUpdate { .. } => return false,
+            Event::ChannelVisibility { guild_id } => self.reload_channels(&guild_id, cx),
+            Event::SessionRevoked(_) => self.on_session_revoked(_server, cx),
+            Event::AutomodAction(d) => {
+                let rule = d["rule_name"].as_str().or(d["rule"]["name"].as_str()).unwrap_or("a rule");
+                let action = d["action"].as_str().unwrap_or("acted");
+                self.flash_notice(format!("AutoMod ({action}) caught a message under {rule}."), cx);
+            }
+            Event::MigrationAlert(d) => {
+                let to = d["destination"].as_str().or(d["to"].as_str()).unwrap_or("another server");
+                self.flash_notice(format!("A move to {to} is scheduled. If you did not ask for it, cancel it before it runs."), cx);
+                self.migration_alert = Some(d);
+            }
+            Event::RecoveryEmailUpdate(d) => {
+                if d["state"].as_str() == Some("bounced") {
+                    self.flash_notice("Your recovery email bounced and was retired. Set another in Account & security.", cx);
+                }
+            }
             Event::MemberListUpdate(_) | Event::Other { .. } => return false,
         }
         true
+    }
+
+    /// Fetches a guild's channels again (what this session may see changed).
+    fn reload_channels(&mut self, guild_id: &str, cx: &mut Context<Self>) {
+        let Some(api) = self.api_for_guild(guild_id) else { return };
+        let (io, gid) = (self.io.clone(), guild_id.to_owned());
+        cx.spawn(async move |this, cx| {
+            let id = gid.clone();
+            let fetched = io.spawn(async move { api.channels(&id).await }).await;
+            this.update(cx, |this, cx| match fetched {
+                Ok(Ok(channels)) => {
+                    if let Some(entry) = this.guild_mut(&gid) {
+                        entry.guild.channels = channels;
+                    }
+                    cx.notify();
+                }
+                Ok(Err(err)) => log::debug!("channels of {gid}: {err}"),
+                Err(err) => log::debug!("channels of {gid}: {err}"),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A server ended one of our sessions. A guild server's is minted again on the close that
+    /// follows; if the home server no longer knows this device, it was signed out from elsewhere.
+    fn on_session_revoked(&mut self, server: &str, cx: &mut Context<Self>) {
+        let Some(home) = &self.home else { return };
+        if home.doc.server_name != server {
+            return;
+        }
+        let (api, io) = (home.api.clone(), self.io.clone());
+        cx.spawn(async move |this, cx| {
+            let check = io.spawn(async move { api.whoami().await }).await;
+            if let Ok(Err(err)) = check
+                && err.status() == Some(401)
+            {
+                this.update(cx, |this, cx| {
+                    this.sign_out(cx);
+                    this.flash_notice("This device was signed out from another device.", cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// Keeps one task that drops expired typing entries and repaints when some expired, for as
@@ -2043,6 +2178,9 @@ impl Client {
                             g.owner = fresh.owner.or(g.owner.take());
                             g.alias = fresh.alias;
                             g.media_expiry_limit_secs = fresh.media_expiry_limit_secs;
+                            g.external_emoji = fresh.external_emoji;
+                            g.emoji_export_policy = fresh.emoji_export_policy;
+                            g.emoji_export_role_id = fresh.emoji_export_role_id;
                             g.created_at = fresh.created_at.or(g.created_at);
                             g.roles = fresh.roles;
                             if fresh.me.is_some() {
@@ -2983,12 +3121,26 @@ impl Client {
             self.send_dm(channel_id, content, reply_to, cx);
             return;
         }
+        // Slowmode: the server refuses early sends anyway; saying so here keeps the text.
+        let slowmode = self.channel(&channel_id).and_then(|c| c.slowmode).filter(|s| *s > 0);
+        if let Some(secs) = slowmode
+            && !self.can(&channel_id, crate::perms::MANAGE_MESSAGES)
+            && let Some(last) = self.last_sent.get(&channel_id)
+        {
+            let left = Duration::from_secs(secs).saturating_sub(last.elapsed());
+            if !left.is_zero() {
+                self.error = Some(format!("Slowmode is on here: you can send again in {} s.", left.as_secs().max(1)).into());
+                cx.notify();
+                return;
+            }
+        }
         let staged = self.staged.get(&channel_id);
         if staged.is_some_and(|list| list.iter().any(|s| matches!(s.state, StagedState::Uploading))) {
             self.error = Some("Wait until the uploads have finished.".into());
             cx.notify();
             return;
         }
+        self.last_sent.insert(channel_id.clone(), Instant::now());
         let attachments: Vec<Attachment> = self
             .staged
             .remove(&channel_id)
@@ -3403,23 +3555,29 @@ impl Client {
         self.fire(cx, async move { api.react(&message_id, &emoji, !mine).await.map(drop) });
     }
 
-    /// Says we stopped typing in a conversation we said we were typing in (a guild channel's
-    /// typing just runs out on the server).
+    /// Says we stopped typing where we said we were typing (a message sent, the draft cleared).
     pub fn stop_typing(&mut self, channel_id: &str) {
         if !self.typing_sent.remove(channel_id) {
             return;
         }
         log::debug!("typing stopped in {channel_id}");
-        let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
-        if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {
-            gw.send(rhein_proto::dm_typing(channel_id, false));
+        if self.is_dm(channel_id) {
+            let home = self.home.as_ref().map(|h| h.doc.server_name.clone());
+            if let Some(gw) = home.and_then(|h| self.server(&h)).and_then(|s| s.gateway.as_ref()) {
+                gw.send(rhein_proto::dm_typing(channel_id, false));
+            }
+            return;
+        }
+        let Some(server) = self.server_of_channel(channel_id) else { return };
+        if let Some(gw) = self.server(server).and_then(|s| s.gateway.as_ref()) {
+            gw.send(rhein_proto::typing(channel_id, false));
         }
     }
 
     pub fn send_typing(&mut self, channel_id: &str) {
         log::debug!("typing in {channel_id}");
         if self.is_dm(channel_id) {
-            if !self.signal("typing", Some(channel_id), true) {
+            if self.is_request(channel_id) || !self.signal("typing", Some(channel_id), true) {
                 return;
             }
             self.typing_sent.insert(channel_id.to_owned());
@@ -3432,8 +3590,9 @@ impl Client {
         }
         let Some(server) = self.server_of_channel(channel_id) else { return };
         if let Some(gw) = self.server(server).and_then(|s| s.gateway.as_ref()) {
-            gw.send(rhein_proto::typing(channel_id));
+            gw.send(rhein_proto::typing(channel_id, true));
         }
+        self.typing_sent.insert(channel_id.to_owned());
     }
 
     pub fn create_guild(&mut self, server: String, name: String, cx: &mut Context<Self>) {
@@ -3504,7 +3663,31 @@ impl Client {
             };
             let io = this.read_with(cx, |this, _| this.io.clone()).ok();
             let Some(io) = io else { return };
-            let result = join(io.spawn(async move { Ok(api.join_invite(&code).await?) })).await;
+            let host = server.clone();
+            let result = join(io.spawn(async move {
+                match api.join_invite(&code).await {
+                    // Not an invite: a vanity name. Generated codes start with `~` and are never one.
+                    Err(err) if err.status() == Some(404) && !code.starts_with('~') => {
+                        let answer = api.resolve_guild_address(&format!("#{code}:{host}")).await?;
+                        let guild = answer["guild_id"].as_str().unwrap_or_default().to_owned();
+                        let lands = answer["host"].as_str().unwrap_or(host.as_str());
+                        if guild.is_empty() {
+                            return Err(anyhow!("No guild answers to #{code}:{host}"));
+                        }
+                        if lands != host {
+                            return Err(anyhow!("That guild moved: join it as #{code}:{lands}"));
+                        }
+                        Ok(api.join_guild(&guild).await.map(|mut joined| {
+                            if joined.get("id").is_none() {
+                                joined["id"] = serde_json::Value::String(guild);
+                            }
+                            joined
+                        })?)
+                    }
+                    other => Ok(other?),
+                }
+            }))
+            .await;
             this.update(cx, |this, cx| {
                 match result {
                     Ok(answer) => {
@@ -3656,6 +3839,10 @@ pub fn parse_invite(text: &str, default_server: Option<&str>) -> Option<(String,
     if text.is_empty() {
         return None;
     }
+    // A guild address, `#name:host`: the same as `https://host/invite/name`.
+    if let Some((name, host)) = text.strip_prefix('#').and_then(|a| a.split_once(':')) {
+        return (!name.is_empty() && !host.is_empty()).then(|| (host.to_owned(), name.to_ascii_lowercase()));
+    }
     let bare = text
         .strip_prefix("https://")
         .or_else(|| text.strip_prefix("http://"))
@@ -3711,12 +3898,27 @@ pub fn now_ms() -> i64 {
 /// A one-line explanation for the UI, preferring the server's own message.
 fn friendly(err: &anyhow::Error) -> String {
     if let Some(api) = err.downcast_ref::<rhein_net::ApiError>() {
-        return match api.code() {
-            Some("INVALID_CREDENTIALS") => "Wrong username or password".into(),
-            Some("USERNAME_TAKEN") => "That username is taken".into(),
-            Some("REGISTRATION_CLOSED") => "Registration is closed on this server".into(),
-            Some("ACCOUNT_DEACTIVATED") => "This account is deactivated".into(),
-            _ => api.to_string(),
+        let text = |code| api.is(code);
+        return if text("invalid_credentials") {
+            "Wrong username or password".into()
+        } else if text("username_taken") {
+            "That username is taken".into()
+        } else if text("registration_closed") {
+            "Registration is closed on this server".into()
+        } else if text("account_deactivated") {
+            "This account is deactivated".into()
+        } else if text("standby_read_only") {
+            "This server is running from a read-only copy right now; nothing can be changed until it is back.".into()
+        } else if text("demoted") {
+            "This server has handed over to another one and no longer accepts changes.".into()
+        } else if text("rate_limited") {
+            "Too many requests; try again in a moment.".into()
+        } else if text("incompatible_protocol") {
+            "This server speaks a protocol version Rhein does not; one of them needs an update.".into()
+        } else if api.status().is_some_and(|s| (502..=504).contains(&s)) {
+            "A server on the way did not answer; try again later.".into()
+        } else {
+            api.to_string()
         };
     }
     format!("{err:#}")
@@ -3759,6 +3961,8 @@ mod tests {
             Some(("b.x".into(), "abc".into()))
         );
         assert_eq!(parse_invite("abc", None), None);
+        assert_eq!(parse_invite("#Gaming:guilds.example", None), Some(("guilds.example".into(), "gaming".into())));
+        assert_eq!(parse_invite("#:x", None), None);
     }
 
     #[test]

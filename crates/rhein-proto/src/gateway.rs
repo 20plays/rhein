@@ -12,11 +12,22 @@ pub const INTENT_GUILD_EXPRESSIONS: u64 = 1 << 4;
 pub const INTENT_GUILD_STRUCTURE: u64 = 1 << 5;
 pub const INTENT_DIRECT_MESSAGES: u64 = 1 << 6;
 pub const INTENT_GUILD_VOICE_STATES: u64 = 1 << 7;
+/// Message text for bot sessions; people always receive it.
+pub const INTENT_MESSAGE_CONTENT: u64 = 1 << 8;
 
 /// Every intent a user (not bot) session may ask for, which is what the web client sends.
 pub const USER_INTENTS: u64 = 0xff;
 
+/// The protocol window this client speaks (`docs.telium.chat/reference/compatibility`).
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
+
+/// Whether a peer's advertised window overlaps ours. A peer that advertises nothing is version 1,
+/// minimum 1.
+pub fn compatible(peer: Option<&crate::rest::ProtocolWindow>) -> bool {
+    let (version, min) = peer.map_or((1, 1), |w| (w.version.max(1), w.min_supported.max(1)));
+    min <= PROTOCOL_VERSION && version >= MIN_SUPPORTED_PROTOCOL_VERSION
+}
 
 /// Close codes the server uses, and what a client does about each.
 pub mod close {
@@ -48,6 +59,7 @@ pub struct Frame {
 pub struct Hello {
     pub heartbeat_interval_ms: u64,
     pub gateway_version: u32,
+    pub protocol: Option<crate::rest::ProtocolWindow>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -56,6 +68,7 @@ pub struct ReadyUser {
     pub user_id: String,
     pub device_id: Option<String>,
     pub is_bot: bool,
+    pub application_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -65,6 +78,11 @@ pub struct Ready {
     pub user: ReadyUser,
     pub server_name: String,
     pub guilds: Vec<Guild>,
+    pub protocol: Option<crate::rest::ProtocolWindow>,
+    /// The intents the server granted (bot sessions are masked).
+    pub intents: Option<u64>,
+    /// Calls named in IDENTIFY that the server kept for this device across its restart.
+    pub voice_reclaimed: Value,
 }
 
 /// What this connection says about the user.
@@ -104,7 +122,7 @@ pub fn identify(token: &str, intents: u64, presence: &PresenceState, voice: &[Vo
         "token": token,
         "intents": intents,
         "presence": presence.to_json(),
-        "protocol": { "version": PROTOCOL_VERSION },
+        "protocol": { "version": PROTOCOL_VERSION, "min_supported": MIN_SUPPORTED_PROTOCOL_VERSION, "capabilities": [] },
     });
     if !voice.is_empty() {
         d["voice"] = voice.iter().map(|c| json!({ "room_id": c.room_id, "session_id": c.session_id })).collect();
@@ -124,8 +142,13 @@ pub fn dm_typing(conversation_id: &str, active: bool) -> Value {
     json!({ "op": if active { "DM_TYPING_START" } else { "DM_TYPING_STOP" }, "d": { "conversation_id": conversation_id } })
 }
 
-pub fn typing(channel_id: &str) -> Value {
-    json!({ "op": "TYPING", "d": { "channel_id": channel_id } })
+pub fn typing(channel_id: &str, active: bool) -> Value {
+    json!({ "op": if active { "TYPING" } else { "TYPING_STOP" }, "d": { "channel_id": channel_id } })
+}
+
+/// Asks for the channels this session may see now; answered by `CHANNEL_VISIBILITY`.
+pub fn request_guild_channels(guild_id: &str) -> Value {
+    json!({ "op": "REQUEST_GUILD_CHANNELS", "d": { "guild_id": guild_id } })
 }
 
 pub fn subscribe_members(guild_id: &str, first: u32, last: u32) -> Value {
@@ -141,8 +164,18 @@ pub enum Event {
     ReactionAdd { message_id: String, channel_id: String, emoji: String, user_id: String },
     ReactionRemove { message_id: String, channel_id: String, emoji: String, user_id: String },
     TypingStart { channel_id: String, user_id: String },
-    /// Someone stopped typing in a conversation (guild typing just runs out).
+    /// Someone stopped typing (in a channel, or a conversation keyed as one).
     TypingStop { channel_id: String, user_id: String },
+    /// What this session may see in a guild changed: its channels are fetched again.
+    ChannelVisibility { guild_id: String },
+    /// The server ended this session (a revoked device, signed out everywhere, a moved account).
+    SessionRevoked(Value),
+    /// AutoMod acted on a message (moderators only).
+    AutomodAction(Value),
+    /// A move of this account or an owned guild was scheduled or retried.
+    MigrationAlert(Value),
+    /// The account's recovery email changed state (confirmed, bounced).
+    RecoveryEmailUpdate(Value),
     ChannelCreate(crate::model::Channel),
     ChannelUpdate(crate::model::Channel),
     ChannelDelete { id: String, guild_id: Option<String> },
@@ -224,6 +257,15 @@ impl Event {
                 channel_id: str_of(&d, "conversation_id"),
                 user_id: str_of(&d, "user_id"),
             },
+            "TYPING_STOP" => Event::TypingStop {
+                channel_id: str_of(&d, "channel_id"),
+                user_id: str_of(&d, "user_id"),
+            },
+            "CHANNEL_VISIBILITY" => Event::ChannelVisibility { guild_id: str_of(&d, "guild_id") },
+            "SESSION_REVOKED" => Event::SessionRevoked(d),
+            "AUTOMOD_ACTION" => Event::AutomodAction(d),
+            "MIGRATION_ALERT" => Event::MigrationAlert(d),
+            "RECOVERY_EMAIL_UPDATE" => Event::RecoveryEmailUpdate(d),
             "DM_TYPING_STOP" => Event::TypingStop {
                 channel_id: str_of(&d, "conversation_id"),
                 user_id: str_of(&d, "user_id"),
@@ -311,12 +353,25 @@ mod tests {
         let v = identify("tok", USER_INTENTS, &PresenceState { status: "online".into(), ..Default::default() }, &[]);
         assert_eq!(v["op"], "IDENTIFY");
         assert_eq!(v["d"]["intents"], 255);
+        assert_eq!(v["d"]["protocol"]["min_supported"], MIN_SUPPORTED_PROTOCOL_VERSION);
         // Without activities of our own, the field is left out so another session's stay.
         assert!(v["d"]["presence"].get("activity").is_none());
         assert!(v["d"].get("voice").is_none());
         let claim = VoiceClaim { room_id: "g1".into(), session_id: "s1".into() };
         let v = identify("tok", USER_INTENTS, &PresenceState::default(), &[claim]);
         assert_eq!(v["d"]["voice"], json!([{ "room_id": "g1", "session_id": "s1" }]));
+    }
+
+    #[test]
+    fn protocol_windows() {
+        use crate::rest::ProtocolWindow;
+        let w = |version, min_supported| ProtocolWindow { version, min_supported, capabilities: Vec::new() };
+        assert!(compatible(None));
+        assert!(compatible(Some(&w(1, 1))));
+        assert!(compatible(Some(&w(3, 1))));
+        assert!(!compatible(Some(&w(3, 2))));
+        // Nothing advertised counts as version 1.
+        assert!(compatible(Some(&w(0, 0))));
     }
 
     #[test]

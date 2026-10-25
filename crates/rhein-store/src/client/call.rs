@@ -185,7 +185,8 @@ impl Client {
 
     /// Joins (or starts) the call in a private conversation.
     pub fn join_dm_call(&mut self, conversation: String, cx: &mut Context<Self>) {
-        if self.in_call(&conversation) {
+        // No call signalling into a request before it is accepted.
+        if self.in_call(&conversation) || self.is_request(&conversation) {
             return;
         }
         self.leave_voice(cx);
@@ -1068,8 +1069,17 @@ async fn drive(
                 let pinned = |privacy: &Option<Privacy>, effective: Option<Posture>| {
                     privacy.as_ref().is_some_and(|p| posture::relay_only(p.own, effective.unwrap_or(p.own), relay))
                 };
+                // A strict posture without TURN refuses the mesh rather than expose the address; the
+                // join asked for an SFU (`wants_sfu`), so the server may still point us at one.
                 if privacy.as_ref().is_some_and(|p| p.own >= Posture::Relay) && !relay {
                     let _ = updates.send(Update::Failed("Your privacy setting needs a relay, and your server has none: set a custom SFU for this conversation, or lower the setting.".into()));
+                    match stand_by(&mut commands, &mut roster, &mut privacy).await {
+                        Some(new) => {
+                            server = new;
+                            continue;
+                        }
+                        None => return,
+                    }
                 }
                 let effective = greet(&mut privacy, &roster);
                 let (mut call, mut events) = Mesh::new(&me, factory, mesh::ice_servers(&ice_servers), pinned(&privacy, effective));
@@ -1146,7 +1156,10 @@ async fn drive(
                         Ok(Some(e2ee::key_provider(&key, epoch)))
                     }
                     None if required.is_some() => Err(anyhow!("This call must be end-to-end encrypted, and this device has no key to offer it yet.")),
-                    None => Ok(None),
+                    // Every guild call on an SFU is end-to-end encrypted under its own group. An
+                    // answer without one would carry the call in the clear: refused, as the web
+                    // client does.
+                    None => Err(anyhow!("This server offered the call through an SFU without end-to-end encryption, so Rhein does not join it.")),
                 };
                 let joined = match keys {
                     Err(err) => Err(err),
@@ -1241,20 +1254,7 @@ async fn drive(
                     }
                     Err(err) => {
                         let _ = updates.send(Update::Failed(format!("{err:#}")));
-                        // Wait for the server to point us elsewhere, or for the hang-up.
-                        loop {
-                            match commands.recv().await {
-                                Some(Command::Server(new)) => break Some(new),
-                                Some(Command::Leave) | None => break None,
-                                Some(Command::Roster(users)) => roster = users,
-                                Some(Command::Keys { hello, media }) => {
-                                    if let Some(p) = privacy.as_mut() {
-                                        p.rekey(hello, media);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
+                        stand_by(&mut commands, &mut roster, &mut privacy).await
                     }
                 }
             }
@@ -1262,6 +1262,28 @@ async fn drive(
         match next {
             Some(new) => server = new,
             None => return,
+        }
+    }
+}
+
+/// A call that cannot connect where it is waits for the server to point it elsewhere, or for the
+/// hang-up, keeping its roster and keys current meanwhile.
+async fn stand_by(
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    roster: &mut Vec<String>,
+    privacy: &mut Option<Privacy>,
+) -> Option<VoiceServer> {
+    loop {
+        match commands.recv().await {
+            Some(Command::Server(new)) => return Some(new),
+            Some(Command::Leave) | None => return None,
+            Some(Command::Roster(users)) => *roster = users,
+            Some(Command::Keys { hello, media }) => {
+                if let Some(p) = privacy.as_mut() {
+                    p.rekey(hello, media);
+                }
+            }
+            _ => {}
         }
     }
 }

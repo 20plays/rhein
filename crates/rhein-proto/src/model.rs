@@ -50,6 +50,16 @@ pub struct Channel {
     pub parent_id: Option<String>,
     pub strip_embeds: bool,
     pub permission_overwrites: Vec<Overwrite>,
+    /// Seconds a member waits between messages (text channels; `MANAGE_MESSAGES` is exempt).
+    pub slowmode: Option<u64>,
+    /// Voice: bits per second, at most the server's ceiling.
+    pub bitrate: Option<u64>,
+    /// Voice: how many may be in it at once (`None` or 0: no limit).
+    pub user_limit: Option<u64>,
+    /// Voice: a region name, usually `auto`.
+    pub voice_region: Option<String>,
+    /// Voice: a short line about what is going on in it (up to 140 characters).
+    pub voice_status: Option<String>,
 }
 
 impl Channel {
@@ -126,6 +136,12 @@ pub struct Guild {
     pub voice_states: Vec<VoiceState>,
     pub member_count: Option<i64>,
     pub me: Option<Value>,
+    /// Whether members may post other guilds' custom emoji here.
+    pub external_emoji: Option<bool>,
+    /// Who may take this guild's emoji elsewhere: `everyone`, `members` or `role`.
+    pub emoji_export_policy: Option<String>,
+    /// With `role`: that role or any above it.
+    pub emoji_export_role_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -221,6 +237,8 @@ pub struct Member {
     pub roles: Vec<String>,
     pub presence: Option<Value>,
     pub is_bot: bool,
+    /// Timed out until this time (ms); a time in the past means no timeout.
+    pub timeout_until: Option<Millis>,
 }
 
 impl Member {

@@ -21,6 +21,16 @@ impl Client {
         self.conversations.iter().any(|c| c.id == id)
     }
 
+    /// Whether a conversation is someone else's message request we have not accepted (pending or
+    /// declined). It raises no unread mark, alert, typing or ringing, and we send no typing or
+    /// call signalling into it.
+    pub fn is_request(&self, id: &str) -> bool {
+        let me = self.user_id();
+        self.conversations.iter().any(|c| {
+            c.id == id && matches!(c.request_state.as_deref(), Some("pending" | "declined")) && c.creator.as_deref() != me
+        })
+    }
+
     /// Opens the engine once DM keys are up, and tops up this device's key packages.
     pub(super) fn open_dm_engine(&mut self, status: &DmStatus, cx: &mut Context<Self>) {
         let Some(home) = &self.home else { return };
@@ -161,7 +171,7 @@ impl Client {
             }
             // New words from someone else, in a conversation not in front of you.
             let open = self.home_conversation.as_deref() == Some(id) && self.window_active;
-            if !open {
+            if !open && !self.is_request(id) {
                 for (author, text) in fresh {
                     let sender = self.display_name(None, &author);
                     self.alert(notify::Alert::Direct, &sender, None, &text, cx);

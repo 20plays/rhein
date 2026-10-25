@@ -28,6 +28,26 @@ impl ApiError {
         }
     }
 
+    /// Whether the server answered with this error code (codes are stable; the English message
+    /// is not, so branching goes by code, falling back to the error class).
+    pub fn is(&self, code: &str) -> bool {
+        match self {
+            ApiError::Status { body, .. } => {
+                body.code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(code)) || body.error.eq_ignore_ascii_case(code)
+            }
+            ApiError::Http(_) => false,
+        }
+    }
+
+    /// A failure that says nothing about the request itself: the network, or an upstream
+    /// server that did not answer (502, 503, 504). Safe requests may be repeated.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ApiError::Http(e) => e.is_connect() || e.is_timeout() || e.is_request(),
+            ApiError::Status { status, .. } => matches!(status, 502 | 504) || (*status == 503 && !self.is("standby_read_only")),
+        }
+    }
+
     /// For a rate-limited request, how long to wait before repeating it.
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
@@ -152,7 +172,33 @@ impl Api {
 
     /// Sends, and when a renewable session is refused (it ran out), renews it once and sends
     /// the same request again.
+    ///
+    /// Safe requests (GET, PUT, DELETE) are also repeated after a network failure or a 502, 503
+    /// or 504, and any request after `409 try_again` (the server did nothing with it). A POST is
+    /// never repeated otherwise: channel messages carry a nonce, and DM frames go out once.
     async fn send<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
+        let safe = req
+            .try_clone()
+            .and_then(|r| r.build().ok())
+            .is_some_and(|r| matches!(*r.method(), reqwest::Method::GET | reqwest::Method::PUT | reqwest::Method::DELETE));
+        let (mut req, mut tries) = (req, 0u32);
+        loop {
+            let retry = req.try_clone();
+            let result = self.send_renewing(req).await;
+            let Err(err) = &result else { return result };
+            let again = (safe && err.is_transient() && tries < 2) || (err.is("try_again") && tries < 1);
+            match retry {
+                Some(retry) if again => {
+                    tries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(tries))).await;
+                    req = retry;
+                }
+                _ => return result,
+            }
+        }
+    }
+
+    async fn send_renewing<T: DeserializeOwned>(&self, req: reqwest::RequestBuilder) -> ApiResult<T> {
         let again = self.renews().then(|| req.try_clone()).flatten();
         let seen = self.renewal.generation.load(std::sync::atomic::Ordering::Acquire);
         let result = self.send_once(req).await;
@@ -585,8 +631,19 @@ impl Api {
         Ok(self.get::<DeviceList>("/devices").await?.devices)
     }
 
-    pub async fn revoke_device(&self, device_id: &str) -> ApiResult<serde_json::Value> {
-        self.delete(&format!("/devices/{}", urlencoding::encode(device_id))).await
+    /// Ends a device's sessions. With `signed` (`{mls_key, signature}` by the account root) the
+    /// server also retires that MLS key everywhere and publishes the statement.
+    pub async fn revoke_device(&self, device_id: &str, signed: Option<&serde_json::Value>) -> ApiResult<serde_json::Value> {
+        let path = format!("/devices/{}", urlencoding::encode(device_id));
+        match signed {
+            Some(body) => self.delete_json(&path, body).await,
+            None => self.delete(&path).await,
+        }
+    }
+
+    /// Ends this session on the server.
+    pub async fn logout(&self) -> ApiResult<serde_json::Value> {
+        self.post("/logout", &serde_json::json!({})).await
     }
 
     pub async fn friends(&self) -> ApiResult<Vec<Friend>> {
@@ -782,6 +839,17 @@ impl Api {
 
     pub async fn join_invite(&self, code: &str) -> ApiResult<serde_json::Value> {
         self.post(&format!("/invites/{}/join", urlencoding::encode(code)), &serde_json::json!({})).await
+    }
+
+    /// Follows a guild address (`#name:host`) to the guild that holds it now: the final `active`
+    /// answer, with its `host` and `guild_id`.
+    pub async fn resolve_guild_address(&self, address: &str) -> ApiResult<serde_json::Value> {
+        self.get(&format!("/guild-addresses/resolve?address={}", urlencoding::encode(address))).await
+    }
+
+    /// Joins a guild by its live address (the same bans, gates and screening as an invite).
+    pub async fn join_guild(&self, guild_id: &str) -> ApiResult<serde_json::Value> {
+        self.post(&format!("/guilds/{}/join", urlencoding::encode(guild_id)), &serde_json::json!({})).await
     }
 
     /// Answers the invite object; its `code` is what `join_invite` takes.

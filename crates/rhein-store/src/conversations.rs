@@ -557,6 +557,12 @@ impl Engine {
             let n = frames.len();
             through = frames.iter().filter_map(|f| f["seq"].as_u64()).max().unwrap_or(through);
             out.extend(frames);
+            // A member home still filling a gap from the conversation's sequencer answers up to
+            // the gap; the rest comes on a later sync.
+            if page["incomplete"].as_bool() == Some(true) {
+                log::info!("{conversation}: frames from {} not here yet", page["missing_from"]);
+                break;
+            }
             if n < PAGE as usize {
                 break;
             }

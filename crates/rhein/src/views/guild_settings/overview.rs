@@ -10,6 +10,9 @@ use crate::views::crop::{self, CropDialog, CropEvent};
 
 /// How long files may be kept, as the web client offers it: `None` is "as long as the server
 /// keeps them".
+/// Who may use this guild's custom emoji in other guilds.
+const EXPORT: [(&str, &str); 3] = [("everyone", "Everyone"), ("members", "Members"), ("role", "A role and above")];
+
 const EXPIRY: [(Option<i64>, &str); 7] = [
     (None, "Unlimited"),
     (Some(3_600), "1 hour"),
@@ -29,6 +32,9 @@ pub(crate) struct State {
     confirm_transfer: bool,
     delete_name: Entity<TextInput>,
     icon_busy: bool,
+    external_emoji: bool,
+    export: usize,
+    export_role: Entity<TextInput>,
 }
 
 impl State {
@@ -42,6 +48,9 @@ impl State {
             confirm_transfer: false,
             delete_name: input("Type the name to confirm", "", cx),
             icon_busy: false,
+            external_emoji: true,
+            export: 0,
+            export_role: input("Role name", "", cx),
         };
         state.reset(client, guild_id, cx);
         state
@@ -55,6 +64,10 @@ impl State {
         self.alias_on = g.alias.is_some();
         self.alias.update(cx, |i, cx| i.set_text(local, cx));
         self.expiry = EXPIRY.iter().position(|(secs, _)| *secs == g.media_expiry_limit_secs).unwrap_or(0);
+        self.external_emoji = g.external_emoji.unwrap_or(true);
+        self.export = EXPORT.iter().position(|(v, _)| Some(*v) == g.emoji_export_policy.as_deref()).unwrap_or(0);
+        let role = g.emoji_export_role_id.as_deref().and_then(|id| g.roles.iter().find(|r| r.id == id)).map(|r| r.name.clone()).unwrap_or_default();
+        self.export_role.update(cx, |i, cx| i.set_text(role, cx));
         self.transfer_to.update(cx, |i, cx| i.clear(cx));
         self.delete_name.update(cx, |i, cx| i.clear(cx));
         self.confirm_transfer = false;
@@ -189,6 +202,47 @@ impl GuildSettingsView {
                     ))
                     .child(div().flex().child(Button::new("guild-expiry-save", "Save").primary().on_click(cx.listener(|v, _, _, cx| v.save_expiry(cx))))),
             );
+
+            // Custom emoji across guilds: both sides have to agree.
+            let (external, export) = (state.external_emoji, state.export);
+            page = page.child(
+                panel(t)
+                    .child(heading("emoji between guilds", t))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child("Accept custom emoji from other guilds")
+                            .child(Switch::new("guild-external-emoji", external).on_toggle({
+                                let this = cx.weak_entity();
+                                move |on, _, cx| {
+                                    this.update(cx, |v, cx| {
+                                        v.overview.external_emoji = on;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                                }
+                            })),
+                    )
+                    .child(hint("Members also need Use External Emoji to post them.", t))
+                    .child(field(
+                        "Who may use this guild's emoji elsewhere",
+                        Tabs::new("guild-emoji-export", EXPORT.iter().map(|(_, l)| *l)).selected(export).on_select({
+                            let this = cx.weak_entity();
+                            move |i, _, cx| {
+                                this.update(cx, |v, cx| {
+                                    v.overview.export = i;
+                                    cx.notify();
+                                })
+                                .ok();
+                            }
+                        }),
+                        t,
+                    ))
+                    .when(EXPORT[export].0 == "role", |d| d.child(field("Role (holders of it or a higher role)", state.export_role.clone(), t)))
+                    .child(div().flex().child(Button::new("guild-emoji-save", "Save").primary().on_click(cx.listener(|v, _, _, cx| v.save_emoji_policy(cx))))),
+            );
         }
 
         if owner {
@@ -269,6 +323,34 @@ impl GuildSettingsView {
         self.call(
             cx,
             move |api, gid| async move { api.patch_guild(&gid, &serde_json::json!({ "media_expiry_limit_secs": secs })).await },
+            |v, r, cx| {
+                if v.outcome(&r, "Saved.", cx) {
+                    let gid = v.guild_id.clone();
+                    v.client.update(cx, |c, cx| c.refresh_guild(&gid, cx));
+                }
+            },
+        );
+    }
+
+    fn save_emoji_policy(&mut self, cx: &mut Context<Self>) {
+        let (external, policy) = (self.overview.external_emoji, EXPORT[self.overview.export].0);
+        let mut patch = serde_json::json!({ "external_emoji": external, "emoji_export_policy": policy });
+        if policy == "role" {
+            let wanted = self.overview.export_role.read(cx).text().trim().to_lowercase();
+            let role = self
+                .client
+                .read(cx)
+                .guild(&self.guild_id)
+                .and_then(|g| g.guild.roles.iter().find(|r| r.name.to_lowercase() == wanted).map(|r| r.id.clone()));
+            let Some(role) = role else {
+                self.report(false, "No role by that name.", cx);
+                return;
+            };
+            patch["emoji_export_role_id"] = serde_json::Value::String(role);
+        }
+        self.call(
+            cx,
+            move |api, gid| async move { api.patch_guild(&gid, &patch).await },
             |v, r, cx| {
                 if v.outcome(&r, "Saved.", cx) {
                     let gid = v.guild_id.clone();

@@ -170,7 +170,7 @@ impl Client {
             self.stop_ring(&conversation, cx);
             return;
         }
-        if before > 0 || self.alerts.declined.contains(&conversation) || self.alerts.ringing.is_some() || self.quiet() {
+        if before > 0 || self.alerts.declined.contains(&conversation) || self.alerts.ringing.is_some() || self.quiet() || self.is_request(&conversation) {
             return;
         }
         if self.call.as_ref().is_some_and(|c| c.room_id == conversation) {

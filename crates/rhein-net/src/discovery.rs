@@ -5,12 +5,18 @@ use rhein_proto::Discovery;
 /// first, plain HTTP as a fallback for local development, following `moved_to` a bounded number
 /// of times.
 pub async fn discover(http: &reqwest::Client, domain: &str) -> Result<Discovery> {
-    let mut name = normalise(domain);
+    let start = normalise(domain);
+    let mut name = start.clone();
     for _ in 0..4 {
-        let doc = fetch(http, &name).await?;
+        let mut doc = fetch(http, &name).await?;
         match doc.moved_to.as_deref() {
             Some(next) if !next.is_empty() && normalise(next) != name => name = normalise(next),
-            _ => return Ok(doc),
+            _ => {
+                if name != start {
+                    doc.relocated_to = Some(name);
+                }
+                return Ok(doc);
+            }
         }
     }
     bail!("{domain}: too many moved_to redirects")

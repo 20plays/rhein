@@ -85,7 +85,8 @@ impl Default for Prefs {
             hide_own_screen: false,
             share_activity: true,
             share_games: true,
-            share_music: true,
+            // Like video, what someone listens to is opt-in (the web client's default).
+            share_music: false,
             // What someone watches in a browser is more private than a game; opt in.
             share_videos: false,
             hidden_activities: Vec::new(),

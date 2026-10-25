@@ -30,6 +30,8 @@ pub enum GatewayEvent {
     Dispatch(Box<Event>),
     /// Round trip of the last heartbeat, measured to its acknowledgement.
     Latency(Duration),
+    /// The server refused the connection and said why.
+    Closed { code: u16, reason: String },
 }
 
 enum Command {
@@ -133,13 +135,22 @@ async fn run(
                     GatewayStatus::Incompatible
                 };
                 let _ = events.send(GatewayEvent::Status(status));
-                // Park until the owner hands over a new token or goes away.
+                // Park until the owner hands over a new token or goes away. A protocol mismatch
+                // does not heal with a fresh session: only an explicit reconnect retries it.
+                let incompatible = matches!(outcome, Outcome::Incompatible);
                 loop {
                     match commands.recv().await {
-                        Some(Command::Reconnect(token) | Command::Token(token)) => {
+                        Some(Command::Reconnect(token)) => {
                             config.token = token;
                             failures = 0;
                             break;
+                        }
+                        Some(Command::Token(token)) => {
+                            config.token = token;
+                            if !incompatible {
+                                failures = 0;
+                                break;
+                            }
                         }
                         Some(Command::Send(_)) => {}
                         Some(Command::Presence(presence)) => config.presence = presence,
@@ -222,6 +233,12 @@ async fn session(
         };
         tokio::select! {
             _ = beat => {
+                // The last beat was never acknowledged: the connection is dead even if the socket
+                // has not noticed yet.
+                if beat_sent.is_some() {
+                    log::warn!("gateway {}: no heartbeat acknowledgement", config.url);
+                    return Outcome::Retry { quick: true };
+                }
                 if sink.send(WsMessage::text(rhein_proto::heartbeat().to_string())).await.is_err() {
                     return Outcome::Retry { quick: false };
                 }
@@ -273,6 +290,13 @@ async fn session(
                         match frame.op.as_str() {
                             "HELLO" => {
                                 let hello: Hello = serde_json::from_value(frame.d).unwrap_or_default();
+                                // Outside each other's window the server would close with 4015;
+                                // no token goes to a server this client cannot speak to.
+                                if !rhein_proto::compatible(hello.protocol.as_ref()) {
+                                    log::error!("gateway {}: protocol window {:?} is outside ours", config.url, hello.protocol);
+                                    let _ = sink.close().await;
+                                    return Outcome::Incompatible;
+                                }
                                 if hello.heartbeat_interval_ms > 0 {
                                     heartbeat_every = Duration::from_millis(hello.heartbeat_interval_ms);
                                 }
@@ -314,8 +338,15 @@ async fn session(
                         }
                     }
                     WsMessage::Close(close) => {
-                        let code = close.map(|c| u16::from(c.code)).unwrap_or(1006);
-                        return classify(code);
+                        let code = close.as_ref().map(|c| u16::from(c.code)).unwrap_or(1006);
+                        let outcome = classify(code);
+                        // A refusal's reason names the remedy (update the client, sign in again).
+                        if let Some(reason) = close.map(|c| c.reason.to_string()).filter(|r| !r.is_empty())
+                            && matches!(outcome, Outcome::Incompatible | Outcome::Rejected)
+                        {
+                            let _ = events.send(GatewayEvent::Closed { code, reason });
+                        }
+                        return outcome;
                     }
                     WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) | WsMessage::Frame(_) => {}
                 }
@@ -324,11 +355,14 @@ async fn session(
     }
 }
 
+/// What a close code asks of the client (`docs.telium.chat/reference/protocol/gateway`).
 fn classify(code: u16) -> Outcome {
     match code {
         close::AUTH_FAILED | close::IDENTIFY_EXPECTED => Outcome::Rejected,
         close::PROTOCOL_INCOMPATIBLE | close::MALFORMED => Outcome::Incompatible,
-        close::RESTARTING | close::LAGGING => Outcome::Retry { quick: true },
+        // Fell behind and events were dropped: straight back, and READY resyncs.
+        close::LAGGING | close::IDENTIFY_TIMEOUT | close::HEARTBEAT_TIMEOUT => Outcome::Retry { quick: true },
+        // A restarting server is given room (backoff), as is anything unknown.
         _ => Outcome::Retry { quick: false },
     }
 }

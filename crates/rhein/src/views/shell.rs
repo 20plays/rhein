@@ -882,16 +882,42 @@ impl Shell {
         }
         if manage {
             entries.push(MenuEntry::Separator);
-            let (v, id, name, topic) = (this.clone(), channel_id.clone(), channel.name.clone(), channel.topic.clone().unwrap_or_default());
+            let (v, id, edited) = (this.clone(), channel_id.clone(), channel.clone());
             entries.push(MenuEntry::item(if category { "Edit category" } else { "Edit channel" }, move |window, cx| {
-                let (id, name, topic) = (id.clone(), name.clone(), topic.clone());
+                let (id, channel) = (id.clone(), edited.clone());
                 v.update(cx, |v, cx| {
                     let client = v.client.clone();
-                    v.prompt("Edit channel", vec![("Name".into(), name), ("Topic".into(), topic)], "Save", move |values, cx| {
-                        let (name, topic) = (values[0].clone(), values[1].clone());
-                        if !name.trim().is_empty() {
-                            client.update(cx, |c, cx| c.edit_channel(id.clone(), name, topic, cx));
+                    let number = |n: Option<u64>| n.filter(|n| *n > 0).map(|n| n.to_string()).unwrap_or_default();
+                    let mut fields = vec![("Name".to_owned(), channel.name.clone())];
+                    if channel.is_voice() {
+                        fields.push(("Bitrate in bit/s (empty: the server's)".into(), number(channel.bitrate)));
+                        fields.push(("User limit (empty: none)".into(), number(channel.user_limit)));
+                        fields.push(("Region (auto, or a region's name)".into(), channel.voice_region.clone().unwrap_or_default()));
+                    } else if !channel.is_category() {
+                        fields.push(("Topic".into(), channel.topic.clone().unwrap_or_default()));
+                        fields.push(("Slowmode in seconds (empty: off)".into(), number(channel.slowmode)));
+                    }
+                    let (voice, category) = (channel.is_voice(), channel.is_category());
+                    v.prompt("Edit channel", fields, "Save", move |values, cx| {
+                        let name = values[0].trim();
+                        if name.is_empty() {
+                            return;
                         }
+                        let count = |text: &str| text.trim().parse::<u64>().unwrap_or(0);
+                        let patch = if voice {
+                            let region = values[3].trim();
+                            serde_json::json!({
+                                "name": name,
+                                "bitrate": (count(&values[1]) > 0).then(|| count(&values[1])),
+                                "user_limit": count(&values[2]),
+                                "voice_region": if region.is_empty() { "auto" } else { region },
+                            })
+                        } else if category {
+                            serde_json::json!({ "name": name })
+                        } else {
+                            serde_json::json!({ "name": name, "topic": values[1].trim(), "slowmode": count(&values[2]) })
+                        };
+                        client.update(cx, |c, cx| c.edit_channel(id.clone(), patch, cx));
                     }, window, cx)
                 }).ok();
             }).with_icon(Icon::Pencil));
@@ -970,7 +996,9 @@ impl Shell {
                 c.update(cx, |c, cx| c.friend_action(rhein_store::FriendAction::Request, u, cx));
             }).with_icon(Icon::UserPlus));
         }
-        if myself {
+        // Your own nickname needs nothing; someone else's needs MODERATE_MEMBERS (and outranking
+        // them, which the server checks).
+        if myself || moderate {
             let (v, g, u) = (this.clone(), gid.clone(), user_id.clone());
             let current = client.member(&gid, &user_id).and_then(|m| m.nickname.clone()).unwrap_or_default();
             entries.push(MenuEntry::item("Change nickname", move |window, cx| {
@@ -991,7 +1019,12 @@ impl Shell {
             entries.push(MenuEntry::Separator);
             entries.push(MenuEntry::Label("Moderation".into()));
         }
-        if moderate {
+        let timed_out = client.member(&gid, &user_id).and_then(|m| m.timeout_until).is_some_and(|t| t > rhein_store::now_ms());
+        if moderate && timed_out {
+            let (c, g, u) = (self.client.clone(), gid.clone(), user_id.clone());
+            entries.push(MenuEntry::item("Remove timeout", move |_, cx| c.update(cx, |c, cx| c.timeout_member(g.clone(), u.clone(), 0, cx))));
+        }
+        if moderate && !timed_out {
             for (label, minutes) in [("Time out for 10 minutes", 10), ("Time out for 1 hour", 60), ("Time out for 1 day", 1440)] {
                 let (v, g, u, n) = (this.clone(), gid.clone(), user_id.clone(), name.clone());
                 entries.push(MenuEntry::item(label, move |window, cx| {
@@ -2549,6 +2582,10 @@ impl Shell {
             );
         }
         for conversation in &client.conversations {
+            // A declined request stays out of the list, as the web client keeps it.
+            if conversation.request_state.as_deref() == Some("declined") && conversation.creator.as_deref() != client.user_id() {
+                continue;
+            }
             let title = client.conversation_title(conversation);
             let me = client.user_id().unwrap_or_default();
             let other = conversation.members.iter().find(|m| m.user_id != me).map(|m| m.user_id.clone()).unwrap_or_default();

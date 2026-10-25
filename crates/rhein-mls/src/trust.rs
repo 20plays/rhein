@@ -32,6 +32,11 @@ pub fn device_payload(user_id: &str, device_id: &str, mls_key_b64: &str) -> Vec<
     format!("telium-device-sig:v1|{user_id}|{device_id}|{mls_key_b64}").into_bytes()
 }
 
+/// What the account root signs to revoke one device's MLS key.
+pub fn revoke_payload(user_id: &str, immutable_id: &str, device_id: &str, mls_key_b64: &str) -> Vec<u8> {
+    format!("telium-device-revoke:v1|{user_id}|{immutable_id}|{device_id}|{mls_key_b64}").into_bytes()
+}
+
 pub fn key_binding_probe(user_id: &str) -> Vec<u8> {
     format!("telium-crosssign-key-binding:v1|{user_id}").into_bytes()
 }
@@ -112,6 +117,12 @@ impl IdentityKey {
     pub fn binds(&self, user_id: &str, published_b64: &str) -> bool {
         let probe = key_binding_probe(user_id);
         verifies(published_b64, &probe, &b64(&self.sign(&probe)))
+    }
+
+    /// The root's revocation of one of our devices' MLS keys (base64url, as every non-MLS
+    /// signature on the wire).
+    pub fn revoke_device(&self, user_id: &str, immutable_id: &str, device_id: &str, mls_key_b64: &str) -> String {
+        crate::vault::b64url(&self.sign(&revoke_payload(user_id, immutable_id, device_id, mls_key_b64)))
     }
 
     /// Our signature for one of our devices' MLS keys.

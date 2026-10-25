@@ -15,6 +15,15 @@ pub struct Discovery {
     pub moved_to: Option<String>,
     pub relay: Option<Value>,
     pub protocol: Option<ProtocolWindow>,
+    /// The domain that is the authority now (differs from `server_name` after a warm standby
+    /// was promoted).
+    pub authority: Option<String>,
+    /// A planned shutdown announced by the operator.
+    pub sunset: Option<Value>,
+    pub relocation: Option<Value>,
+    /// Where `moved_to` led, when discovery followed it: the name to keep from now on.
+    #[serde(skip)]
+    pub relocated_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

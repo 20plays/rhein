@@ -7109,6 +7109,7 @@ dependencies = [
  "ed25519-dalek",
  "opaque-ke",
  "rand 0.8.8",
+ "serde_json",
  "sha2 0.10.9",
 ]
 

@@ -293,6 +293,19 @@ pub fn judge_commit(group: &MlsGroup, committer: Option<&(String, String)>, stag
             bail!("{committer_name} may not add people to this group");
         }
     }
+    // An external commit may take out only the joiner's own earlier leaf (a profile that lost its
+    // group state rejoining under the same key), never anyone else's.
+    let external = staged.queued_proposals().any(|p| matches!(p.proposal(), Proposal::ExternalInit(_)));
+    if external {
+        let joiner = staged.update_path_leaf_node().map(|leaf| leaf.signature_key().as_slice().to_vec());
+        for remove in staged.remove_proposals() {
+            let index = remove.remove_proposal().removed();
+            let key = group.members().find(|m| m.index == index).map(|m| m.signature_key);
+            if key.is_none() || key != joiner {
+                bail!("{committer_name} joined from outside and tried to remove someone else's device");
+            }
+        }
+    }
     for remove in staged.remove_proposals() {
         let removed = group.member(remove.remove_proposal().removed()).and_then(identity_of).map(|(u, _)| u);
         if removed.as_deref() != who && !policy.as_ref().is_none_or(|p| allowed(p.remove)) {
