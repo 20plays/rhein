@@ -45,9 +45,9 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", rhein_ui::Dismiss, Some(SETTINGS_CONTEXT)),
         KeyBinding::new("escape", rhein_ui::Dismiss, Some(GUILD_SETTINGS_CONTEXT)),
     ];
-    for m in ["ctrl", "cmd"] {
-        out.push(KeyBinding::new(&format!("{m}-k"), OpenSwitcher, ctx));
-        out.push(KeyBinding::new(&format!("{m}-,"), OpenSettings, ctx));
+    for [k, comma] in [["ctrl-k", "ctrl-,"], ["cmd-k", "cmd-,"]] {
+        out.push(KeyBinding::new(k, OpenSwitcher, ctx));
+        out.push(KeyBinding::new(comma, OpenSettings, ctx));
     }
     out
 }
@@ -1814,7 +1814,7 @@ impl Shell {
             }));
         // Over the whole window, behind the card: whatever is under it neither scrolls nor
         // answers the pointer while the card is open (a click outside only closes the card).
-        let backdrop = div().id("profile-card-backdrop").absolute().inset_0().occlude().on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        let backdrop = div().id("profile-card-backdrop").absolute().inset_0().occlude().on_scroll(|_, _, cx| cx.stop_propagation());
         Some(
             deferred(backdrop.child(anchored().position(at).snap_to_window_with_margin(px(8.)).child(motion::pop_in(card, "profile-card-in"))))
                 .with_priority(2)
@@ -3258,7 +3258,7 @@ impl Render for Shell {
                         note_input(&l2, &c2, cx);
                     }
                 });
-                window.on_mouse_event(move |_: &gpui::ScrollWheelEvent, phase, _, cx| {
+                window.on_mouse_event(move |_: &gpui::ScrollEvent, phase, _, cx| {
                     if phase == gpui::DispatchPhase::Capture {
                         note_input(&l3, &c3, cx);
                     }

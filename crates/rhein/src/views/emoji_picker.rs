@@ -317,7 +317,7 @@ impl Render for EmojiPicker {
         div()
             .id("emoji-picker")
             .occlude()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .track_focus(&self.focus)
             .key_context(PICKER_CONTEXT)
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(DismissEvent)))

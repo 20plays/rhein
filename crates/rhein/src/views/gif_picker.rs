@@ -325,7 +325,7 @@ impl Render for GifPicker {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     // Scrolling brings other tiles into view: render again.
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
                     .child(
                         div()
                             .flex()
@@ -349,7 +349,7 @@ impl Render for GifPicker {
         div()
             .id("gif-picker")
             .occlude()
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_scroll(|_, _, cx| cx.stop_propagation())
             .track_focus(&self.focus)
             .key_context(crate::views::emoji_picker::PICKER_CONTEXT)
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(DismissEvent)))

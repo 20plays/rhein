@@ -211,7 +211,7 @@ impl Render for CropDialog {
                 this.drag = None;
                 cx.notify();
             }))
-            .on_scroll_wheel(cx.listener(move |this, e: &gpui::ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(move |this, e: &gpui::ScrollEvent, _, cx| {
                 cx.stop_propagation();
                 let travel = match e.delta {
                     ScrollDelta::Lines(l) => l.y as f64 * 0.06,

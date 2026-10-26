@@ -40,8 +40,8 @@ urlencoding = "2"
 opaque-ke = { version = "4.0.1", features = ["argon2", "ristretto255"] }
 argon2 = "0.5"
 sha2 = "0.10"
-gpui = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70fdcf0b5c6e28edb58e2fa77a7e67" }
-gpui_platform = { git = "https://github.com/sonorahq/gpui", rev = "770544dfcf70fdcf0b5c6e28edb58e2fa77a7e67", features = ["font-kit", "wayland", "x11"] }
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed", rev = "23973bd49f282846d2d285374d8b81c4d2a36a4b" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "23973bd49f282846d2d285374d8b81c4d2a36a4b", features = ["font-kit", "wayland", "x11"] }
 
 # Our own crates: file and line in panics and backtraces, without full debug info, which
 # made every test binary hundreds of MB (libwebrtc and gpui are linked into each).

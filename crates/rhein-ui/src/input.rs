@@ -101,11 +101,11 @@ pub fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-down", DocEnd, ctx),
         KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
     ];
-    for m in ["ctrl", "cmd"] {
-        out.push(KeyBinding::new(&format!("{m}-a"), SelectAll, ctx));
-        out.push(KeyBinding::new(&format!("{m}-v"), Paste, ctx));
-        out.push(KeyBinding::new(&format!("{m}-c"), Copy, ctx));
-        out.push(KeyBinding::new(&format!("{m}-x"), Cut, ctx));
+    for [a, v, c, x] in [["ctrl-a", "ctrl-v", "ctrl-c", "ctrl-x"], ["cmd-a", "cmd-v", "cmd-c", "cmd-x"]] {
+        out.push(KeyBinding::new(a, SelectAll, ctx));
+        out.push(KeyBinding::new(v, Paste, ctx));
+        out.push(KeyBinding::new(c, Copy, ctx));
+        out.push(KeyBinding::new(x, Cut, ctx));
     }
     out
 }

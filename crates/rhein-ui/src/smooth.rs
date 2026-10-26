@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use gpui::{
     AnyElement, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    ListState, Pixels, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, Window, px,
+    ListState, Pixels, Point, ScrollDelta, ScrollHandle, ScrollEvent, Window, px,
 };
 
 /// What gets scrolled.
@@ -135,7 +135,7 @@ impl Element for SmoothScroll {
         // Bubbling goes from the front to the back, and this handler comes after the container's
         // own, so it sees the step first, and the frontmost glide takes it (an overlay over the
         // chat, a picker over the composer).
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+        window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || !hitbox.is_hovered(window) {
                 return;
             }
