@@ -1936,6 +1936,7 @@ impl ChatView {
             parsed: self.parsed.clone(),
             movie: self.movie.clone(),
             movie_big: self.movie_big,
+            divider: self.client.read(cx).divider_index(&channel_id),
         });
         let messages = rhein_ui::smooth_scroll(
             "history-glide",

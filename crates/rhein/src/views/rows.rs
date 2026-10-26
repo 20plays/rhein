@@ -63,6 +63,8 @@ pub struct RowCtx {
     pub movie: Entity<crate::views::live::LiveMovie>,
     /// The player is shown large over the window, not in its row.
     pub movie_big: bool,
+    /// Where the "New messages" line goes (`Client::divider_index`), found once per frame.
+    pub divider: Option<usize>,
 }
 
 /// What a message's text parses to, which depends on nothing but the text: worked out once,
@@ -74,6 +76,12 @@ pub struct Parsed {
     pub links: Vec<String>,
     /// `gif_links::gifs_in` of the text.
     pub gifs: Vec<String>,
+    /// `gif_links::telium_media_in` of the text: Telium media links, GIF or picture once asked.
+    pub telium_media: Vec<String>,
+    /// The text is one GIF link and nothing else (`gif_links::is_gif_only`).
+    pub gif_only: bool,
+    /// The text is one Telium media link and nothing else.
+    pub media_only: bool,
 }
 
 pub type ParsedCache = Rc<RefCell<HashMap<String, Rc<Parsed>>>>;
@@ -94,6 +102,9 @@ pub fn parsed(cache: &ParsedCache, message: &Message) -> Rc<Parsed> {
         doc: markdown::parse(&message.content),
         links: markdown::links_in(&message.content),
         gifs: gif_links::gifs_in(&message.content),
+        telium_media: gif_links::telium_media_in(&message.content),
+        gif_only: gif_links::is_gif_only(&message.content),
+        media_only: gif_links::is_telium_media(message.content.trim()),
     });
     let mut cache = cache.borrow_mut();
     if cache.len() >= PARSED_KEPT {
@@ -127,7 +138,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let Some(log) = client.logs.get(channel_id) else { return div().into_any_element() };
     let Some(message) = log.messages.get(ix) else { return div().into_any_element() };
     let prev = ix.checked_sub(1).and_then(|p| log.messages.get(p));
-    let divider_here = client.divider_index(channel_id) == Some(ix);
+    let divider_here = ctx.divider == Some(ix);
     let new_day = prev.is_none_or(|p| day_of(p.created_at) != day_of(message.created_at));
     let grouped = !new_day
         && !divider_here
@@ -216,7 +227,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     // GIF links: the picture itself (a share page once its provider has named it).
     let mut shares_missing = Vec::new();
     let mut gifs = Vec::new();
-    for (n, url) in client.gif_links_in(&message.content).into_iter().enumerate() {
+    // As `Client::gif_links_in`, from the links parsed once.
+    let is_gif = |u: &&String| client.media_kind(u) == Some(MediaProbe::Known(MediaKind::Gif));
+    let gif_links = parsed.gifs.iter().chain(parsed.telium_media.iter().filter(is_gif)).cloned().collect::<Vec<_>>();
+    for (n, url) in gif_links.into_iter().enumerate() {
         match gif_links::share(&url) {
             None => gifs.push(gif_tile(ctx, ix, n, url.clone(), url, true, &t, cx)),
             Some(share) => match client.gif_share(&url) {
@@ -228,13 +242,17 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         }
     }
     // Telium media that proved to be a still picture: shown as one, without the GIF star.
-    for url in gif_links::telium_media_in(&message.content) {
+    for url in parsed.telium_media.iter().cloned() {
         if client.media_kind(&url) == Some(MediaProbe::Known(MediaKind::Image)) {
             let n = gifs.len() + 100;
             gifs.push(gif_tile(ctx, ix, n, url.clone(), url, false, &t, cx));
         }
     }
-    let gif_only = client.is_gif_only(&message.content);
+    // As `Client::is_gif_only`.
+    let gif_only = parsed.gif_only
+        || parsed.media_only
+            && parsed.telium_media.len() == 1
+            && client.media_kind(message.content.trim()) == Some(MediaProbe::Known(MediaKind::Gif));
 
     let reply_quote = message.reply_to.as_ref().map(|parent_id| {
         let parent = client.find_message(channel_id, parent_id);
@@ -490,10 +508,11 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         .child(div().flex().gap_4().pr(px(ACTION_BAR_W)).child(gutter).child(body))
         .children(actions)
         .when(!pending, |d| {
-            let (view, m) = (ctx.view.clone(), message.clone());
+            // The message is looked up on the click, not cloned into every row of every frame.
+            let (view, client, chan, id) = (ctx.view.clone(), ctx.client.clone(), ctx.channel_id.clone(), message.id.clone());
             d.on_mouse_down(gpui::MouseButton::Right, move |e, window, cx| {
-                let (m, at) = (m.clone(), e.position);
-                view.update(cx, |v, cx| v.open_message_menu(m, None, at, window, cx)).ok();
+                let Some(m) = client.read(cx).find_message(&chan, &id).cloned() else { return };
+                view.update(cx, |v, cx| v.open_message_menu(m, None, e.position, window, cx)).ok();
             })
         });
 

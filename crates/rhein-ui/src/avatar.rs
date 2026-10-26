@@ -59,23 +59,6 @@ impl RenderOnce for Avatar {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = cx.theme();
         let size = self.size;
-        let letter = self
-            .name
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into());
-        let fallback = div()
-            .size(size)
-            .rounded_full()
-            .bg(user_color(&self.user_id))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_color(t.text_on_accent)
-            .text_size(size * 0.42)
-            .font_weight(FontWeight::SEMIBOLD)
-            .child(letter);
         let face = match self.image {
             Some(url) => img(crate::images::scaled(url, size, window))
                 .size(size)
@@ -87,7 +70,22 @@ impl RenderOnce for Avatar {
                     move || Avatar::new(fallback_user.clone(), fallback_name.clone()).size(size).into_any_element()
                 })
                 .into_any_element(),
-            None => fallback.into_any_element(),
+            // Built only without a picture: a list draws many avatars on every frame of a scroll.
+            None => {
+                let letter = self.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+                div()
+                    .size(size)
+                    .rounded_full()
+                    .bg(user_color(&self.user_id))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(t.text_on_accent)
+                    .text_size(size * 0.42)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(letter)
+                    .into_any_element()
+            }
         };
         let dot = self.presence.map(|p| {
             let color = match p {
