@@ -570,7 +570,7 @@ fn prepaint_view(
     window.with_rendered_view(entity_id, |window| {
         if let Some(mut element) = element.take() {
             // Rhein: a kept-size view rendered during layout (to be measured) is cached too.
-            let Some(accessed_entities) = accessed.filter(|_| keep_size) else {
+            let Some(mut accessed_entities) = accessed.filter(|_| keep_size) else {
                 element.prepaint(window, cx);
                 return Some(element);
             };
@@ -580,7 +580,9 @@ fn prepaint_view(
                     let content_mask = window.content_mask();
                     let text_style = window.text_style();
                     let prepaint_start = window.prepaint_index();
-                    element.prepaint(window, cx);
+                    // As in its layout, what is read while it prepaints counts.
+                    let (_, prepainted) = cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
+                    accessed_entities.extend(prepainted);
                     let prepaint_end = window.prepaint_index();
                     let state = ViewElementState {
                         accessed_entities,
@@ -757,9 +759,14 @@ fn request_layout_kept(
             root_style.size.height = crate::Length::Definite(size.height.into());
             return (window.request_layout(root_style, None, cx), None);
         }
-        let (mut element, entities) = cx.detect_accessed_entities(|cx| render(window, cx));
+        // What its child views read while they lay out counts too: reused, the view would
+        // otherwise stop hearing of their changes.
+        let ((layout_id, element), entities) = cx.detect_accessed_entities(|cx| {
+            let mut element = render(window, cx);
+            let layout_id = element.request_layout(window, cx);
+            (layout_id, element)
+        });
         *accessed = Some(entities);
-        let layout_id = element.request_layout(window, cx);
         (layout_id, Some(element))
     })
 }

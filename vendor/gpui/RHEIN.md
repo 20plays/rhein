@@ -18,7 +18,10 @@ Changes are marked `Rhein:` in the source.
   `Window::refreshing` for the whole subtree of a cached view that redraws, which would redraw
   every row of a history whenever the history redraws. A new `Window::refresh_requested`, set
   only by `Window::refresh`, is what makes such a view redraw regardless.
-  `Window::peek_element_state` reads the kept size before the view takes its state.
+  `Window::peek_element_state` reads the kept size before the view takes its state. What the
+  view's child views read while they lay out and prepaint is part of what it read, so a view
+  inside it (a video playing in a row) still redraws it after it was reused.
+
   Tests: `crates/rhein-ui/tests/kept_rows.rs`.
 - **Kept-size views drawn moved** (`view.rs` `movable`, `window.rs` `reuse_prepaint_at`,
   `reuse_paint_at`, `scene.rs` `replay_moved`): a clean kept-size view whose position changed (a

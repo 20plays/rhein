@@ -178,3 +178,92 @@ fn a_moved_row_hears_no_click_meant_for_where_it_was(cx: &mut TestAppContext) {
     let under = (0..50).find(|&ix| f.list.bounds_for_item(ix).is_some_and(|b| b.contains(&target)));
     assert!(clicks.is_empty() || clicks == under.into_iter().collect::<Vec<_>>(), "clicked {clicks:?}, under {under:?}");
 }
+
+/// A view inside a row that changes on its own, as a video playing in a message does.
+struct Player {
+    renders: Rc<Cell<usize>>,
+}
+
+impl Render for Player {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        div().w_full().h(px(10.)).child(format!("frame {}", self.renders.get()))
+    }
+}
+
+struct PlayerRow {
+    player: Entity<Player>,
+}
+
+impl Render for PlayerRow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w_full().h(px(20.)).child(self.player.clone())
+    }
+}
+
+struct PlayerHost {
+    list: ListState,
+    rows: Vec<gpui::AnyView>,
+}
+
+impl Render for PlayerHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows.clone();
+        list(self.list.clone(), move |ix, _, _| rows[ix].clone().cached(StyleRefinement::default().w_full()).keep_size().into_any_element()).size_full()
+    }
+}
+
+#[gpui::test]
+fn a_view_inside_a_row_draws_on_every_change(cx: &mut TestAppContext) {
+    let renders = Rc::new(Cell::new(0));
+    let list = ListState::new(10, ListAlignment::Top, px(0.));
+    let (player, host) = cx.update(|cx| {
+        let player = cx.new(|_| Player { renders: renders.clone() });
+        let rows: Vec<gpui::AnyView> = (0..10)
+            .map(|ix| {
+                if ix == 2 {
+                    cx.new(|_| PlayerRow { player: player.clone() }).into()
+                } else {
+                    cx.new(|_| Row { ix, height: 20., renders: Rc::default(), clicks: Rc::default() }).into()
+                }
+            })
+            .collect();
+        (player, cx.new(|_| PlayerHost { list: list.clone(), rows }))
+    });
+    let root = host.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| Root2 { host: root });
+    cx.simulate_resize(size(px(400.), px(300.)));
+    cx.simulate_mouse_move(point(px(1000.), px(1000.)), None, Modifiers::none());
+    frame(cx);
+    frame(cx);
+    for pointer in [point(px(1000.), px(1000.)), point(px(100.), px(50.))] {
+        cx.simulate_mouse_move(pointer, None, Modifiers::none());
+        frame(cx);
+        for n in 0..5 {
+            // Something else draws the list again in between, its rows reused.
+            host.update(cx, |_, cx| cx.notify());
+            frame(cx);
+            let before = renders.get();
+            player.update(cx, |_, cx| cx.notify());
+            frame(cx);
+            assert_eq!(renders.get(), before + 1, "change {n}, pointer at {pointer:?}");
+            list.scroll_by(px(1.));
+            host.update(cx, |_, cx| cx.notify());
+            frame(cx);
+            let before = renders.get();
+            player.update(cx, |_, cx| cx.notify());
+            frame(cx);
+            assert_eq!(renders.get(), before + 1, "change {n} after a scroll, pointer at {pointer:?}");
+        }
+    }
+}
+
+struct Root2 {
+    host: Entity<PlayerHost>,
+}
+
+impl Render for Root2 {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.host.clone().cached(StyleRefinement::default().size_full()))
+    }
+}
