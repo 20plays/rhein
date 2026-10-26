@@ -123,8 +123,8 @@ impl Render for LiveMovie {
         // Where the bar is on screen, for turning a click into a position.
         let bar = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let measured = bar.clone();
-        let message = if state.loading {
-            Some("Loading…".to_owned())
+        let message = if state.loading || state.buffering {
+            Some(state.downloaded.map_or_else(|| "Loading…".to_owned(), |n| format!("Loading… {n} %")))
         } else {
             state.error.clone().map(|e| format!("This video can't be played here: {e}"))
         };

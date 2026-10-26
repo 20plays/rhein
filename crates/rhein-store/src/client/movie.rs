@@ -1,10 +1,17 @@
 //! Videos in messages: one plays at a time (and stops a sound file playing), fetched (and in DMs
-//! decrypted) when first played. What it shows lives in [`MoviePlayer`], an entity of its own
-//! the player view watches: thirty pictures a second redraw the player and nothing else.
+//! decrypted) when first played, or its start when the pointer rests on it. It plays while the
+//! rest arrives, and the last few stay for playing again. What it shows lives in
+//! [`MoviePlayer`], an entity of its own the player view watches: thirty pictures a second
+//! redraw the player and nothing else.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use rhein_voice::buffered::Buffered;
 use rhein_voice::movie::Movie;
+
+use super::media::Fetcher;
 
 use super::*;
 
@@ -12,6 +19,10 @@ use super::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MovieView {
     pub loading: bool,
+    /// Waiting for more of the file, having caught up with its download.
+    pub buffering: bool,
+    /// How much of the file is here, in whole percent, while it downloads (when its size is known).
+    pub downloaded: Option<u8>,
     pub playing: bool,
     pub position: f64,
     pub duration: Option<f64>,
@@ -20,6 +31,12 @@ pub struct MovieView {
     pub size: Option<(u32, u32)>,
 }
 
+/// The videos' bytes kept (and still downloading) take at most this much, the one loaded aside.
+const KEPT: u64 = 256 << 20;
+
+/// The pointer resting on a video this long fetches its start.
+const REST: Duration = Duration::from_millis(250);
+
 /// The video loaded from a message (at most one), and its latest picture.
 #[derive(Default)]
 pub struct MoviePlayer {
@@ -27,10 +44,18 @@ pub struct MoviePlayer {
     loading: bool,
     error: Option<String>,
     movie: Option<Arc<Movie>>,
+    bytes: Option<Arc<Buffered>>,
+    /// Set when it is unloaded: starting it stops waiting for the file.
+    unloaded: Arc<AtomicBool>,
     picture: Option<(u64, Arc<gpui::RenderImage>)>,
     /// What the view last showed, to redraw only when it changes.
     shown: Option<MovieView>,
+    _loading: Option<Task<()>>,
     _ticker: Option<Task<()>>,
+    /// Videos' bytes by key, the latest used last; they outlive loading one.
+    kept: VecDeque<(String, Arc<Buffered>)>,
+    /// The video the pointer rests on, and the wait before its start is fetched.
+    resting: Option<(String, Task<()>)>,
 }
 
 impl MoviePlayer {
@@ -42,8 +67,14 @@ impl MoviePlayer {
     pub fn view(&self) -> Option<MovieView> {
         self.key.as_ref()?;
         let movie = self.movie.as_ref();
+        let downloaded = self.bytes.as_ref().filter(|b| !b.complete()).and_then(|b| match b.progress() {
+            (got, Some(total)) if total > 0 => Some((got * 100 / total).min(99) as u8),
+            _ => None,
+        });
         Some(MovieView {
             loading: self.loading,
+            buffering: movie.is_some_and(|m| m.buffering()),
+            downloaded,
             playing: movie.is_some_and(|m| !m.paused() && !m.ended()),
             position: movie.map_or(0., |m| m.position()),
             duration: movie.map(|m| m.duration()),
@@ -60,7 +91,46 @@ impl MoviePlayer {
         if let Some((_, image)) = self.picture.take() {
             cx.drop_image(image, None);
         }
-        *self = MoviePlayer::default();
+        self.unloaded.store(true, Ordering::Relaxed);
+        let (kept, resting) = (std::mem::take(&mut self.kept), self.resting.take());
+        *self = MoviePlayer { kept, resting, ..MoviePlayer::default() };
+    }
+
+    /// The bytes of the video `key`, kept or a new download of them; `whole` asks for all of
+    /// them, not only the start.
+    fn bytes(&mut self, key: &str, source: MediaSource, whole: bool, io: &Io, fetcher: Fetcher) -> Arc<Buffered> {
+        let bytes = match self.kept.iter().position(|(k, _)| k == key) {
+            Some(i) if !self.kept[i].1.failed() => self.kept.remove(i).expect("found").1,
+            found => {
+                if let Some(i) = found {
+                    self.kept.remove(i);
+                }
+                let bytes = Arc::new(Buffered::default());
+                io.spawn({
+                    let bytes = bytes.clone();
+                    async move { fetcher.stream(source, bytes).await }
+                });
+                bytes
+            }
+        };
+        if whole {
+            bytes.want();
+        }
+        self.kept.push_back((key.to_owned(), bytes.clone()));
+        // The oldest go (their downloads stop), never the one loaded or just asked for.
+        let size = |b: &Buffered| b.size().unwrap_or_else(|| b.progress().0);
+        let mut total: u64 = self.kept.iter().map(|(_, b)| size(b)).sum();
+        let mut i = 0;
+        while total > KEPT && i + 1 < self.kept.len() {
+            if self.key.as_deref() == Some(self.kept[i].0.as_str()) {
+                i += 1;
+                continue;
+            }
+            let (_, gone) = self.kept.remove(i).expect("in range");
+            total -= size(&gone);
+            gone.give_up();
+        }
+        bytes
     }
 
     /// Takes the movie's newest picture when there is one, and says whether anything shown
@@ -109,28 +179,43 @@ impl Client {
         let wanted = key.clone();
         // The rows learn the picture's size once it is known.
         let tick = self.media_tick.clone();
-        let loading = cx.spawn(async move |_, cx| {
-            let started = join(io.spawn(async move {
-                let bytes = fetcher.fetch(source).await?;
-                Ok(Arc::new(tokio::task::spawn_blocking(move || Movie::start(bytes.into(), device)).await??))
-            }))
-            .await;
-            player.update(cx, |p, cx| {
-                if p.key.as_deref() != Some(wanted.as_str()) {
-                    return;
-                }
-                p.loading = false;
-                match started {
-                    Ok(movie) => p.movie = Some(movie),
-                    Err(err) => p.error = Some(friendly(&err)),
-                }
-                p.refresh(cx);
-                cx.notify();
-            });
-            tick.update(cx, |_, cx| cx.notify());
-            // Up to sixty pictures a second while it plays, a slower look while it is paused (a
-            // seek still brings a picture); nothing is redrawn unless something changed.
-            let mut every = Duration::from_millis(16);
+        let (bytes, unloaded) = self.movie_player.update(cx, |p, cx| {
+            p.clear(cx);
+            p.key = Some(key.clone());
+            p.loading = true;
+            let bytes = p.bytes(&key, source, true, &io, fetcher);
+            p.bytes = Some(bytes.clone());
+            p.refresh(cx);
+            cx.notify();
+            (bytes, p.unloaded.clone())
+        });
+        let since = std::time::Instant::now();
+        // It starts once the file's index and its first moments are here.
+        let started = io.spawn(async move { tokio::task::spawn_blocking(move || Movie::start(bytes, device, move || unloaded.load(Ordering::Relaxed))).await? });
+        let loading = cx.spawn({
+            let (player, wanted) = (player.clone(), wanted.clone());
+            async move |_, cx| {
+                let started = join(started).await;
+                log::debug!("video {wanted} started in {:?}", since.elapsed());
+                player.update(cx, |p, cx| {
+                    if p.key.as_deref() != Some(wanted.as_str()) {
+                        return;
+                    }
+                    p.loading = false;
+                    match started {
+                        Ok(movie) => p.movie = Some(Arc::new(movie)),
+                        Err(err) => p.error = Some(friendly(&err)),
+                    }
+                    p.refresh(cx);
+                    cx.notify();
+                });
+                tick.update(cx, |_, cx| cx.notify());
+            }
+        });
+        // Up to sixty pictures a second while it plays, a slower look while it loads or is paused
+        // (a seek still brings a picture); nothing is redrawn unless something changed.
+        let ticker = cx.spawn(async move |_, cx| {
+            let mut every = Duration::from_millis(100);
             loop {
                 cx.background_executor().timer(every).await;
                 let next = player.update(cx, |p, cx| {
@@ -141,7 +226,7 @@ impl Client {
                         cx.notify();
                     }
                     let playing = p.shown.as_ref().is_some_and(|v| v.playing);
-                    p.movie.as_ref().map(|_| Duration::from_millis(if playing { 16 } else { 100 }))
+                    (p.loading || p.movie.is_some()).then(|| Duration::from_millis(if playing { 16 } else { 100 }))
                 });
                 match next {
                     Some(next) => every = next,
@@ -149,13 +234,41 @@ impl Client {
                 }
             }
         });
-        self.movie_player.update(cx, |p, cx| {
-            p.clear(cx);
-            p.key = Some(key);
-            p.loading = true;
-            p._ticker = Some(loading);
-            p.refresh(cx);
-            cx.notify();
+        self.movie_player.update(cx, |p, _| {
+            p._loading = Some(loading);
+            p._ticker = Some(ticker);
+        });
+    }
+
+    /// The pointer rests on the video `key` (or has left it, `None`): after a moment its start
+    /// is fetched, so playing it starts at once. Nothing is redrawn. Only guild files: an
+    /// encrypted one would come whole.
+    pub fn rest_on_movie(&mut self, key: String, source: Option<MediaSource>, cx: &mut Context<Self>) {
+        let (io, fetcher) = (self.io.clone(), self.fetcher());
+        let player = self.movie_player.clone();
+        player.update(cx, |p, cx| {
+            let Some(source @ MediaSource::Url(_)) = source else {
+                if p.resting.as_ref().is_some_and(|(k, _)| *k == key) {
+                    p.resting = None;
+                }
+                return;
+            };
+            if p.key.as_deref() == Some(key.as_str()) || p.kept.iter().any(|(k, b)| *k == key && !b.failed()) {
+                return;
+            }
+            let wait = cx.spawn({
+                let key = key.clone();
+                async move |player, cx| {
+                    cx.background_executor().timer(REST).await;
+                    player
+                        .update(cx, |p, _| {
+                            p.resting = None;
+                            p.bytes(&key, source, false, &io, fetcher);
+                        })
+                        .ok();
+                }
+            });
+            p.resting = Some((key, wait));
         });
     }
 

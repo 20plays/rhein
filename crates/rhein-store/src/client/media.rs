@@ -5,8 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rhein_voice::buffered::Buffered;
+
 use super::*;
 use crate::conversations::Engine;
+
+/// How much of a file a look ahead fetches before it waits to be wanted whole.
+const LOOK_AHEAD: u64 = 2 << 20;
+
+/// How long a look ahead waits to be wanted before it gives up.
+const LOOK_AHEAD_KEPT: Duration = Duration::from_secs(60);
 
 /// Where an attachment's bytes come from.
 #[derive(Clone)]
@@ -51,6 +59,62 @@ impl Fetcher {
             MediaSource::Dm { conversation, message, index } => {
                 let (attachment, api) = self.dm_attachment(&conversation, &message, index).await?;
                 Engine::fetch_attachment(&api, &attachment).await
+            }
+        }
+    }
+
+    /// Downloads the attachment into `into` as it arrives, for playing while it comes. Until it
+    /// is wanted whole only its start is fetched. A guild file comes in pieces, an MP4's index
+    /// from its end first when it is there; an encrypted one is opened whole first.
+    pub(super) async fn stream(&self, source: MediaSource, into: Arc<Buffered>) {
+        let done = match source {
+            MediaSource::Url(url) => self.stream_url(&url, &into).await,
+            source => self.fetch(source).await.map(|bytes| {
+                into.set_len(bytes.len() as u64);
+                into.push(&bytes);
+            }),
+        };
+        into.finish(done.err().map(|e| friendly(&e)));
+    }
+
+    async fn stream_url(&self, url: &str, into: &Arc<Buffered>) -> Result<()> {
+        let mut response = self.http.get(url).send().await?.error_for_status()?;
+        let len = response.content_length();
+        if let Some(len) = len {
+            into.set_len(len);
+        }
+        let mut index = len.is_none();
+        loop {
+            if into.failed() {
+                return Ok(());
+            }
+            if !into.wanted() && into.progress().0 >= LOOK_AHEAD {
+                let since = std::time::Instant::now();
+                while !into.wanted() && !into.failed() {
+                    if since.elapsed() > LOOK_AHEAD_KEPT {
+                        into.give_up();
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                continue;
+            }
+            let Some(chunk) = response.chunk().await? else { return Ok(()) };
+            into.push(&chunk);
+            if !index && let Some(len) = len {
+                match index_after_pictures(&into.start(64 << 10), len) {
+                    Index::Unknown => {}
+                    Index::Coming => index = true,
+                    Index::After(at) => {
+                        index = true;
+                        let (http, url, into) = (self.http.clone(), url.to_owned(), into.clone());
+                        tokio::spawn(async move {
+                            if let Err(err) = fetch_tail(&http, &url, at, &into).await {
+                                log::debug!("the end of {url}: {err:#}");
+                            }
+                        });
+                    }
+                }
             }
         }
     }
@@ -100,6 +164,53 @@ impl Fetcher {
         }
         Ok(path)
     }
+}
+
+/// The file from `at` to its end, when the server hands out parts of files.
+async fn fetch_tail(http: &reqwest::Client, url: &str, at: u64, into: &Buffered) -> Result<()> {
+    let response = http.get(url).header(reqwest::header::RANGE, format!("bytes={at}-")).send().await?.error_for_status()?;
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        anyhow::bail!("the server sends only whole files ({})", response.status());
+    }
+    into.put_tail(at, &response.bytes().await?);
+    Ok(())
+}
+
+/// Where an MP4 keeps its index, as far as its start tells.
+#[derive(Debug, PartialEq)]
+enum Index {
+    /// More of the start is needed.
+    Unknown,
+    /// Before the pictures, or not an MP4: fetching from the start brings it in time.
+    Coming,
+    /// After the pictures, from this byte on.
+    After(u64),
+}
+
+/// Reads the top boxes of an MP4 of `len` bytes from its `start` up to the pictures (`mdat`).
+fn index_after_pictures(start: &[u8], len: u64) -> Index {
+    if start.len() >= 8 && &start[4..8] != b"ftyp" {
+        return Index::Coming;
+    }
+    let mut at = 0u64;
+    while at < len {
+        let Some(head) = start.get(at as usize..at as usize + 8) else { return Index::Unknown };
+        let size = match u32::from_be_bytes(head[..4].try_into().unwrap()) {
+            0 => len - at,
+            1 => match start.get(at as usize + 8..at as usize + 16) {
+                Some(large) => u64::from_be_bytes(large.try_into().unwrap()),
+                None => return Index::Unknown,
+            },
+            n => n as u64,
+        };
+        match &head[4..8] {
+            b"moov" => return Index::Coming,
+            b"mdat" if at + size < len => return Index::After(at + size),
+            _ if size < 8 => return Index::Coming,
+            _ => at += size,
+        }
+    }
+    Index::Coming
 }
 
 /// A file name safe to save under: no folders, not hidden, not empty.
@@ -203,6 +314,17 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_index_after_the_pictures_is_found() {
+        let boxed = |kind: &[u8], size: u32| [&size.to_be_bytes()[..], kind].concat();
+        let start = [boxed(b"ftyp", 16), vec![0; 8], boxed(b"free", 8), boxed(b"mdat", 1000)].concat();
+        assert_eq!(index_after_pictures(&start, 1024 + 500), Index::After(1024));
+        assert_eq!(index_after_pictures(&start[..20], 1524), Index::Unknown);
+        let first = [boxed(b"ftyp", 16), vec![0; 8], boxed(b"moov", 400)].concat();
+        assert_eq!(index_after_pictures(&first, 5000), Index::Coming);
+        assert_eq!(index_after_pictures(b"\x89PNG\r\n\x1a\n....", 5000), Index::Coming);
+    }
 
     #[test]
     fn names_are_made_safe() {

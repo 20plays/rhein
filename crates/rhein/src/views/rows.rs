@@ -1187,6 +1187,7 @@ fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
         ctx.movie.clone().into_any_element()
     } else {
         let (client, key, source) = (ctx.client.clone(), key.clone(), source.clone());
+        let (resting, rest_key, rest_source) = (ctx.client.clone(), key.clone(), source.clone());
         let download = ctx.client.read(cx).download(&key);
         div()
             .id(SharedString::from(format!("video-poster-{ix}-{i}")))
@@ -1196,6 +1197,11 @@ fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
             .items_center()
             .justify_center()
             .cursor_pointer()
+            // Resting on it fetches its start, so a click plays at once.
+            .on_hover(move |hovered, _, cx| {
+                let source = hovered.then(|| rest_source.clone());
+                resting.update(cx, |c, cx| c.rest_on_movie(rest_key.clone(), source, cx));
+            })
             .on_click(move |_, _, cx| {
                 let (key, source) = (key.clone(), source.clone());
                 client.update(cx, |c, cx| c.toggle_movie(key, source, cx));

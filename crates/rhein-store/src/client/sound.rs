@@ -64,7 +64,7 @@ impl Client {
         let task = cx.spawn(async move |this, cx| {
             let started = join(io.spawn(async move {
                 let bytes = fetcher.fetch(source).await?;
-                let playback = tokio::task::spawn_blocking(move || Playback::start(bytes.into(), extension.as_deref(), device)).await??;
+                let playback = tokio::task::spawn_blocking(move || Playback::start(bytes, extension.as_deref(), device)).await??;
                 Ok(Arc::new(playback))
             }))
             .await;

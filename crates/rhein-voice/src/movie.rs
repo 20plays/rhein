@@ -1,12 +1,13 @@
 //! Playing a video from a message: H.264 in an MP4 or QuickTime file, decoded with OpenH264 (built
 //! in, so no codec has to be installed) on a thread of its own, its sound through [`Playback`].
 //! The pictures follow the sound's clock, or the wall clock when there is no sound; only the
-//! latest is kept, for the UI to draw.
+//! latest is kept, for the UI to draw. It plays while the file still downloads: it starts once
+//! the index and the first moments are here, and waits (clock held) when it catches up.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -17,6 +18,7 @@ use openh264::decoder::{DecodedYUV, Decoder, DecoderConfig, Flush};
 use openh264::formats::YUVSource as _;
 use re_mp4::{Mp4, Sample, StsdBoxContent, TrackKind};
 
+use crate::buffered::Buffered;
 use crate::playback::Playback;
 use crate::video::Picture;
 
@@ -28,6 +30,9 @@ const MAX_WIDTH: u32 = 1280;
 
 /// A picture this late is dropped unshown, so a slow machine catches up instead of lagging on.
 const LATE: f64 = 0.25;
+
+/// Having caught up with the download, it plays on once this much more is here.
+const AHEAD: f64 = 1.5;
 
 /// Whether a file of this name and MIME type is a video this can play.
 pub fn playable(filename: &str, mime: &str) -> bool {
@@ -64,10 +69,13 @@ impl Clock {
 struct Shared {
     stop: AtomicBool,
     paused: AtomicBool,
+    /// Waiting for bytes still downloading.
+    buffering: AtomicBool,
     /// Asked for by the UI, taken by the decoder.
     seek: Mutex<Option<f64>>,
     duration: f64,
-    sound: Option<Playback>,
+    /// Set once the sound is open (`None`: there is none we can play). The clock waits for it.
+    sound: OnceLock<Option<Playback>>,
     clock: Mutex<Clock>,
     latest: Mutex<Option<Arc<Picture>>>,
     /// Bumped with each new picture.
@@ -80,10 +88,39 @@ impl Shared {
     /// (carried on from where the sound stood).
     fn position(&self) -> f64 {
         let mut clock = self.clock.lock().unwrap();
-        if let Some(sound) = self.sound.as_ref().filter(|s| !s.ended() && s.error().is_none()) {
+        if let Some(sound) = self.sound().filter(|s| !s.ended() && s.error().is_none()) {
             clock.set(sound.position());
         }
         clock.now().min(self.duration)
+    }
+
+    fn sound(&self) -> Option<&Playback> {
+        self.sound.get().and_then(Option::as_ref)
+    }
+
+    /// Runs or holds the sound and the clock: they run once the sound is settled, unless paused
+    /// or waiting for bytes.
+    fn apply(&self) {
+        // The clock is brought up to date while the sound still runs.
+        let at = self.position();
+        let run = self.sound.get().is_some() && !self.paused.load(Ordering::Relaxed) && !self.buffering.load(Ordering::Relaxed);
+        if let Some(sound) = self.sound() {
+            sound.set_paused(!run);
+        }
+        let mut clock = self.clock.lock().unwrap();
+        clock.set(at);
+        clock.run(run);
+    }
+
+    fn set_buffering(&self, buffering: bool) {
+        if self.buffering.swap(buffering, Ordering::Relaxed) != buffering {
+            self.apply();
+        }
+    }
+
+    /// A stop or a seek came: waiting for bytes ends.
+    fn interrupted(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.seek.lock().unwrap().is_some()
     }
 }
 
@@ -97,9 +134,12 @@ pub struct Movie {
 
 impl Movie {
     /// Starts playing `bytes`, its sound on the cpal output `device` (`None` for the default,
-    /// `Some("alsa:null")` for silence).
-    pub fn start(bytes: Arc<[u8]>, device: Option<String>) -> Result<Movie> {
-        let mp4 = Mp4::read_bytes(&bytes).map_err(|e| anyhow!("this video cannot be read: {e}"))?;
+    /// `Some("alsa:null")` for silence). The file may still be arriving: this waits for its index,
+    /// unless `cancel` says to stop.
+    pub fn start(bytes: Arc<Buffered>, device: Option<String>, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<Movie> {
+        let reader = bytes.reader(cancel);
+        let len = reader.size()?;
+        let mp4 = Mp4::read(reader, len).map_err(|e| anyhow!("this video cannot be read: {e}"))?;
         let track = mp4.tracks().values().find(|t| t.kind == Some(TrackKind::Video)).ok_or_else(|| anyhow!("this file has no video in it"))?;
         let StsdBoxContent::Avc1(avc1) = &track.trak(&mp4).mdia.minf.stbl.stsd.contents else {
             let codec = track.codec_string(&mp4).unwrap_or_else(|| "this format".into());
@@ -129,21 +169,20 @@ impl Movie {
             0 => (avc1.width as u32, avc1.height as u32),
             _ => (avc1.height as u32, avc1.width as u32),
         };
-        // No sound (or none we can play) leaves the wall clock to keep time.
-        let sound = Playback::start(bytes.clone(), Some("mp4"), device).inspect_err(|e| log::debug!("video sound: {e:#}")).ok();
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            buffering: AtomicBool::new(false),
             seek: Mutex::new(None),
             duration,
-            sound,
-            clock: Mutex::new(Clock { base: 0., since: Some(Instant::now()) }),
+            sound: OnceLock::new(),
+            clock: Mutex::new(Clock { base: 0., since: None }),
             latest: Mutex::default(),
             seq: AtomicU64::new(0),
             error: Mutex::default(),
         });
         {
-            let shared = shared.clone();
+            let (shared, bytes) = (shared.clone(), bytes.clone());
             std::thread::Builder::new()
                 .name("rhein-movie".into())
                 .spawn(move || {
@@ -152,6 +191,26 @@ impl Movie {
                     }
                 })
                 .context("cannot start the video")?;
+        }
+        // The sound opens beside the first pictures, not before them. No sound (or none we can
+        // play) leaves the wall clock to keep time.
+        {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("rhein-movie-sound".into())
+                .spawn(move || {
+                    let sound = Playback::start_buffered(bytes, Some("mp4"), device).inspect_err(|e| log::debug!("video sound: {e:#}")).ok();
+                    // A seek made meanwhile.
+                    let at = shared.clock.lock().unwrap().now();
+                    if let Some(sound) = &sound
+                        && at > 0.
+                    {
+                        sound.seek(at);
+                    }
+                    let _ = shared.sound.set(sound);
+                    shared.apply();
+                })
+                .context("cannot start the video's sound")?;
         }
         Ok(Movie { shared, width, height })
     }
@@ -169,16 +228,8 @@ impl Movie {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        let shared = &self.shared;
-        // The clock is brought up to date while the sound still runs.
-        let at = shared.position();
-        shared.paused.store(paused, Ordering::Relaxed);
-        if let Some(sound) = &shared.sound {
-            sound.set_paused(paused);
-        }
-        let mut clock = shared.clock.lock().unwrap();
-        clock.set(at);
-        clock.run(!paused);
+        self.shared.paused.store(paused, Ordering::Relaxed);
+        self.shared.apply();
     }
 
     pub fn paused(&self) -> bool {
@@ -188,7 +239,7 @@ impl Movie {
     /// Jumps to `seconds` from the start.
     pub fn seek(&self, seconds: f64) {
         let to = seconds.clamp(0., self.shared.duration);
-        if let Some(sound) = &self.shared.sound {
+        if let Some(sound) = self.shared.sound() {
             sound.seek(to);
         }
         self.shared.clock.lock().unwrap().set(to);
@@ -212,12 +263,17 @@ impl Movie {
     pub fn error(&self) -> Option<String> {
         self.shared.error.lock().unwrap().clone()
     }
+
+    /// Held, waiting for bytes still downloading (or for its sound to open).
+    pub fn buffering(&self) -> bool {
+        self.shared.buffering.load(Ordering::Relaxed) || self.shared.sound.get().is_none()
+    }
 }
 
 impl Drop for Movie {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(sound) = &self.shared.sound {
+        if let Some(sound) = self.shared.sound() {
             sound.set_paused(true);
         }
     }
@@ -271,10 +327,10 @@ fn turned(picture: Picture, turns: u8) -> Picture {
 }
 
 impl Stream {
-    /// A sample's NAL units as Annex B (start codes instead of lengths), which OpenH264 reads.
-    fn annex_b(&self, bytes: &[u8], sample: &Sample, out: &mut Vec<u8>) {
+    /// A sample's NAL units (`data`) as Annex B (start codes instead of lengths), which OpenH264
+    /// reads.
+    fn annex_b(&self, mut data: &[u8], out: &mut Vec<u8>) {
         out.clear();
-        let Some(mut data) = bytes.get(sample.byte_range()) else { return };
         while data.len() > self.length_size {
             let len = data[..self.length_size].iter().fold(0usize, |n, b| n << 8 | *b as usize);
             let Some(nal) = data.get(self.length_size..self.length_size + len) else { return };
@@ -282,6 +338,14 @@ impl Stream {
             out.extend_from_slice(nal);
             data = &data[self.length_size + len..];
         }
+    }
+
+    /// The bytes of the samples from `from` on that are shown in the next `seconds`.
+    fn span(&self, from: usize, seconds: f64) -> std::ops::Range<usize> {
+        let Some(first) = self.samples.get(from) else { return 0..0 };
+        let until = first.composition_timestamp + (seconds * self.timescale) as i64;
+        let ahead = self.samples[from..].iter().take_while(|s| s.composition_timestamp < until || s.id == first.id);
+        ahead.fold(first.byte_range(), |r, s| r.start.min(s.byte_range().start)..r.end.max(s.byte_range().end))
     }
 
     /// Where to start decoding for a picture at `at` seconds: the last key frame not after it.
@@ -298,7 +362,7 @@ fn new_decoder(stream: &Stream) -> Result<Decoder> {
 }
 
 /// The decoding thread: feeds the samples in order and shows each picture when its time comes.
-fn decode(bytes: &[u8], stream: Stream, shared: &Shared) -> Result<()> {
+fn decode(bytes: &Buffered, stream: Stream, shared: &Shared) -> Result<()> {
     let mut decoder = new_decoder(&stream)?;
     let mut next = 0;
     // The display times of the pictures still in the decoder. OpenH264 hands them out in display
@@ -306,8 +370,10 @@ fn decode(bytes: &[u8], stream: Stream, shared: &Shared) -> Result<()> {
     let mut pending = BinaryHeap::new();
     // After a seek: pictures before this are decoded but not shown, except the one at the target.
     let mut skip_until: Option<f64> = None;
-    let mut nal = Vec::new();
+    let (mut data, mut nal) = (Vec::new(), Vec::new());
     let mut flushed = false;
+    // Playing starts with the first moments here, as after catching up with the download.
+    let mut wait_ahead = true;
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -318,6 +384,7 @@ fn decode(bytes: &[u8], stream: Stream, shared: &Shared) -> Result<()> {
             pending.clear();
             skip_until = Some(to);
             flushed = false;
+            wait_ahead = true;
         }
         // Paused, the decoder waits, unless a seek still owes the picture at its target.
         if shared.paused.load(Ordering::Relaxed) && skip_until.is_none() {
@@ -325,8 +392,26 @@ fn decode(bytes: &[u8], stream: Stream, shared: &Shared) -> Result<()> {
             continue;
         }
         if let Some(sample) = stream.samples.get(next) {
+            if wait_ahead || !bytes.has(sample.byte_range()) {
+                let span = stream.span(next, AHEAD);
+                if !bytes.has(span.clone()) {
+                    shared.set_buffering(true);
+                    match bytes.wait_for(span, &|| shared.interrupted()) {
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(err) => return Err(anyhow!("the video stopped downloading: {err}")),
+                        Ok(_) => {}
+                    }
+                }
+                wait_ahead = false;
+                shared.set_buffering(false);
+            }
+            match bytes.read_at(sample.byte_range(), &mut data, &|| shared.interrupted()) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(anyhow!("the video stopped downloading: {err}")),
+            }
             next += 1;
-            stream.annex_b(bytes, sample, &mut nal);
+            stream.annex_b(&data, &mut nal);
             pending.push(Reverse(sample.composition_timestamp));
             // A broken sample costs that picture, not the video.
             match decoder.decode(&nal) {
@@ -423,6 +508,61 @@ mod tests {
     /// The same picture in H.265.
     const HEVC: &[u8] = include_bytes!("../testdata/hevc.mp4");
 
+    /// Four seconds of the same picture and tone, the index first, as written for streaming.
+    const STREAMED: &[u8] = include_bytes!("../testdata/streamed-faststart.mp4");
+    /// The same, the index last.
+    const INDEX_LAST: &[u8] = include_bytes!("../testdata/streamed-moov-last.mp4");
+
+    /// `bytes` arriving `chunk` bytes at a time, every `every`; the end from `tail` on first, as a
+    /// range request fetches an index at the end.
+    fn trickle(bytes: &'static [u8], tail: Option<usize>, chunk: usize, every: Duration) -> Arc<Buffered> {
+        let buffered = Arc::new(Buffered::new(Some(bytes.len() as u64)));
+        let feeding = buffered.clone();
+        std::thread::spawn(move || {
+            if let Some(at) = tail {
+                feeding.put_tail(at as u64, &bytes[at..]);
+            }
+            for part in bytes.chunks(chunk) {
+                std::thread::sleep(every);
+                feeding.push(part);
+            }
+            feeding.finish(None);
+        });
+        buffered
+    }
+
+    #[test]
+    fn plays_while_it_downloads() {
+        let bytes = trickle(STREAMED, None, 1000, Duration::from_millis(40));
+        let movie = Movie::start(bytes.clone(), Some("alsa:null".into()), || false).unwrap();
+        wait_for("a picture", || movie.picture().1.is_some());
+        assert!(!bytes.complete(), "the first picture comes before the last byte");
+        wait_for("the end", || movie.ended());
+        assert!(movie.error().is_none(), "{:?}", movie.error());
+    }
+
+    #[test]
+    fn waits_when_it_catches_up_with_the_download() {
+        // Slower than it plays, the index fetched from the end first.
+        let bytes = trickle(INDEX_LAST, Some(26604), 500, Duration::from_millis(100));
+        let movie = Movie::start(bytes.clone(), Some("alsa:null".into()), || false).unwrap();
+        wait_for("a picture", || movie.picture().1.is_some());
+        assert!(!bytes.complete());
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut held = false;
+        while !movie.ended() {
+            assert!(Instant::now() < until, "timed out waiting for the end");
+            held |= movie.picture().1.is_some() && movie.buffering();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(held, "it waited for the download");
+        assert!(movie.error().is_none(), "{:?}", movie.error());
+    }
+
+    fn full(bytes: &[u8]) -> Arc<Buffered> {
+        Arc::new(Buffered::full(bytes.to_vec()))
+    }
+
     fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
         let until = Instant::now() + Duration::from_secs(5);
         while !ok() {
@@ -434,7 +574,7 @@ mod tests {
     #[test]
     fn plays_pauses_seeks_and_ends() {
         // Silence on ALSA's null device where there is one; without it the clock keeps time.
-        let movie = Movie::start(Arc::from(HIGH), Some("alsa:null".into())).unwrap();
+        let movie = Movie::start(full(HIGH), Some("alsa:null".into()), || false).unwrap();
         assert_eq!((movie.width, movie.height), (96, 64));
         assert!((movie.duration() - 1.).abs() < 0.05, "{}", movie.duration());
         wait_for("a picture", || movie.picture().1.is_some());
@@ -460,7 +600,7 @@ mod tests {
 
     #[test]
     fn plays_without_sound() {
-        let movie = Movie::start(Arc::from(SILENT), Some("alsa:null".into())).unwrap();
+        let movie = Movie::start(full(SILENT), Some("alsa:null".into()), || false).unwrap();
         wait_for("a few pictures", || movie.picture().0 >= 3);
         wait_for("the end", || movie.ended());
         assert!(movie.error().is_none(), "{:?}", movie.error());
@@ -468,9 +608,9 @@ mod tests {
 
     #[test]
     fn other_codecs_and_non_videos_are_refused() {
-        let err = Movie::start(Arc::from(HEVC), None).err().expect("H.265 is not played");
+        let err = Movie::start(full(HEVC), None, || false).err().expect("H.265 is not played");
         assert!(format!("{err}").contains("H.264"), "{err}");
-        assert!(Movie::start(Arc::from(&b"not a video at all"[..]), None).is_err());
+        assert!(Movie::start(full(b"not a video at all"), None, || false).is_err());
     }
 
     #[test]

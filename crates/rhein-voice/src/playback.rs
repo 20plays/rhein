@@ -3,7 +3,6 @@
 //! decodes into a ring buffer the output callback drains; pause, seek and stop are flags it
 //! reads.
 
-use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,6 +17,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
+
+use crate::buffered::Buffered;
 
 /// The file extensions (and so attachments) this can play.
 pub const PLAYABLE: &[&str] = &["mp3", "ogg", "oga", "flac", "wav", "m4a", "aac", "mp4"];
@@ -63,7 +64,12 @@ pub struct Playback {
 impl Playback {
     /// Starts playing `bytes`. `extension` helps recognise the format; `device` is a cpal output
     /// id (`None` for the default, `Some("alsa:null")` for silence).
-    pub fn start(bytes: Arc<[u8]>, extension: Option<&str>, device: Option<String>) -> Result<Playback> {
+    pub fn start(bytes: Vec<u8>, extension: Option<&str>, device: Option<String>) -> Result<Playback> {
+        Playback::start_buffered(Arc::new(Buffered::full(bytes)), extension, device)
+    }
+
+    /// Starts playing a file that may still be arriving: it waits for the bytes it needs.
+    pub fn start_buffered(bytes: Arc<Buffered>, extension: Option<&str>, device: Option<String>) -> Result<Playback> {
         let control = Arc::new(Control::default());
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
         let extension = extension.map(str::to_owned);
@@ -134,9 +140,14 @@ impl Drop for Playback {
     }
 }
 
-fn run(bytes: Arc<[u8]>, extension: Option<String>, device: Option<String>, control: &Arc<Control>, ready: &std::sync::mpsc::Sender<Result<()>>) -> Result<()> {
-    // The file first, so a format we cannot read is said before any device is opened.
-    let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+fn run(bytes: Arc<Buffered>, extension: Option<String>, device: Option<String>, control: &Arc<Control>, ready: &std::sync::mpsc::Sender<Result<()>>) -> Result<()> {
+    // The file first, so a format we cannot read is said before any device is opened. Waiting for
+    // bytes still coming stops for a stop, or a seek (which may not need them).
+    let reader = {
+        let control = control.clone();
+        bytes.reader(move || control.stop.load(Ordering::Relaxed) || control.seek.lock().unwrap().is_some())
+    };
+    let source = MediaSourceStream::new(Box::new(reader), Default::default());
     let mut hint = Hint::new();
     if let Some(ext) = &extension {
         hint.with_extension(ext);
@@ -324,7 +335,7 @@ mod tests {
             eprintln!("no alsa:null; skipping");
             return;
         };
-        let playback = Playback::start(Arc::from(wav(0.6, 44_100)), Some("wav"), Some(device)).unwrap();
+        let playback = Playback::start(wav(0.6, 44_100), Some("wav"), Some(device)).unwrap();
         let duration = playback.duration().expect("a WAV says how long it is");
         assert!((duration - 0.6).abs() < 0.01, "{duration}");
         std::thread::sleep(Duration::from_millis(150));
@@ -341,7 +352,7 @@ mod tests {
 
     #[test]
     fn what_is_not_sound_says_so() {
-        assert!(Playback::start(Arc::from(&b"not a sound file at all"[..]), Some("mp3"), null()).is_err());
+        assert!(Playback::start(b"not a sound file at all".to_vec(), Some("mp3"), null()).is_err());
         assert!(playable("song.mp3", "application/octet-stream"));
         assert!(playable("x", "audio/ogg"));
         assert!(!playable("clip.mp4", "video/mp4"));
