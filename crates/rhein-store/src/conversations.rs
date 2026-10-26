@@ -137,6 +137,9 @@ pub struct Engine {
     groups: HashMap<String, MlsGroup>,
     /// Conversations whose history mirror was read this session.
     mirrored: HashSet<String>,
+    /// For conversations whose group this device is not in, the frames already looked through
+    /// this session: what is in them did not let it in, so the next sync starts after them.
+    scanned: HashMap<String, u64>,
     /// Mirror rows waiting to be sealed and stored: (conversation, item, value).
     mirror_out: Vec<(String, String, Value)>,
     provider_path: PathBuf,
@@ -182,6 +185,7 @@ impl Engine {
             stored,
             groups: HashMap::new(),
             mirrored: HashSet::new(),
+            scanned: HashMap::new(),
             mirror_out: Vec::new(),
             provider_path,
             state_path,
@@ -583,9 +587,18 @@ impl Engine {
     /// processes every new frame in order, readmits our other devices that asked, and publishes
     /// our GroupInfo for the epoch we reached.
     pub async fn sync(&mut self, api: &Api, conversation: &str) -> Result<Synced> {
-        let start = self.stored.conversations.get(conversation).map_or(0, |c| c.last_seq);
+        let last_seq = self.stored.conversations.get(conversation).map_or(0, |c| c.last_seq);
+        // Not in the group, nothing advances `last_seq`: without this, every sync (every time
+        // the conversation is opened) would fetch all of its frames again.
+        let outside = self.group(conversation).is_none();
+        let looked_through = outside && self.scanned.contains_key(conversation);
+        let start = if outside { last_seq.max(self.scanned.get(conversation).copied().unwrap_or(0)) } else { last_seq };
         let frames = Self::frames_after(api, conversation, start).await?;
-        if !self.mirrored.contains(conversation) {
+        if outside && let Some(through) = frames.iter().filter_map(|f| f["seq"].as_u64()).max() {
+            self.scanned.insert(conversation.to_owned(), through);
+        }
+        // The mirror needs the keyring; locked, every sync fetched all frames for nothing.
+        if self.keyring.is_some() && !self.mirrored.contains(conversation) {
             let everything = if start == 0 { frames.clone() } else { Self::frames_after(api, conversation, 0).await? };
             if let Err(err) = self.pull_mirror(api, conversation, &everything).await {
                 log::info!("history mirror for {conversation}: {err:#}");
@@ -675,8 +688,15 @@ impl Engine {
         }
 
         if self.group(conversation).is_none() {
-            // Not in the group: let ourselves in from our own GroupInfo, or ask to be let in.
-            let everything = if start == 0 { frames.clone() } else { Self::frames_after(api, conversation, 0).await? };
+            // Not in the group: let ourselves in from our own GroupInfo, or ask to be let in. Only
+            // frames not looked through this session can hold a new one, and without the keyring
+            // none can be opened.
+            let everything = match start {
+                _ if self.keyring.is_none() => Vec::new(),
+                0 => frames.clone(),
+                _ if looked_through => frames.clone(),
+                _ => Self::frames_after(api, conversation, 0).await?,
+            };
             if !self.self_join(api, conversation, &everything).await? {
                 let state = self.stored.conversations.entry(conversation.to_owned()).or_default();
                 if !state.rejoin_requested {

@@ -258,6 +258,37 @@ impl Shell {
                 }
                 "join" => this.open_dialog(DialogTab::Join, window, cx),
                 "switcher" => this.open_switcher(window, cx),
+                // cycle[=n]: once READY is in, opens the first n text channels (6) one after the
+                // other, twice round, three seconds each, then quits; for timing switches
+                // (RUST_LOG=rhein::switch=debug).
+                w if w.starts_with("cycle") => {
+                    let n = w.strip_prefix("cycle=").and_then(|n| n.parse().ok()).unwrap_or(6usize);
+                    cx.spawn(async move |this, cx| {
+                        let mut channels = Vec::new();
+                        for _ in 0..60 {
+                            cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                            channels = this
+                                .update(cx, |v, cx| {
+                                    let client = v.client.read(cx);
+                                    client.guilds.iter().flat_map(|g| g.ordered_channels().into_iter().filter(|c| c.is_textual()).map(|c| c.id.clone())).take(n).collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            if !channels.is_empty() {
+                                break;
+                            }
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                        for round in 0..2 {
+                            for id in &channels {
+                                log::debug!(target: "rhein::switch", "cycle round {round}: opening {id}");
+                                this.update(cx, |v, cx| v.client.update(cx, |c, cx| c.select_channel(id.clone(), cx))).ok();
+                                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+                            }
+                        }
+                        cx.update(|cx| cx.quit());
+                    })
+                    .detach();
+                }
                 "signout" => this.ask_sign_out(window, cx),
                 // Someone's profile card over the chat, once READY is in.
                 "card" => {
