@@ -2677,6 +2677,7 @@ impl Client {
         log.error = None;
         let io = self.io.clone();
         let chan = channel_id.clone();
+        let since = Instant::now();
         log.task = Some(cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move {
                 Ok(api.messages(&chan, before.as_deref(), PAGE).await?)
@@ -2687,7 +2688,7 @@ impl Client {
                 log.loading = false;
                 match result {
                     Ok(page) => {
-                        log::debug!("history {channel_id}: {} message(s)", page.len());
+                        log::debug!(target: "rhein::switch", "{channel_id}: history of {} message(s) in {:?}", page.len(), since.elapsed());
                         let full = page.len() as u32 >= PAGE;
                         if older {
                             let count = page.len();

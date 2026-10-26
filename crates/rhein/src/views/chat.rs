@@ -138,6 +138,8 @@ pub struct ChatView {
     posters_asked: Option<(String, usize)>,
     /// Videos whose first moments were asked for (`Client::preload_movie`).
     preloaded: HashSet<String>,
+    /// When the channel shown last changed, until the frames after it are timed (`time_switch`).
+    switched: Option<Instant>,
     /// Each history row's view (`rows::RowView`), by `rows::message_key`, for `rows_channel`.
     rows: HashMap<String, Entity<RowView>>,
     rows_channel: Option<String>,
@@ -309,6 +311,7 @@ impl ChatView {
             row_progress: HashMap::new(),
             posters_asked: None,
             preloaded: HashSet::new(),
+            switched: None,
             rows: HashMap::new(),
             rows_channel: None,
             _subs: subs,
@@ -351,6 +354,7 @@ impl ChatView {
         self.typing_idle = None;
         self.composer_len = 0;
         *self.channel.borrow_mut() = selected.clone();
+        self.switched = Some(Instant::now());
         self.voice_chat = None;
         self.editing = None;
         self.replying = None;
@@ -2387,8 +2391,34 @@ fn image_type(format: ImageFormat) -> (&'static str, &'static str) {
     }
 }
 
+/// Logs (at debug, target `rhein::switch`) how the frames after a channel switch went: the
+/// first one, every slow one and how many rows each drew, for three seconds.
+fn time_switch(channel: String, since: Instant, window: &Window) {
+    fn next(channel: String, since: Instant, last: Instant, rows: usize, window: &Window) {
+        window.on_next_frame(move |window, _| {
+            let now = Instant::now();
+            let drawn = crate::views::rows::ROWS_DRAWN.load(std::sync::atomic::Ordering::Relaxed);
+            let gap = now - last;
+            if gap > Duration::from_millis(25) || last == since {
+                log::debug!(target: "rhein::switch", "{channel}: frame at {:?}, {:?} after the last, {} row(s) drawn", now - since, gap, drawn - rows);
+            }
+            if now - since < Duration::from_secs(3) {
+                next(channel, since, now, drawn, window);
+            }
+        });
+    }
+    let rows = crate::views::rows::ROWS_DRAWN.load(std::sync::atomic::Ordering::Relaxed);
+    next(channel, since, since, rows, window);
+}
+
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let (Some(since), Some(channel)) = (self.switched.take(), self.current())
+            && log::log_enabled!(target: "rhein::switch", log::Level::Debug)
+        {
+            log::debug!(target: "rhein::switch", "{channel}: drawing {:?} after the switch", since.elapsed());
+            time_switch(channel, since, window);
+        }
         let t = cx.theme().clone();
         let channel_id = self.current();
         let client = self.client.read(cx);

@@ -104,8 +104,12 @@ pub struct RowView {
     pub ui: RowUi,
 }
 
+/// How many times a row was drawn afresh, for timing what a channel switch costs.
+pub static ROWS_DRAWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl gpui::Render for RowView {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        ROWS_DRAWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ix = self.ctx.client.read(cx).logs.get(&self.ctx.channel_id).and_then(|log| log.messages.iter().position(|m| message_key(m) == self.key));
         match ix {
             Some(ix) => render_row(&self.ctx, ix, &self.ui, window, cx),

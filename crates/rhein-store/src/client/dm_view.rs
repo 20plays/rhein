@@ -85,11 +85,14 @@ impl Client {
         let conv = id.clone();
         let signals = self.signals_for(&id);
         let log = self.logs.entry(id.clone()).or_default();
+        let since = std::time::Instant::now();
         log.task = Some(cx.spawn(async move |this, cx| {
             let result = join(io.spawn(async move {
                 let mut engine = engine.lock().await;
+                let locked = since.elapsed();
                 engine.signals = signals;
                 engine.sync(&api, &conv).await?;
+                log::debug!(target: "rhein::switch", "{conv}: synced in {:?} ({locked:?} waiting for the engine)", since.elapsed());
                 Ok(engine.conversation(&conv).cloned().unwrap_or_default())
             }))
             .await;
@@ -158,6 +161,9 @@ impl Client {
             .collect();
         let log = self.logs.entry(id.to_owned()).or_default();
         let grew = messages.len() > log.messages.len() && log.messages.iter().zip(&messages).all(|(a, b)| a.id == b.id);
+        // Opening a conversation syncs it again; most often nothing changed, and starting its
+        // list over would measure every row again and lose where it was scrolled to.
+        let same = log.loaded && messages.len() == log.messages.len() && log.messages.iter().zip(&messages).all(|(a, b)| shown_alike(a, b));
         let before = log.messages.len();
         log.messages = messages;
         log.loaded = true;
@@ -180,7 +186,7 @@ impl Client {
                     self.alert(notify::Alert::Direct, &sender, None, &text, cx);
                 }
             }
-        } else {
+        } else if !same {
             cx.emit(ClientEvent::MessagesReset { channel_id: id.to_owned() });
         }
         self.note_dm_read(id, cx);
@@ -348,4 +354,15 @@ impl Client {
         })
         .detach();
     }
+}
+
+/// Whether a message of a conversation shows the same as it did.
+fn shown_alike(a: &Message, b: &Message) -> bool {
+    let reactions = |m: &Message| m.reactions.iter().map(|r| (r.emoji.clone(), r.count, r.me)).collect::<Vec<_>>();
+    a.id == b.id
+        && a.content == b.content
+        && a.edited_at == b.edited_at
+        && a.reply_to == b.reply_to
+        && a.attachments.len() == b.attachments.len()
+        && reactions(a) == reactions(b)
 }
