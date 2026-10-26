@@ -28,7 +28,7 @@ use crate::views::live::{LiveMovie, LiveVideo, SpeakingFace, ToggleBig};
 use crate::views::part::{Part, part};
 use crate::views::gif_picker::{GifPicker, PickedGif};
 use crate::views::media::{self, Media};
-use crate::views::rows::{RowCtx, format_size, message_key, render_row};
+use crate::views::rows::{RowCtx, RowUi, RowView, format_size, message_key};
 
 const TYPING_EVERY: Duration = Duration::from_secs(6);
 /// How long without a key before a conversation hears we stopped typing.
@@ -133,6 +133,9 @@ pub struct ChatView {
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
     /// state moves on is measured again (see `prefetch`).
     row_progress: HashMap<String, u64>,
+    /// Each history row's view (`rows::RowView`), by `rows::message_key`, for `rows_channel`.
+    rows: HashMap<String, Entity<RowView>>,
+    rows_channel: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -299,6 +302,8 @@ impl ChatView {
             history: None,
             faces: HashMap::new(),
             row_progress: HashMap::new(),
+            rows: HashMap::new(),
+            rows_channel: None,
             _subs: subs,
         };
         this.sync_channel(cx);
@@ -724,6 +729,53 @@ impl ChatView {
             self.hovered_link = next;
             cx.notify();
         }
+    }
+
+    /// The view of the history row at `ix`, made the first time it is drawn, and whether what it
+    /// shows of this view (its `RowUi`) changed since it last drew.
+    fn row_view(&mut self, ix: usize, ctx: &Rc<RowCtx>, cx: &mut Context<Self>) -> Option<(Entity<RowView>, bool)> {
+        /// Past this many rows the views start over, like the parsed texts.
+        const ROWS_KEPT: usize = 2000;
+        let (key, ui) = {
+            let log = self.client.read(cx).logs.get(&ctx.channel_id)?;
+            let message = log.messages.get(ix)?;
+            let key = message_key(message).to_owned();
+            let ui = RowUi {
+                selected: self.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range())),
+                hovered_link: self.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone())),
+                // Only this message's spoilers, not a copy of every one revealed.
+                revealed: self.revealed.iter().filter(|(m, _)| *m == message.id).cloned().collect(),
+                highlighted: self.highlight.as_ref().is_some_and(|(id, _)| *id == message.id),
+                fresh: self.fresh.get(&key).copied(),
+                hovered: self.hovered_row.as_deref() == Some(key.as_str()),
+                hovered_reaction: self.hovered_reaction.as_ref().filter(|(m, _)| *m == message.id).map(|(_, n)| *n),
+                divider_here: ctx.divider == Some(ix),
+                prev: ix.checked_sub(1).and_then(|p| log.messages.get(p)).map(|p| message_key(p).to_owned()),
+                first: ix == 0,
+                progress: self.row_progress.get(&key).copied(),
+                scale_factor: ctx.scale_factor,
+                movie_big: ctx.movie_big,
+            };
+            (key, ui)
+        };
+        if self.rows_channel.as_deref() != Some(ctx.channel_id.as_str()) || self.rows.len() > ROWS_KEPT {
+            self.rows.clear();
+            self.rows_channel = Some(ctx.channel_id.clone());
+        }
+        if let Some(row) = self.rows.get(&key).cloned() {
+            let changed = row.update(cx, |row, _| {
+                let changed = row.ui != ui;
+                if changed {
+                    row.ui = ui;
+                    row.ctx = ctx.clone();
+                }
+                changed
+            });
+            return Some((row, changed));
+        }
+        let row = cx.new(|_| RowView { key: key.clone(), ctx: ctx.clone(), ui });
+        self.rows.insert(key, row.clone());
+        Some((row, false))
     }
 
     /// The pointer entered the row of the message under `key` (`true`) or left it.
@@ -1938,10 +1990,22 @@ impl ChatView {
             movie_big: self.movie_big,
             divider: self.client.read(cx).divider_index(&channel_id),
         });
+        // Each row is a view of its own, drawn cached at the size it last had: a scroll moves the
+        // rows without drawing them again, and a hover or a picture arriving draws only its row.
+        // A row whose `RowUi` changed draws afresh in this frame (uncached), so it shows at once.
+        let view = cx.weak_entity();
         let messages = rhein_ui::smooth_scroll(
             "history-glide",
             rhein_ui::ScrollTarget::List(self.list.clone()),
-            list(self.list.clone(), move |ix, window, cx| render_row(&row_ctx, ix, window, cx)).size_full(),
+            list(self.list.clone(), move |ix, _, cx| {
+                let row = view.upgrade().and_then(|view| view.update(cx, |this, cx| this.row_view(ix, &row_ctx, cx)));
+                match row {
+                    Some((row, false)) => row.cached(gpui::StyleRefinement::default().w_full()).keep_size().into_any_element(),
+                    Some((row, true)) => row.into_any_element(),
+                    None => div().into_any_element(),
+                }
+            })
+            .size_full(),
         );
 
         let behind = !self.list.is_following_tail() && self.count(cx) > 0;

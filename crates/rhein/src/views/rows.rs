@@ -67,6 +67,53 @@ pub struct RowCtx {
     pub divider: Option<usize>,
 }
 
+/// What a row shows of the chat view's own state (not the client's): worked out by the chat
+/// view for each row it lays out and handed to the row's view, so a row neither reads the chat
+/// view (which would redraw every row whenever any of this changes for one) nor misses a change.
+#[derive(Clone, Default, PartialEq)]
+pub struct RowUi {
+    /// Text selected in a block of this message, and the link under the pointer.
+    pub selected: Option<(usize, std::ops::Range<usize>)>,
+    pub hovered_link: Option<(usize, std::ops::Range<usize>)>,
+    /// This message's spoilers the user opened.
+    pub revealed: HashSet<(String, usize)>,
+    pub highlighted: bool,
+    /// `ChatView::fresh` for this message.
+    pub fresh: Option<Option<f32>>,
+    /// The pointer is over the row, and over which of its reactions.
+    pub hovered: bool,
+    pub hovered_reaction: Option<usize>,
+    pub divider_here: bool,
+    /// What the row depends on around it: the message before it (grouping, the day line) and
+    /// whether it is the first.
+    pub prev: Option<String>,
+    pub first: bool,
+    /// `ChatView::row_progress`: changes when a preview, a GIF page or a picture's size arrives.
+    pub progress: Option<u64>,
+    pub scale_factor: f32,
+    pub movie_big: bool,
+}
+
+/// One message row of the history as a view of its own, drawn cached at the size it last had
+/// (`keep_size`, Rhein's GPUI patch): it draws again only when something it shows changes (the
+/// client, its `RowUi`, a picture it waits on), not on every frame of a scroll or a hover
+/// elsewhere.
+pub struct RowView {
+    pub key: String,
+    pub ctx: Rc<RowCtx>,
+    pub ui: RowUi,
+}
+
+impl gpui::Render for RowView {
+    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let ix = self.ctx.client.read(cx).logs.get(&self.ctx.channel_id).and_then(|log| log.messages.iter().position(|m| message_key(m) == self.key));
+        match ix {
+            Some(ix) => render_row(&self.ctx, ix, &self.ui, window, cx),
+            None => div().into_any_element(),
+        }
+    }
+}
+
 /// What a message's text parses to, which depends on nothing but the text: worked out once,
 /// not on every frame. Keyed by message id and checked against a hash of the text, so an edit
 /// parses again.
@@ -131,14 +178,14 @@ fn picture_box<E: Styled>(el: E, size: Option<gpui::Size<Pixels>>) -> E {
     }
 }
 
-pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -> AnyElement {
+pub fn render_row(ctx: &RowCtx, ix: usize, ui: &RowUi, _window: &mut Window, cx: &mut App) -> AnyElement {
     let t = cx.theme().clone();
     let client = ctx.client.read(cx);
     let channel_id = ctx.channel_id.as_str();
     let Some(log) = client.logs.get(channel_id) else { return div().into_any_element() };
     let Some(message) = log.messages.get(ix) else { return div().into_any_element() };
     let prev = ix.checked_sub(1).and_then(|p| log.messages.get(p));
-    let divider_here = ctx.divider == Some(ix);
+    let divider_here = ui.divider_here;
     let new_day = prev.is_none_or(|p| day_of(p.created_at) != day_of(message.created_at));
     let grouped = !new_day
         && !divider_here
@@ -159,17 +206,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     let avatar_size = if prefs.compact { 28. } else { 40. };
     let body_size = text::MD * (prefs.text_scale.clamp(80, 150) as f32 / 100.);
 
-    let view_state = ctx.view.upgrade().map(|v| {
-        let v = v.read(cx);
-        let selected = v.selection.as_ref().filter(|s| s.message == message.id).map(|s| (s.block, s.range()));
-        let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
-        // Only this message's spoilers, not a copy of every one revealed.
-        let revealed: HashSet<(String, usize)> = v.revealed.iter().filter(|(m, _)| *m == message.id).cloned().collect();
-        let row_hovered = v.hovered_row.as_deref() == Some(message_key(message));
-        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(message)).copied(), (selected, hovered), row_hovered)
-    });
-    let (revealed, highlighted, fresh, (selected, hovered), row_hovered) = view_state.unwrap_or_default();
-    let highlighted = highlighted.as_deref() == Some(message.id.as_str());
+    let (revealed, highlighted, fresh, selected, hovered, row_hovered) =
+        (&ui.revealed, ui.highlighted, ui.fresh, ui.selected.clone(), ui.hovered_link.clone(), ui.hovered);
 
     let parsed = parsed(&ctx.parsed, message);
     let doc = &parsed.doc;
@@ -321,7 +359,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         message_id: &message.id,
         guild_id: guild_id.as_deref(),
         me: me.as_deref(),
-        revealed: &revealed,
+        revealed,
         selected,
         hovered,
         pending: pending && !failed,
@@ -436,7 +474,7 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             )
         })
         // A little room under the chips, which are taller than a line of text.
-        .when(!message.reactions.is_empty(), |d| d.child(div().pb_0p5().child(reactions(ctx, ix, message, client, guild_id.as_deref(), &t, cx))))
+        .when(!message.reactions.is_empty(), |d| d.child(div().pb_0p5().child(reactions(ctx, ix, message, ui.hovered_reaction, client, guild_id.as_deref(), &t))))
         .children(thread_chip);
 
     let group = message_group(ix);
@@ -683,7 +721,7 @@ fn hover_actions(ctx: &RowCtx, ix: usize, message: &Message, group: &SharedStrin
     bar.into_any_element()
 }
 
-fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_id: Option<&str>, t: &Theme, cx: &App) -> AnyElement {
+fn reactions(ctx: &RowCtx, ix: usize, message: &Message, hovered_reaction: Option<usize>, store: &Client, guild_id: Option<&str>, t: &Theme) -> AnyElement {
     div()
         .flex()
         .flex_wrap()
@@ -691,7 +729,7 @@ fn reactions(ctx: &RowCtx, ix: usize, message: &Message, store: &Client, guild_i
         .children(message.reactions.iter().enumerate().map(|(i, r)| {
             let client = ctx.client.clone();
             let (chan, mid, emoji) = (ctx.channel_id.clone(), message.id.clone(), r.emoji.clone());
-            let hovered = ctx.view.upgrade().is_some_and(|v| v.read(cx).hovered_reaction.as_ref().is_some_and(|(m, n)| *m == message.id && *n == i));
+            let hovered = hovered_reaction == Some(i);
             let who = hovered.then(|| reactors(r, store, guild_id, t)).flatten();
             let (view, hover_id) = (ctx.view.clone(), message.id.clone());
             div()
