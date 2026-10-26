@@ -86,7 +86,19 @@ impl Client {
         let signals = self.signals_for(&id);
         let log = self.logs.entry(id.clone()).or_default();
         let since = std::time::Instant::now();
+        let shown = !log.messages.is_empty();
         log.task = Some(cx.spawn(async move |this, cx| {
+            // What this device holds shows at once, before the server is asked what came since.
+            if !shown {
+                let (engine, conv) = (engine.clone(), conv.clone());
+                let local = join(io.spawn(async move { Ok(engine.lock().await.conversation(&conv).cloned()) })).await;
+                if let Ok(Some(state)) = local
+                    && !state.messages.is_empty()
+                {
+                    this.update(cx, |this, cx| this.apply_dm(&id, state, cx)).ok();
+                }
+            }
+            let id = id.clone();
             let result = join(io.spawn(async move {
                 let mut engine = engine.lock().await;
                 let locked = since.elapsed();

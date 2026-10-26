@@ -33,6 +33,7 @@ mod signals;
 mod media;
 mod movie;
 mod posters;
+mod preload;
 mod sound;
 pub use gifs::{GifShare, MediaProbe};
 pub use media::{DownloadView, MediaSource, MediaTick, free_download_path, safe_file_name};
@@ -430,6 +431,8 @@ pub struct Client {
     profiles: HashMap<String, Option<rhein_proto::Profile>>,
     /// Channels in the order they were opened, newest first (for the quick switcher).
     pub visited: Vec<String>,
+    /// Channels' newest pages fetched before they are opened.
+    preload: preload::Preload,
     typing: HashMap<String, Vec<(String, Instant)>>,
     /// Drops expired typing entries and repaints once they are gone; one for all of them.
     typing_sweep: Option<Task<()>>,
@@ -475,6 +478,7 @@ impl Client {
             home_conversation: None,
             profiles: HashMap::new(),
             visited: Vec::new(),
+            preload: Default::default(),
             typing: HashMap::new(),
             typing_sweep: None,
             showing_home: false,
@@ -1900,17 +1904,14 @@ impl Client {
         if self.selected_guild.as_ref().is_none_or(|g| self.guild(g).is_none()) {
             self.selected_guild = self.guilds.first().map(|g| g.guild.id.clone());
         }
-        // History may have moved on while we were away; reload what is on screen.
-        let stale: Vec<String> = self
-            .logs
-            .keys()
-            .filter(|c| self.server_of_channel(c).is_some_and(|s| s == server))
-            .cloned()
-            .collect();
-        for channel in stale {
-            self.logs.remove(&channel);
-            cx.emit(ClientEvent::MessagesReset { channel_id: channel });
+        // History may have moved on while we were away: what is here stays shown and is fetched
+        // again, when opened or ahead of that.
+        for (channel, log) in self.logs.iter_mut() {
+            if !log.loading && self.guilds.iter().any(|g| g.server == server && g.guild.channels.iter().any(|c| c.id == *channel)) {
+                log.loaded = false;
+            }
         }
+        self.preload_server(server, cx);
         if let Some(guild) = self.selected_guild.clone()
             && self.guild(&guild).is_some_and(|g| g.server == server) {
                 self.open_guild(guild, cx);
@@ -2603,6 +2604,10 @@ impl Client {
 
     pub fn select_channel(&mut self, channel_id: String, cx: &mut Context<Self>) {
         let Some(guild) = self.guild_of_channel(&channel_id).map(|g| g.guild.id.clone()) else { return };
+        // The channel left keeps its newest messages on disk, as it was last seen.
+        if let Some(left) = self.selected_channel().filter(|c| *c != channel_id).map(str::to_owned) {
+            self.keep_on_disk(&left);
+        }
         self.showing_home = false;
         self.selected_guild = Some(guild.clone());
         self.selected_channel.insert(guild, channel_id.clone());
@@ -2653,6 +2658,12 @@ impl Client {
 
     /// Loads the newest page, or with `older` the page before the oldest message we hold.
     pub fn load_history(&mut self, channel_id: String, older: bool, cx: &mut Context<Self>) {
+        self.load_page(channel_id, older, false, cx);
+    }
+
+    /// As [`Client::load_history`]; `ahead` for a channel not opened (see `preload`), which is
+    /// not marked read.
+    fn load_page(&mut self, channel_id: String, older: bool, ahead: bool, cx: &mut Context<Self>) {
         if self.is_dm(&channel_id) {
             // An encrypted conversation's whole history is local; there is nothing older to page.
             if !older {
@@ -2661,6 +2672,14 @@ impl Client {
             return;
         }
         let Some(api) = self.api_for_channel(&channel_id) else { return };
+        let log = self.logs.entry(channel_id.clone()).or_default();
+        // What was kept from last time shows until the server answers.
+        if !older && log.messages.is_empty() && !log.loading {
+            log.messages = preload::read_kept(&channel_id);
+            if !log.messages.is_empty() {
+                cx.emit(ClientEvent::MessagesReset { channel_id: channel_id.clone() });
+            }
+        }
         let log = self.logs.entry(channel_id.clone()).or_default();
         if log.loading || (older && log.reached_start) {
             return;
@@ -2696,15 +2715,25 @@ impl Client {
                             log.reached_start = !full;
                             cx.emit(ClientEvent::MessagesPrepended { channel_id: channel_id.clone(), count });
                         } else {
+                            // Fetched again (after a reconnect, or over what was kept on disk)
+                            // and nothing changed: the list stays as it is, scrolled where it was.
+                            let same = log.messages.len() == page.len()
+                                && log.messages.iter().zip(&page).all(|(a, b)| a.id == b.id && a.content == b.content && a.edited_at == b.edited_at);
                             log.messages = page;
                             log.loaded = true;
                             log.reached_start = !full;
-                            cx.emit(ClientEvent::MessagesReset { channel_id: channel_id.clone() });
-                            this.ack_latest(&channel_id, cx);
+                            if !same {
+                                cx.emit(ClientEvent::MessagesReset { channel_id: channel_id.clone() });
+                            }
+                            if !ahead {
+                                this.ack_latest(&channel_id, cx);
+                            }
+                            this.keep_on_disk(&channel_id);
                         }
                     }
                     Err(err) => log.error = Some(friendly(&err)),
                 }
+                this.preloaded(&channel_id, cx);
                 cx.notify();
             })
             .ok();

@@ -54,6 +54,9 @@ pub fn bindings() -> Vec<KeyBinding> {
 pub struct ChatView {
     client: Entity<Client>,
     list: ListState,
+    /// The lists of channels shown before, latest last: coming back to one shows it as it was,
+    /// without measuring its rows again.
+    lists: Vec<(String, ListState)>,
     channel: Rc<RefCell<Option<String>>>,
     composer: Entity<TextInput>,
     editing: Option<String>,
@@ -140,9 +143,9 @@ pub struct ChatView {
     preloaded: HashSet<String>,
     /// When the channel shown last changed, until the frames after it are timed (`time_switch`).
     switched: Option<Instant>,
-    /// Each history row's view (`rows::RowView`), by `rows::message_key`, for `rows_channel`.
+    /// Each history row's view (`rows::RowView`), by `rows::message_key`, of this channel and
+    /// those shown before.
     rows: HashMap<String, Entity<RowView>>,
-    rows_channel: Option<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -193,6 +196,32 @@ struct Suggest {
     selected: usize,
 }
 
+/// A channel's history list, following its newest message; near the top, older ones are asked for.
+fn history_list(client: &Entity<Client>, channel: &Rc<RefCell<Option<String>>>) -> ListState {
+    let list = ListState::new(0, ListAlignment::Bottom, px(600.));
+    list.set_follow_mode(FollowMode::Tail);
+    let (client, channel) = (client.downgrade(), channel.clone());
+    list.set_scroll_handler(move |event, _window, cx| {
+        if event.visible_range.start > 2 {
+            return;
+        }
+        let Some(id) = channel.borrow().clone() else { return };
+        client
+            .update(cx, |client, cx| {
+                let ready = client.logs.get(&id).is_some_and(|l| l.loaded && !l.reached_start);
+                if ready {
+                    client.load_history(id, true, cx);
+                }
+            })
+            .ok();
+    });
+    list
+}
+
+/// Lists of channels left that are kept, with what their rows measured and where they were
+/// scrolled.
+const LISTS_KEPT: usize = 30;
+
 impl ChatView {
     pub fn new(client: Entity<Client>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::build(client, None, window, cx)
@@ -204,27 +233,8 @@ impl ChatView {
     }
 
     fn build(client: Entity<Client>, fixed: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let list = ListState::new(0, ListAlignment::Bottom, px(600.));
-        list.set_follow_mode(FollowMode::Tail);
         let channel: Rc<RefCell<Option<String>>> = Rc::default();
-        {
-            let client = client.downgrade();
-            let channel = channel.clone();
-            list.set_scroll_handler(move |event, _window, cx| {
-                if event.visible_range.start > 2 {
-                    return;
-                }
-                let Some(id) = channel.borrow().clone() else { return };
-                client
-                    .update(cx, |client, cx| {
-                        let ready = client.logs.get(&id).is_some_and(|l| l.loaded && !l.reached_start);
-                        if ready {
-                            client.load_history(id, true, cx);
-                        }
-                    })
-                    .ok();
-            });
-        }
+        let list = history_list(&client, &channel);
         let composer = cx.new(|cx| TextInput::new("message", cx).multiline(COMPOSER_LINES).block_cursor().bare());
         let speaking = client.read(cx).call_speaking.clone();
         let mut subs = vec![
@@ -266,6 +276,7 @@ impl ChatView {
         let mut this = Self {
             client,
             list,
+            lists: Vec::new(),
             channel,
             composer,
             editing: None,
@@ -313,7 +324,6 @@ impl ChatView {
             preloaded: HashSet::new(),
             switched: None,
             rows: HashMap::new(),
-            rows_channel: None,
             _subs: subs,
         };
         this.sync_channel(cx);
@@ -347,6 +357,7 @@ impl ChatView {
         if *self.channel.borrow() == selected {
             return;
         }
+        let left = self.channel.borrow().clone();
         if let Some(old) = self.channel.borrow().clone() {
             self.client.update(cx, |c, _| c.stop_typing(&old));
         }
@@ -372,8 +383,25 @@ impl ChatView {
             c.clear(cx);
             c.set_placeholder(name, cx);
         });
-        self.list.reset(self.count(cx));
-        self.list.set_follow_mode(FollowMode::Tail);
+        // The list it had, unless its messages changed meanwhile (then it starts over).
+        let count = self.count(cx);
+        let kept = selected.as_ref().and_then(|c| self.lists.iter().position(|(k, _)| k == c)).map(|i| self.lists.remove(i).1);
+        let list = match kept {
+            Some(list) if count > 0 && list.item_count() == count => list,
+            _ => {
+                let list = history_list(&self.client, &self.channel);
+                list.reset(count);
+                list
+            }
+        };
+        let left_list = std::mem::replace(&mut self.list, list);
+        if let Some(left) = left {
+            self.lists.push((left, left_list));
+            if self.lists.len() > LISTS_KEPT {
+                self.lists.remove(0);
+            }
+        }
+        self.glide = None;
         // A thread in the side panel is not the selected channel, so nobody else loads it.
         if let Some(id) = self.fixed.clone() {
             let needs = self.client.read(cx).logs.get(&id).is_none_or(|l| !l.loaded && !l.loading);
@@ -392,6 +420,8 @@ impl ChatView {
                 self.list.reset(self.count(cx));
                 self.list.set_follow_mode(FollowMode::Tail);
             }
+            // A channel left whose messages started over keeps no list from before.
+            ClientEvent::MessagesReset { channel_id } => self.lists.retain(|(c, _)| c != channel_id),
             ClientEvent::MessagesPrepended { channel_id, count } if is_current(channel_id) => {
                 self.list.splice(0..0, *count);
             }
@@ -795,9 +825,10 @@ impl ChatView {
             };
             (key, ui)
         };
-        if self.rows_channel.as_deref() != Some(ctx.channel_id.as_str()) || self.rows.len() > ROWS_KEPT {
+        // Rows of channels left stay (by message, so they are not confused): coming back draws
+        // them from what they drew.
+        if self.rows.len() > ROWS_KEPT {
             self.rows.clear();
-            self.rows_channel = Some(ctx.channel_id.clone());
         }
         if let Some(row) = self.rows.get(&key).cloned() {
             let changed = row.update(cx, |row, _| {
