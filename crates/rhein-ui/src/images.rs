@@ -18,6 +18,12 @@
 //! picture is resized with a Lanczos filter to the pixels it covers on screen, rounded up to a
 //! few sizes so the chat, the member list and the cards share their copies. Animated pictures
 //! keep every frame and its delay.
+//!
+//! GPUI animates a picture of several frames by asking for a new frame of the whole window on
+//! every refresh of the screen, whatever the picture's own delays: one GIF in the chat kept the
+//! window drawing at 60 Hz (half a core and half the GPU here). So animations are cut into stills
+//! when they load, each view is handed the still that is due, and is woken again only when the
+//! next one is, the way a browser plays them.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -45,11 +51,72 @@ pub const SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// The pixel sizes a picture is shrunk to (the smallest that covers the drawn size).
 const BUCKETS: [u32; 7] = [32, 48, 64, 96, 128, 192, 256];
 
+/// Frame delays at or under this are shown for [`SHORT_DELAY_SHOWN`] instead, as browsers do:
+/// such GIFs were made for them and look wrong played faster.
+const SHORT_DELAY: Duration = Duration::from_millis(10);
+const SHORT_DELAY_SHOWN: Duration = Duration::from_millis(100);
+
 type Loaded = Result<Arc<RenderImage>, ImageCacheError>;
 
+/// A decoded picture as the store keeps it.
+#[derive(Clone)]
+enum Picture {
+    Still(Arc<RenderImage>),
+    Moving(Arc<Animation>),
+}
+
+/// An animated picture cut into stills of one frame each, so GPUI never animates it itself.
+struct Animation {
+    stills: Vec<Arc<RenderImage>>,
+    /// When each still ends, counted from the start of a loop.
+    ends: Vec<Duration>,
+}
+
+impl Animation {
+    /// The still due `elapsed` after the animation started, and how long until the next is.
+    fn at(&self, elapsed: Duration) -> (&Arc<RenderImage>, Duration) {
+        let total = *self.ends.last().expect("an animation has stills");
+        let into = Duration::from_nanos((elapsed.as_nanos() % total.as_nanos()) as u64);
+        let i = self.ends.iter().position(|end| into < *end).unwrap_or(0);
+        (&self.stills[i], self.ends[i] - into)
+    }
+}
+
+impl Picture {
+    fn cut(image: Arc<RenderImage>) -> Self {
+        if image.frame_count() <= 1 {
+            return Picture::Still(image);
+        }
+        let mut stills = Vec::with_capacity(image.frame_count());
+        let mut ends = Vec::with_capacity(image.frame_count());
+        let mut end = Duration::ZERO;
+        for i in 0..image.frame_count() {
+            let size = image.size(i);
+            let (w, h) = (size.width.0.max(0) as u32, size.height.0.max(0) as u32);
+            let Some(pixels) = image.as_bytes(i).and_then(|b| RgbaImage::from_raw(w, h, b.to_vec())) else {
+                return Picture::Still(image);
+            };
+            let delay = Duration::from(image.delay(i));
+            end += if delay <= SHORT_DELAY { SHORT_DELAY_SHOWN } else { delay };
+            stills.push(Arc::new(RenderImage::new(vec![Frame::from_parts(pixels, 0, 0, image.delay(i))])));
+            ends.push(end);
+        }
+        Picture::Moving(Arc::new(Animation { stills, ends }))
+    }
+
+    fn stills(&self) -> Vec<Arc<RenderImage>> {
+        match self {
+            Picture::Still(image) => vec![image.clone()],
+            Picture::Moving(animation) => animation.stills.clone(),
+        }
+    }
+}
+
+type Decoded = Result<Picture, ImageCacheError>;
+
 enum State {
-    Loading(Shared<Task<Loaded>>),
-    Done(Loaded),
+    Loading(Shared<Task<Decoded>>),
+    Done(Decoded),
 }
 
 struct Item {
@@ -60,6 +127,11 @@ struct Item {
     used: Instant,
     /// Views waiting for it to load, to be redrawn once it has.
     waiting: Vec<EntityId>,
+    /// An animation's start, its views to wake when the next still is due, and whether a
+    /// wake-up is scheduled.
+    born: Instant,
+    playing: Vec<EntityId>,
+    timer: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,8 +176,8 @@ impl Images {
             }
             let Some(item) = self.items.remove(&key) else { continue };
             self.bytes -= item.bytes;
-            if let State::Done(Ok(image)) = item.state {
-                dropped.push(image);
+            if let State::Done(Ok(picture)) = item.state {
+                dropped.extend(picture.stills());
             }
         }
         dropped
@@ -165,21 +237,45 @@ fn request_census(window: &mut Window, cx: &mut App) {
 /// drawing it is redrawn once it has). `start` begins loading it the first time.
 fn get(key: u64, window: &mut Window, cx: &mut App, start: impl FnOnce(&mut App) -> Task<Loaded>) -> Option<Loaded> {
     let view = window.current_view();
+    // Animations play only where GPUI would play them: in the active window, without reduced motion.
+    let (active, reduced) = (window.is_window_active(), cx.reduce_motion());
     let store = cx.default_global::<Images>();
     let frame = store.frame;
     let task = match store.items.get_mut(&key) {
         Some(item) => {
             item.frame = frame;
             item.used = Instant::now();
+            if let State::Loading(task) = &item.state
+                && let Some(result) = task.clone().now_or_never()
+            {
+                item.bytes = size_of(&result);
+                item.state = State::Done(result);
+                item.born = Instant::now();
+                store.bytes += item.bytes;
+            }
             match &item.state {
-                State::Done(result) => return Some(result.clone()),
-                State::Loading(task) => {
-                    if let Some(result) = task.clone().now_or_never() {
-                        item.bytes = size_of(&result);
-                        item.state = State::Done(result.clone());
-                        store.bytes += item.bytes;
-                        return Some(result);
+                State::Done(Err(err)) => return Some(Err(err.clone())),
+                State::Done(Ok(Picture::Still(image))) => return Some(Ok(image.clone())),
+                State::Done(Ok(Picture::Moving(animation))) => {
+                    if reduced {
+                        return Some(Ok(animation.stills[0].clone()));
                     }
+                    let (still, next) = animation.at(item.born.elapsed());
+                    let still = still.clone();
+                    // An inactive window holds the still it shows; activating it redraws it.
+                    if !active {
+                        return Some(Ok(still));
+                    }
+                    if !item.playing.contains(&view) {
+                        item.playing.push(view);
+                    }
+                    if !item.timer {
+                        item.timer = true;
+                        wake_after(key, next, cx);
+                    }
+                    return Some(Ok(still));
+                }
+                State::Loading(task) => {
                     if item.waiting.contains(&view) {
                         return None;
                     }
@@ -189,9 +285,19 @@ fn get(key: u64, window: &mut Window, cx: &mut App, start: impl FnOnce(&mut App)
             }
         }
         None => {
-            let task = start(cx).shared();
+            let load = start(cx);
+            let task = cx.background_executor().spawn(async move { load.await.map(Picture::cut) }).shared();
             let store = cx.global_mut::<Images>();
-            let item = Item { state: State::Loading(task.clone()), bytes: 0, frame, used: Instant::now(), waiting: vec![view] };
+            let item = Item {
+                state: State::Loading(task.clone()),
+                bytes: 0,
+                frame,
+                used: Instant::now(),
+                waiting: vec![view],
+                born: Instant::now(),
+                playing: Vec::new(),
+                timer: false,
+            };
             store.items.insert(key, item);
             task
         }
@@ -205,11 +311,32 @@ fn get(key: u64, window: &mut Window, cx: &mut App, start: impl FnOnce(&mut App)
     None
 }
 
-fn size_of(result: &Loaded) -> usize {
-    let Ok(image) = result else { return 0 };
-    (0..image.frame_count())
-        .map(|i| {
-            let size = image.size(i);
+/// Redraws the views playing the animation under `key` once `wait` has passed. They ask again
+/// when they draw it; one that no longer does (scrolled away, closed) lets it rest.
+fn wake_after(key: u64, wait: Duration, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        // A hair late rather than early, so the next still is surely due.
+        cx.background_executor().timer(wait + Duration::from_millis(1)).await;
+        cx.update(|cx| {
+            let views = cx.global_mut::<Images>().items.get_mut(&key).map_or_else(Vec::new, |item| {
+                item.timer = false;
+                std::mem::take(&mut item.playing)
+            });
+            for view in views {
+                cx.notify(view);
+            }
+        });
+    })
+    .detach();
+}
+
+fn size_of(result: &Decoded) -> usize {
+    let Ok(picture) = result else { return 0 };
+    picture
+        .stills()
+        .iter()
+        .map(|image| {
+            let size = image.size(0);
             size.width.0.max(0) as usize * size.height.0.max(0) as usize * 4
         })
         .sum()
@@ -384,5 +511,36 @@ mod tests {
         assert_eq!(super::bucket(64.), 64);
         assert_eq!(super::bucket(80. * 2.), 192);
         assert_eq!(super::bucket(300.), 300);
+    }
+
+    fn gif(delays_ms: &[u32]) -> std::sync::Arc<gpui::RenderImage> {
+        let frames = delays_ms
+            .iter()
+            .map(|ms| image::Frame::from_parts(image::RgbaImage::new(2, 2), 0, 0, image::Delay::from_numer_denom_ms(*ms, 1)))
+            .collect::<Vec<_>>();
+        std::sync::Arc::new(gpui::RenderImage::new(frames))
+    }
+
+    #[test]
+    fn animations_are_cut_into_stills_shown_for_their_delays() {
+        use std::time::Duration;
+        let super::Picture::Moving(animation) = super::Picture::cut(gif(&[50, 0, 200])) else { panic!("not cut") };
+        assert!(animation.stills.iter().all(|still| still.frame_count() == 1));
+        // A delay of 0 is shown for 100 ms, as browsers do.
+        assert_eq!(animation.ends, [50, 150, 350].map(Duration::from_millis));
+        let at = |ms| {
+            let (still, next) = animation.at(Duration::from_millis(ms));
+            (animation.stills.iter().position(|s| std::sync::Arc::ptr_eq(s, still)).unwrap(), next.as_millis())
+        };
+        assert_eq!(at(0), (0, 50));
+        assert_eq!(at(60), (1, 90));
+        assert_eq!(at(349), (2, 1));
+        // Loops.
+        assert_eq!(at(350 + 10), (0, 40));
+    }
+
+    #[test]
+    fn a_single_frame_stays_whole() {
+        assert!(matches!(super::Picture::cut(gif(&[0])), super::Picture::Still(_)));
     }
 }
