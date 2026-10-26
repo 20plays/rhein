@@ -136,6 +136,8 @@ pub struct ChatView {
     /// The channel and the number of its messages when every video in it last had its poster
     /// asked for (see `prefetch`).
     posters_asked: Option<(String, usize)>,
+    /// Videos whose first moments were asked for (`Client::preload_movie`).
+    preloaded: HashSet<String>,
     /// Each history row's view (`rows::RowView`), by `rows::message_key`, for `rows_channel`.
     rows: HashMap<String, Entity<RowView>>,
     rows_channel: Option<String>,
@@ -306,6 +308,7 @@ impl ChatView {
             faces: HashMap::new(),
             row_progress: HashMap::new(),
             posters_asked: None,
+            preloaded: HashSet::new(),
             rows: HashMap::new(),
             rows_channel: None,
             _subs: subs,
@@ -596,10 +599,16 @@ impl ChatView {
         let top = self.list.logical_scroll_top().item_ix.min(count);
         let range = top.saturating_sub(ABOVE)..(top + BELOW).min(count);
         let (mut embeds, mut shares, mut pictures, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let (mut probes, mut posters) = (Vec::new(), Vec::new());
+        let (mut probes, mut posters, mut preloads) = (Vec::new(), Vec::new(), Vec::new());
         {
             let client = self.client.read(cx);
             let Some(log) = client.logs.get(&channel) else { return };
+            // The videos in view and just around it get their first moments fetched.
+            // Not reading the player here: the history would draw again with each of its pictures.
+            for message in log.messages.get(top.saturating_sub(2)..(top + 12).min(count)).unwrap_or_default() {
+                preloads.extend(crate::views::rows::preloadable(message).filter(|(key, _)| !self.preloaded.contains(key)));
+            }
+            self.preloaded.extend(preloads.iter().map(|(key, _)| key.clone()));
             for ix in range {
                 let Some(message) = log.messages.get(ix) else { break };
                 let media = crate::views::rows::row_media(client, &channel, message, &self.parsed, cx);
@@ -648,7 +657,7 @@ impl ChatView {
             })
             .detach();
         }
-        if !embeds.is_empty() || !shares.is_empty() || !probes.is_empty() || !posters.is_empty() {
+        if !embeds.is_empty() || !shares.is_empty() || !probes.is_empty() || !posters.is_empty() || !preloads.is_empty() {
             let client = self.client.clone();
             cx.defer(move |cx| {
                 client.update(cx, |client, cx| {
@@ -663,6 +672,9 @@ impl ChatView {
                     }
                     for (key, hash, size, source) in posters {
                         client.request_poster(key, &hash, size, source, cx);
+                    }
+                    for (key, source) in preloads {
+                        client.preload_movie(key, source, cx);
                     }
                 })
             });

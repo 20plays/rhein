@@ -1727,6 +1727,11 @@ fn videos(message: &Message) -> impl Iterator<Item = (usize, &Attachment)> {
     message.attachments.iter().enumerate().filter(|(_, a)| rhein_voice::movie::playable(&a.filename, &a.mime))
 }
 
+/// A message's guild videos, for fetching their first moments: key and source.
+pub fn preloadable(message: &Message) -> impl Iterator<Item = (String, MediaSource)> + '_ {
+    videos(message).filter_map(|(i, a)| Some((format!("{}#{i}", message.id), MediaSource::Url(a.url.clone()?))))
+}
+
 /// A message's videos whose posters are not asked for yet: key, content hash, size, source.
 pub fn missing_posters(client: &Client, channel_id: &str, message: &Message, cx: &App) -> Vec<(String, String, i64, MediaSource)> {
     let posters = client.movie_posters.read(cx);

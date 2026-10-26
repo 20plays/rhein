@@ -279,6 +279,13 @@ pub fn poster(bytes: &Arc<Buffered>, max_width: u32, cancel: impl Fn() -> bool +
     Ok(Poster { picture: turned(picture_of(&yuv, max_width), stream.turns), width, height, duration })
 }
 
+/// How many bytes from the start of a video hold its first `seconds` (its sound sits beside the
+/// pictures), once its index is here.
+pub fn bytes_for(bytes: &Arc<Buffered>, seconds: f64, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<u64> {
+    let (stream, ..) = Stream::read(bytes, cancel)?;
+    Ok(stream.span(0, seconds).end as u64)
+}
+
 /// The shape of a video as shown, whatever its codec (a poster needs H.264; the shape does not).
 pub fn shape(bytes: &Arc<Buffered>, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<(u32, u32)> {
     let reader = bytes.reader(cancel);
@@ -618,6 +625,8 @@ mod tests {
             assert!((poster.duration - 4.).abs() < 0.1, "{}", poster.duration);
             assert!(buffered.head() < bytes.len() as u64 / 2, "only the start was fetched ({} bytes)", buffered.head());
             assert_eq!(shape(&buffered, || false).unwrap(), (96, 64));
+            let two = bytes_for(&buffered, 2., || false).unwrap();
+            assert!(two > 3300 && two < bytes.len() as u64, "{two}");
             buffered.give_up();
         }
         let hevc = full(HEVC);

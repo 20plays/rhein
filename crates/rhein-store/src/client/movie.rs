@@ -4,7 +4,7 @@
 //! [`MoviePlayer`], an entity of its own the player view watches: thirty pictures a second
 //! redraw the player and nothing else.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -40,6 +40,9 @@ const REST: Duration = Duration::from_millis(250);
 /// How much of its start the pointer resting on a video fetches.
 const LOOK_AHEAD: u64 = 2 << 20;
 
+/// How much of a video near the view is fetched before it is played, so it plays at once.
+const PRELOAD: f64 = 15.;
+
 /// The video loaded from a message (at most one), and its latest picture.
 #[derive(Default)]
 pub struct MoviePlayer {
@@ -59,6 +62,8 @@ pub struct MoviePlayer {
     kept: VecDeque<(String, Arc<Buffered>)>,
     /// The video the pointer rests on, and the wait before its start is fetched.
     resting: Option<(String, Task<()>)>,
+    /// Videos whose first moments were asked for (see `Client::preload_movie`).
+    preloaded: HashSet<String>,
 }
 
 impl MoviePlayer {
@@ -95,8 +100,8 @@ impl MoviePlayer {
             cx.drop_image(image, None);
         }
         self.unloaded.store(true, Ordering::Relaxed);
-        let (kept, resting) = (std::mem::take(&mut self.kept), self.resting.take());
-        *self = MoviePlayer { kept, resting, ..MoviePlayer::default() };
+        let (kept, resting, preloaded) = (std::mem::take(&mut self.kept), self.resting.take(), std::mem::take(&mut self.preloaded));
+        *self = MoviePlayer { kept, resting, preloaded, ..MoviePlayer::default() };
     }
 
     /// The bytes of the video `key`, kept or a new download of them; asking for its first
@@ -130,7 +135,8 @@ impl MoviePlayer {
                 i += 1;
                 continue;
             }
-            let (_, gone) = self.kept.remove(i).expect("in range");
+            let (key, gone) = self.kept.remove(i).expect("in range");
+            self.preloaded.remove(&key);
             total -= size(&gone);
             gone.give_up();
         }
@@ -241,6 +247,30 @@ impl Client {
         self.movie_player.update(cx, |p, _| {
             p._loading = Some(loading);
             p._ticker = Some(ticker);
+        });
+    }
+
+    /// Fetches the first moments of the video `key`, near the view, so playing it starts at
+    /// once; the rest comes when it is played. Only guild files: an encrypted one comes whole.
+    pub fn preload_movie(&mut self, key: String, source: MediaSource, cx: &mut Context<Self>) {
+        if !matches!(source, MediaSource::Url(_)) || self.movie_player.read(cx).preloaded.contains(&key) {
+            return;
+        }
+        let (io, fetcher) = (self.io.clone(), self.fetcher());
+        let bytes = self.movie_player.update(cx, |p, _| {
+            p.preloaded.insert(key.clone());
+            p.bytes(&key, source, Some(0), &io, fetcher)
+        });
+        io.spawn(async move {
+            // Its index says where its first moments end.
+            let ahead = tokio::task::spawn_blocking({
+                let bytes = bytes.clone();
+                move || rhein_voice::movie::bytes_for(&bytes, PRELOAD, || false)
+            })
+            .await;
+            if let Ok(Ok(n)) = ahead {
+                bytes.want_until(n + (64 << 10));
+            }
         });
     }
 

@@ -14,8 +14,9 @@ use crate::conversations::Engine;
 /// (or for more of its start: see `Buffered::want_until`); an MP4's index usually fits.
 const FIRST: u64 = 256 << 10;
 
-/// How long a look ahead waits to be wanted before it gives up.
-const LOOK_AHEAD_KEPT: Duration = Duration::from_secs(60);
+/// How long a download held at what was asked of its start keeps its connection; what it has
+/// stays, and the rest is asked for from where it stopped once it is wanted.
+const HELD_OPEN: Duration = Duration::from_secs(30);
 
 /// Where an attachment's bytes come from.
 #[derive(Clone)]
@@ -79,8 +80,8 @@ impl Fetcher {
     }
 
     async fn stream_url(&self, url: &str, into: &Arc<Buffered>) -> Result<()> {
-        let mut response = self.http.get(url).send().await?.error_for_status()?;
-        let len = response.content_length();
+        let mut response = Some(self.http.get(url).send().await?.error_for_status()?);
+        let len = response.as_ref().and_then(|r| r.content_length());
         if let Some(len) = len {
             into.set_len(len);
         }
@@ -93,14 +94,24 @@ impl Fetcher {
             if enough(into) {
                 let since = std::time::Instant::now();
                 while enough(into) && !into.failed() {
-                    if since.elapsed() > LOOK_AHEAD_KEPT {
-                        into.give_up();
-                        return Ok(());
+                    if since.elapsed() > HELD_OPEN {
+                        response = None;
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(if response.is_some() { 100 } else { 250 })).await;
                 }
                 continue;
             }
+            let response = match &mut response {
+                Some(response) => response,
+                None => {
+                    let at = into.head();
+                    let rest = self.http.get(url).header(reqwest::header::RANGE, format!("bytes={at}-")).send().await?.error_for_status()?;
+                    if rest.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                        anyhow::bail!("the server sends only whole files, so the download cannot go on from where it stopped");
+                    }
+                    response.insert(rest)
+                }
+            };
             let Some(chunk) = response.chunk().await? else { return Ok(()) };
             into.push(&chunk);
             if !index && let Some(len) = len {
