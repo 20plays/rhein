@@ -260,9 +260,11 @@ impl Shell {
                 "switcher" => this.open_switcher(window, cx),
                 // cycle[=n]: once READY is in, opens the first n text channels (6) one after the
                 // other, twice round, three seconds each, then quits; for timing switches
-                // (RUST_LOG=rhein::switch=debug).
+                // (RUST_LOG=rhein::switch=debug). cycle-dm[=n] does the same with conversations
+                // (an account seeded with `rhein-store`'s `dm_bench_seed` example).
                 w if w.starts_with("cycle") => {
-                    let n = w.strip_prefix("cycle=").and_then(|n| n.parse().ok()).unwrap_or(6usize);
+                    let dms = w.starts_with("cycle-dm");
+                    let n = w.split_once('=').and_then(|(_, n)| n.parse().ok()).unwrap_or(6usize);
                     cx.spawn(async move |this, cx| {
                         let mut channels = Vec::new();
                         for _ in 0..60 {
@@ -270,7 +272,11 @@ impl Shell {
                             channels = this
                                 .update(cx, |v, cx| {
                                     let client = v.client.read(cx);
-                                    client.guilds.iter().flat_map(|g| g.ordered_channels().into_iter().filter(|c| c.is_textual()).map(|c| c.id.clone())).take(n).collect::<Vec<_>>()
+                                    if dms {
+                                        client.conversations.iter().map(|c| c.id.clone()).take(n).collect::<Vec<_>>()
+                                    } else {
+                                        client.guilds.iter().flat_map(|g| g.ordered_channels().into_iter().filter(|c| c.is_textual()).map(|c| c.id.clone())).take(n).collect::<Vec<_>>()
+                                    }
                                 })
                                 .unwrap_or_default();
                             if !channels.is_empty() {
@@ -281,7 +287,13 @@ impl Shell {
                         for round in 0..2 {
                             for id in &channels {
                                 log::debug!(target: "rhein::switch", "cycle round {round}: opening {id}");
-                                this.update(cx, |v, cx| v.client.update(cx, |c, cx| c.select_channel(id.clone(), cx))).ok();
+                                this.update(cx, |v, cx| {
+                                    v.client.update(cx, |c, cx| match dms {
+                                        true => c.open_conversation(Some(id.clone()), cx),
+                                        false => c.select_channel(id.clone(), cx),
+                                    })
+                                })
+                                .ok();
                                 cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
                             }
                         }
