@@ -1722,6 +1722,27 @@ pub struct RowMedia {
     pub progress: u64,
 }
 
+/// A message's videos, with their indexes among its attachments.
+fn videos(message: &Message) -> impl Iterator<Item = (usize, &Attachment)> {
+    message.attachments.iter().enumerate().filter(|(_, a)| rhein_voice::movie::playable(&a.filename, &a.mime))
+}
+
+/// A message's videos whose posters are not asked for yet: key, content hash, size, source.
+pub fn missing_posters(client: &Client, channel_id: &str, message: &Message, cx: &App) -> Vec<(String, String, i64, MediaSource)> {
+    let posters = client.movie_posters.read(cx);
+    videos(message)
+        .map(|(i, a)| (i, a, format!("{}#{i}", message.id)))
+        .filter(|(_, _, key)| posters.get(key).is_none())
+        .map(|(i, a, key)| {
+            let source = match &a.url {
+                Some(url) => MediaSource::Url(url.clone()),
+                None => MediaSource::Dm { conversation: channel_id.to_owned(), message: message.id.clone(), index: i },
+            };
+            (key, a.hash.clone(), a.size, source)
+        })
+        .collect()
+}
+
 pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &ParsedCache, cx: &App) -> RowMedia {
     let parsed = parsed(cache, message);
     use std::hash::{Hash, Hasher};
@@ -1733,20 +1754,11 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &P
         }
     }
     let posters = client.movie_posters.read(cx);
-    for (i, a) in message.attachments.iter().enumerate().filter(|(_, a)| rhein_voice::movie::playable(&a.filename, &a.mime)) {
-        let key = format!("{}#{i}", message.id);
-        match posters.get(&key) {
-            // A poster arriving can change the row's height.
-            Some(poster) => poster.size().hash(&mut progress),
-            None => {
-                let source = match &a.url {
-                    Some(url) => MediaSource::Url(url.clone()),
-                    None => MediaSource::Dm { conversation: channel_id.to_owned(), message: message.id.clone(), index: i },
-                };
-                media.posters.push((key, a.hash.clone(), a.size, source));
-            }
-        }
+    for (i, _) in videos(message) {
+        // A poster arriving can change the row's height.
+        posters.get(&format!("{}#{i}", message.id)).map(Poster::size).hash(&mut progress);
     }
+    media.posters = missing_posters(client, channel_id, message, cx);
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);
     let links: &[String] = if strip_embeds { &[] } else { &parsed.links };
     for url in links.iter().filter(|u| !is_invite(u) && !gif_links::is_gif(u)) {

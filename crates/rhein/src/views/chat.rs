@@ -133,6 +133,9 @@ pub struct ChatView {
     /// How far each nearby row's previews and pictures had got when last looked at; a row whose
     /// state moves on is measured again (see `prefetch`).
     row_progress: HashMap<String, u64>,
+    /// The channel and the number of its messages when every video in it last had its poster
+    /// asked for (see `prefetch`).
+    posters_asked: Option<(String, usize)>,
     /// Each history row's view (`rows::RowView`), by `rows::message_key`, for `rows_channel`.
     rows: HashMap<String, Entity<RowView>>,
     rows_channel: Option<String>,
@@ -302,6 +305,7 @@ impl ChatView {
             history: None,
             faces: HashMap::new(),
             row_progress: HashMap::new(),
+            posters_asked: None,
             rows: HashMap::new(),
             rows_channel: None,
             _subs: subs,
@@ -609,6 +613,19 @@ impl ChatView {
                 probes.extend(media.probes);
                 posters.extend(media.posters);
                 pictures.extend(media.pictures.into_iter().filter(|p| !self.prefetched.contains(p)));
+            }
+            // Every other video loaded in the channel too, newest first after those near the
+            // view: each is only its index and first picture. Looked for when the messages
+            // change, not on every frame of a scroll.
+            if self.posters_asked.as_ref() != Some(&(channel.clone(), count)) {
+                self.posters_asked = Some((channel.clone(), count));
+                for message in log.messages.iter().rev() {
+                    for poster in crate::views::rows::missing_posters(client, &channel, message, cx) {
+                        if !posters.iter().any(|asked| asked.0 == poster.0) {
+                            posters.push(poster);
+                        }
+                    }
+                }
             }
         }
         for ix in changed {
