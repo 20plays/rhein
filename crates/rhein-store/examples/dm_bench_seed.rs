@@ -74,7 +74,7 @@ async fn main() {
         user_id: me.session.user_id.clone(),
         device_id: me.session.device_id.clone(),
         access_token: me.session.access_token.clone(),
-        expires_at: me.session.expires_at.map(|t| t as i64),
+        expires_at: me.session.expires_at,
         device_seed: rhein_auth::b64u(&key.seed()),
         ..Default::default()
     })
