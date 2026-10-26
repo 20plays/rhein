@@ -267,6 +267,10 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    /// Rhein: see [`ViewElement::keep_size`].
+    keep_size: bool,
+    /// Rhein: what a kept-size view read while it was rendered during layout, for its cache.
+    accessed: Option<FxHashSet<EntityId>>,
     #[cfg(feature = "profiler")]
     view_type_name: &'static str,
     #[cfg(debug_assertions)]
@@ -289,6 +293,8 @@ impl<V: View> ViewElement<V> {
         ViewElement {
             entity_id,
             cached_style: None,
+            keep_size: false,
+            accessed: None,
             #[cfg(feature = "profiler")]
             view_type_name,
             view: Some(view),
@@ -310,6 +316,17 @@ impl<V: View> ViewElement<V> {
         self.cached_style = Some(style);
         self
     }
+
+    /// Rhein: for a cached view whose height follows its content, such as a row of a
+    /// [`crate::list`]. While the view is not dirty it is laid out at the size it had in the last
+    /// frame (the `cached` style's height is replaced by it), without rendering it to measure it;
+    /// a dirty view is rendered and measured, and cached again. Unlike other cached views it is
+    /// also reused while an ancestor draws afresh, and only [`Window::refresh`] redraws it
+    /// regardless.
+    pub fn keep_size(mut self) -> Self {
+        self.keep_size = true;
+        self
+    }
 }
 
 impl<V: View> IntoElement for ViewElement<V> {
@@ -325,6 +342,8 @@ struct ViewElementState {
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+    /// Rhein: the size the view's content asked for when last rendered (for `keep_size`).
+    measured: Size<Pixels>,
 }
 
 struct ViewElementCacheKey {
@@ -379,13 +398,24 @@ impl<V: View> Element for ViewElement<V> {
             #[cfg(feature = "profiler")]
             let start = window.window_profiler.begin_view();
             let view = &mut self.view;
-            let layout = request_layout_view(
-                entity_id,
-                self.cached_style.as_ref(),
-                window,
-                cx,
-                &mut |window, cx| render_view(view.take().unwrap(), window, cx),
-            );
+            let layout = match (&self.cached_style, _id) {
+                (Some(style), Some(global_id)) if self.keep_size => request_layout_kept(
+                    entity_id,
+                    global_id,
+                    style,
+                    &mut self.accessed,
+                    window,
+                    cx,
+                    &mut |window, cx| render_view(view.take().unwrap(), window, cx),
+                ),
+                _ => request_layout_view(
+                    entity_id,
+                    self.cached_style.as_ref(),
+                    window,
+                    cx,
+                    &mut |window, cx| render_view(view.take().unwrap(), window, cx),
+                ),
+            };
             #[cfg(feature = "profiler")]
             window.window_profiler.end_view(
                 start,
@@ -419,6 +449,8 @@ impl<V: View> Element for ViewElement<V> {
                 global_id,
                 bounds,
                 element,
+                self.keep_size && self.cached_style.is_some(),
+                self.accessed.take(),
                 window,
                 cx,
                 &mut |window, cx| render_view(self.view.take().unwrap(), window, cx),
@@ -526,6 +558,8 @@ fn prepaint_view(
     global_id: Option<&GlobalElementId>,
     bounds: Bounds<Pixels>,
     element: &mut Option<AnyElement>,
+    keep_size: bool,
+    accessed: Option<FxHashSet<EntityId>>,
     window: &mut Window,
     cx: &mut App,
     render: &mut dyn FnMut(&mut Window, &mut App) -> AnyElement,
@@ -533,8 +567,33 @@ fn prepaint_view(
     window.set_view_id(entity_id);
     window.with_rendered_view(entity_id, |window| {
         if let Some(mut element) = element.take() {
-            element.prepaint(window, cx);
-            return Some(element);
+            // Rhein: a kept-size view rendered during layout (to be measured) is cached too.
+            let Some(accessed_entities) = accessed.filter(|_| keep_size) else {
+                element.prepaint(window, cx);
+                return Some(element);
+            };
+            return window.with_element_state::<ViewElementState, _>(
+                global_id.unwrap(),
+                |_, window| {
+                    let content_mask = window.content_mask();
+                    let text_style = window.text_style();
+                    let prepaint_start = window.prepaint_index();
+                    element.prepaint(window, cx);
+                    let prepaint_end = window.prepaint_index();
+                    let state = ViewElementState {
+                        accessed_entities,
+                        prepaint_range: prepaint_start..prepaint_end,
+                        paint_range: PaintIndex::default()..PaintIndex::default(),
+                        cache_key: ViewElementCacheKey {
+                            bounds,
+                            content_mask,
+                            text_style,
+                        },
+                        measured: bounds.size,
+                    };
+                    (Some(element), state)
+                },
+            );
         }
 
         window.with_element_state::<ViewElementState, _>(
@@ -542,13 +601,19 @@ fn prepaint_view(
             |element_state, window| {
                 let content_mask = window.content_mask();
                 let text_style = window.text_style();
+                // Rhein: a kept-size view is not redrawn because an ancestor is (see `keep_size`).
+                let refreshing = if keep_size {
+                    window.refresh_requested
+                } else {
+                    window.refreshing
+                };
 
                 if let Some(mut element_state) = element_state
                     && element_state.cache_key.bounds == bounds
                     && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
                     && !window.dirty_views.contains(&entity_id)
-                    && !window.refreshing
+                    && !refreshing
                 {
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint(element_state.prepaint_range.clone());
@@ -564,10 +629,21 @@ fn prepaint_view(
                 let prepaint_start = window.prepaint_index();
                 let (element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                     let mut element = render(window, cx);
-                    element.layout_as_root(Size::<AvailableSpace>::from(bounds.size), window, cx);
+                    // Rhein: a kept-size view is measured at its width (the height it was given
+                    // may be from before its content changed); the next frame lays it out at that.
+                    let available = if keep_size {
+                        Size {
+                            width: AvailableSpace::Definite(bounds.size.width),
+                            height: AvailableSpace::MinContent,
+                        }
+                    } else {
+                        Size::<AvailableSpace>::from(bounds.size)
+                    };
+                    let measured = element.layout_as_root(available, window, cx);
                     element.prepaint_at(bounds.origin, window, cx);
-                    element
+                    (element, measured)
                 });
+                let (element, measured) = element;
 
                 let prepaint_end = window.prepaint_index();
                 window.refreshing = refreshing;
@@ -583,10 +659,43 @@ fn prepaint_view(
                             content_mask,
                             text_style,
                         },
+                        measured,
                     },
                 )
             },
         )
+    })
+}
+
+/// Rhein: lays out a kept-size view (see [`ViewElement::keep_size`]) at the size it had in the
+/// last frame while it is clean, or renders it to be measured.
+#[inline(never)]
+fn request_layout_kept(
+    entity_id: EntityId,
+    global_id: &GlobalElementId,
+    style: &StyleRefinement,
+    accessed: &mut Option<FxHashSet<EntityId>>,
+    window: &mut Window,
+    cx: &mut App,
+    render: &mut dyn FnMut(&mut Window, &mut App) -> AnyElement,
+) -> (LayoutId, Option<AnyElement>) {
+    window.with_rendered_view(entity_id, |window| {
+        let clean = !window.dirty_views.contains(&entity_id)
+            && !window.refresh_requested
+            && !window.is_inspector_picking(cx);
+        let kept = window.peek_element_state::<ViewElementState, _>(global_id, |state| {
+            state.map(|state| state.measured)
+        });
+        if clean && let Some(size) = kept {
+            let mut root_style = Style::default();
+            root_style.refine(style);
+            root_style.size.height = crate::Length::Definite(size.height.into());
+            return (window.request_layout(root_style, None, cx), None);
+        }
+        let (mut element, entities) = cx.detect_accessed_entities(|cx| render(window, cx));
+        *accessed = Some(entities);
+        let layout_id = element.request_layout(window, cx);
+        (layout_id, Some(element))
     })
 }
 

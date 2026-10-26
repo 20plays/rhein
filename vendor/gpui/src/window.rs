@@ -1292,6 +1292,11 @@ pub struct Window {
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
+    /// Rhein: set only by [`Window::refresh`]. `refreshing` is also set while a cached view
+    /// draws afresh (so its cached descendants do too); views that keep their size between
+    /// frames ([`crate::ViewElement::keep_size`]) are reused through that and redraw only on
+    /// this.
+    pub(crate) refresh_requested: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2197,6 +2202,7 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
+            refresh_requested: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -2388,6 +2394,7 @@ impl Window {
     pub fn refresh(&mut self) {
         if self.invalidator.not_drawing() {
             self.refreshing = true;
+            self.refresh_requested = true;
             self.invalidator.set_dirty(true);
         }
     }
@@ -3571,6 +3578,7 @@ impl Window {
         self.record_entities_accessed(cx);
         self.reset_cursor_style(cx);
         self.refreshing = false;
+        self.refresh_requested = false;
         self.invalidator.set_phase(DrawPhase::None);
         // Focus listeners may move focus (e.g. a dock forwarding focus to its active
         // panel). `Window::focus` suppresses `refresh` while a draw is in progress, so
@@ -7368,6 +7376,23 @@ impl Window {
             .remove(&key)
             .or_else(|| self.rendered_frame.element_states.remove(&key));
         (key, state)
+    }
+
+    /// Rhein: reads an element's state without taking it, from this frame or the last; for a
+    /// decision made before the element takes its state (see `view::request_layout_kept`).
+    pub(crate) fn peek_element_state<S: 'static, R>(
+        &self,
+        global_id: &GlobalElementId,
+        f: impl FnOnce(Option<&S>) -> R,
+    ) -> R {
+        let key = (global_id.clone(), TypeId::of::<S>());
+        let state = self
+            .next_frame
+            .element_states
+            .get(&key)
+            .or_else(|| self.rendered_frame.element_states.get(&key));
+        // Stored as `Option<S>`, as `with_element_state` keeps it.
+        f(state.and_then(|state| state.inner.downcast_ref::<Option<S>>()).and_then(Option::as_ref))
     }
 
     #[inline(never)]
