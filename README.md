@@ -25,13 +25,13 @@ Not done yet: read receipts, camera capture, the recovery key, a gapless switch 
 Rhein runs on Linux.
 
 ```sh
-./rheinprod                  # check system packages, build, install into /usr (sudo when needed)
-./rheinprod --prefix ~/.local
-./rheinprod --build-only     # just target/production/rhein
-./rheinprod --uninstall
+./install                  # check system packages, build, install into /usr (sudo when needed)
+./install --prefix ~/.local
+./install --build-only     # just target/production/rhein
+./install --uninstall
 ```
 
-`rheinprod` first checks for the system packages Rhein needs and offers to install any that are missing with pacman, apt, dnf or zypper. Pass `--yes` to skip the prompt, or `--no-deps` to skip the check. The packages include:
+`./install` first checks for the system packages Rhein needs and offers to install any that are missing with pacman, apt, dnf or zypper. Pass `--yes` to skip the prompt, or `--no-deps` to skip the check. The packages include:
 
 - the compilers and headers for the build
 - ALSA, PipeWire and the Vulkan loader

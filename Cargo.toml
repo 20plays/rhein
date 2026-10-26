@@ -63,7 +63,7 @@ opt-level = 1
 [profile.dev.package.rhein-store]
 opt-level = 1
 
-# What `./rheinprod` builds and installs: the release build, optimised across crates and with
+# What `./install` builds and installs: the release build, optimised across crates and with
 # its symbols stripped. Slower to build than `--release`, which stays quick for development.
 [profile.production]
 inherits = "release"

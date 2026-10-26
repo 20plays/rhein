@@ -31,7 +31,7 @@ if ((upload)); then
   [[ -z $(git status --porcelain) ]] || { echo "the working tree has uncommitted changes; commit them first" >&2; exit 1; }
 fi
 
-./rheinprod --build-only --no-deps
+./install --build-only --no-deps
 
 name="rhein-$version-linux-x86_64"
 stage="dist/$name"
@@ -64,7 +64,7 @@ notes="Test build of Rhein, the native Telium client, for Linux x86_64.
 
 Unpack, then run \`./install.sh\` (for you, into ~/.local) or \`./install.sh --system\` (for everyone, into /usr).
 
-Needs ALSA, Vulkan, xkbcommon, GLib, PipeWire and xdg-desktop-portal with your desktop's backend for screen sharing. Built on a current Arch-based system: older distributions may lack the glibc it needs; build from source there with \`./rheinprod\`."
+Needs ALSA, Vulkan, xkbcommon, GLib, PipeWire and xdg-desktop-portal with your desktop's backend for screen sharing. Built on a current Arch-based system: older distributions may lack the glibc it needs; build from source there with \`./install\`."
 flags=(--title "Rhein $version" --notes "$notes" --target "$(git rev-parse HEAD)")
 ((prerelease)) && flags+=(--prerelease)
 gh release create "$version" "dist/$name.tar.gz" "dist/$name.tar.gz.sha256" "${flags[@]}"

@@ -1,4 +1,4 @@
 # Link with mold: linking libwebrtc and gpui is most of a rebuild, and mold does it several
-# times faster than the default linker. `./rheinprod` installs it with the other build packages.
+# times faster than the default linker. `./install` installs it with the other build packages.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]

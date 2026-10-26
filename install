@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Builds Rhein for production and installs it system-wide:
 #
-#   ./rheinprod               build, then install into /usr (asks for sudo when needed)
-#   ./rheinprod --build-only  build only; the binary is target/production/rhein
-#   ./rheinprod --test        run the offline test suite before building
-#   ./rheinprod --prefix DIR  install under DIR instead of /usr (e.g. ~/.local)
-#   ./rheinprod --uninstall   remove what an install put there
-#   ./rheinprod --yes         install missing system packages without asking
-#   ./rheinprod --no-deps     skip the system package check
+#   ./install               build, then install into /usr (asks for sudo when needed)
+#   ./install --build-only  build only; the binary is target/production/rhein
+#   ./install --test        run the offline test suite before building
+#   ./install --prefix DIR  install under DIR instead of /usr (e.g. ~/.local)
+#   ./install --uninstall   remove what an install put there
+#   ./install --yes         install missing system packages without asking
+#   ./install --no-deps     skip the system package check
 #
 # First it checks the system packages Rhein needs to build and to run, and offers to install the
 # missing ones with the distribution's package manager (pacman, apt, dnf or zypper): compilers
