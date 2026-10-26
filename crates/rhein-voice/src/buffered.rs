@@ -4,7 +4,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -45,6 +45,8 @@ pub struct Buffered {
     arrived: Condvar,
     /// Asked for whole (not only its start, as a look ahead fetches).
     wanted: AtomicBool,
+    /// Short of that, how much of its start is asked for.
+    until: AtomicU64,
 }
 
 impl Buffered {
@@ -176,6 +178,22 @@ impl Buffered {
 
     pub fn wanted(&self) -> bool {
         self.wanted.load(Ordering::Relaxed)
+    }
+
+    /// Asks for at least the first `n` bytes.
+    pub fn want_until(&self, n: u64) {
+        self.until.fetch_max(n, Ordering::Relaxed);
+        self.arrived.notify_all();
+    }
+
+    /// How much of the start is asked for, short of all of it.
+    pub fn until(&self) -> u64 {
+        self.until.load(Ordering::Relaxed)
+    }
+
+    /// The bytes here from the start on.
+    pub fn head(&self) -> u64 {
+        self.state.lock().unwrap().head as u64
     }
 
     /// Stops its download, if it is still under way; it will not be complete.

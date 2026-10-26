@@ -10,8 +10,9 @@ use rhein_voice::buffered::Buffered;
 use super::*;
 use crate::conversations::Engine;
 
-/// How much of a file a look ahead fetches before it waits to be wanted whole.
-const LOOK_AHEAD: u64 = 2 << 20;
+/// How much of a file's start a download fetches at least before it waits to be wanted whole
+/// (or for more of its start: see `Buffered::want_until`); an MP4's index usually fits.
+const FIRST: u64 = 256 << 10;
 
 /// How long a look ahead waits to be wanted before it gives up.
 const LOOK_AHEAD_KEPT: Duration = Duration::from_secs(60);
@@ -88,9 +89,10 @@ impl Fetcher {
             if into.failed() {
                 return Ok(());
             }
-            if !into.wanted() && into.progress().0 >= LOOK_AHEAD {
+            let enough = |into: &Buffered| !into.wanted() && into.head() >= into.until().max(FIRST);
+            if enough(into) {
                 let since = std::time::Instant::now();
-                while !into.wanted() && !into.failed() {
+                while enough(into) && !into.failed() {
                     if since.elapsed() > LOOK_AHEAD_KEPT {
                         into.give_up();
                         return Ok(());

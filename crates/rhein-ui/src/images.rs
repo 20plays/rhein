@@ -380,6 +380,11 @@ pub fn source(url: impl Into<SharedString>) -> ImageSource {
     whole(if url.contains("://") { Resource::Uri(url.into()) } else { Resource::Embedded(url) })
 }
 
+/// A picture in a file, drawn whole.
+pub fn file(path: impl Into<std::sync::Arc<std::path::Path>>) -> ImageSource {
+    whole(Resource::Path(path.into()))
+}
+
 fn whole(resource: Resource) -> ImageSource {
     ImageSource::Custom(Arc::new(move |window: &mut Window, cx: &mut App| full(&resource, window, cx)))
 }

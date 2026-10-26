@@ -137,38 +137,7 @@ impl Movie {
     /// `Some("alsa:null")` for silence). The file may still be arriving: this waits for its index,
     /// unless `cancel` says to stop.
     pub fn start(bytes: Arc<Buffered>, device: Option<String>, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<Movie> {
-        let reader = bytes.reader(cancel);
-        let len = reader.size()?;
-        let mp4 = Mp4::read(reader, len).map_err(|e| anyhow!("this video cannot be read: {e}"))?;
-        let track = mp4.tracks().values().find(|t| t.kind == Some(TrackKind::Video)).ok_or_else(|| anyhow!("this file has no video in it"))?;
-        let StsdBoxContent::Avc1(avc1) = &track.trak(&mp4).mdia.minf.stbl.stsd.contents else {
-            let codec = track.codec_string(&mp4).unwrap_or_else(|| "this format".into());
-            return Err(anyhow!("videos in {codec} cannot be played here, only H.264"));
-        };
-        let mut headers = Vec::new();
-        for nal in avc1.avcc.sequence_parameter_sets.iter().chain(&avc1.avcc.picture_parameter_sets) {
-            headers.extend_from_slice(&[0, 0, 0, 1]);
-            headers.extend_from_slice(&nal.bytes);
-        }
-        let stream = Stream {
-            headers,
-            length_size: avc1.avcc.length_size_minus_one as usize % 4 + 1,
-            timescale: track.timescale.max(1) as f64,
-            samples: track.samples.clone(),
-            turns: {
-                let m = &track.trak(&mp4).tkhd.matrix;
-                quarter_turns(m.a, m.b, m.c, m.d)
-            },
-        };
-        let duration = match track.duration {
-            0 => stream.samples.iter().map(|s| s.composition_timestamp as f64 + s.duration as f64).fold(0., f64::max),
-            d => d as f64,
-        } / stream.timescale;
-        // As shown: a phone's portrait video is stored on its side and turned upright.
-        let (width, height) = match stream.turns % 2 {
-            0 => (avc1.width as u32, avc1.height as u32),
-            _ => (avc1.height as u32, avc1.width as u32),
-        };
+        let (stream, width, height, duration) = Stream::read(&bytes, cancel)?;
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -279,6 +248,52 @@ impl Drop for Movie {
     }
 }
 
+/// A video's first picture, for showing before it plays, and its shape as shown.
+pub struct Poster {
+    pub picture: Picture,
+    pub width: u32,
+    pub height: u32,
+    pub duration: f64,
+}
+
+/// Decodes the first picture of `bytes`, asking its download for no more than the index and that
+/// picture: at most `max_width` wide.
+pub fn poster(bytes: &Arc<Buffered>, max_width: u32, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<Poster> {
+    let cancel = Arc::new(cancel);
+    let (stream, width, height, duration) = Stream::read(bytes, {
+        let cancel = cancel.clone();
+        move || cancel()
+    })?;
+    let mut decoder = new_decoder(&stream)?;
+    let (mut data, mut nal) = (Vec::new(), Vec::new());
+    // A picture can need a few samples after it (B-frames) before the decoder gives it out.
+    for sample in stream.samples.iter().take(32) {
+        bytes.want_until(sample.byte_range().end as u64);
+        bytes.read_at(sample.byte_range(), &mut data, &|| cancel())?;
+        stream.annex_b(&data, &mut nal);
+        if let Ok(Some(yuv)) = decoder.decode(&nal) {
+            return Ok(Poster { picture: turned(picture_of(&yuv, max_width), stream.turns), width, height, duration });
+        }
+    }
+    let yuv = decoder.flush_remaining()?.into_iter().next().ok_or_else(|| anyhow!("this video shows no picture"))?;
+    Ok(Poster { picture: turned(picture_of(&yuv, max_width), stream.turns), width, height, duration })
+}
+
+/// The shape of a video as shown, whatever its codec (a poster needs H.264; the shape does not).
+pub fn shape(bytes: &Arc<Buffered>, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<(u32, u32)> {
+    let reader = bytes.reader(cancel);
+    let len = reader.size()?;
+    let mp4 = Mp4::read(reader, len).map_err(|e| anyhow!("this video cannot be read: {e}"))?;
+    let track = mp4.tracks().values().find(|t| t.kind == Some(TrackKind::Video)).ok_or_else(|| anyhow!("this file has no video in it"))?;
+    let tkhd = &track.trak(&mp4).tkhd;
+    let (w, h) = (tkhd.width.value() as u32, tkhd.height.value() as u32);
+    if w == 0 || h == 0 {
+        return Err(anyhow!("this video does not say its size"));
+    }
+    let m = &tkhd.matrix;
+    Ok(if quarter_turns(m.a, m.b, m.c, m.d) % 2 == 1 { (h, w) } else { (w, h) })
+}
+
 /// The video track as the decoder reads it.
 struct Stream {
     /// The parameter sets, as Annex B.
@@ -327,6 +342,44 @@ fn turned(picture: Picture, turns: u8) -> Picture {
 }
 
 impl Stream {
+    /// The video track of an MP4, once its index is here; with the picture's size as shown and
+    /// the length in seconds.
+    fn read(bytes: &Arc<Buffered>, cancel: impl Fn() -> bool + Send + Sync + 'static) -> Result<(Stream, u32, u32, f64)> {
+        let reader = bytes.reader(cancel);
+        let len = reader.size()?;
+        let mp4 = Mp4::read(reader, len).map_err(|e| anyhow!("this video cannot be read: {e}"))?;
+        let track = mp4.tracks().values().find(|t| t.kind == Some(TrackKind::Video)).ok_or_else(|| anyhow!("this file has no video in it"))?;
+        let StsdBoxContent::Avc1(avc1) = &track.trak(&mp4).mdia.minf.stbl.stsd.contents else {
+            let codec = track.codec_string(&mp4).unwrap_or_else(|| "this format".into());
+            return Err(anyhow!("videos in {codec} cannot be played here, only H.264"));
+        };
+        let mut headers = Vec::new();
+        for nal in avc1.avcc.sequence_parameter_sets.iter().chain(&avc1.avcc.picture_parameter_sets) {
+            headers.extend_from_slice(&[0, 0, 0, 1]);
+            headers.extend_from_slice(&nal.bytes);
+        }
+        let stream = Stream {
+            headers,
+            length_size: avc1.avcc.length_size_minus_one as usize % 4 + 1,
+            timescale: track.timescale.max(1) as f64,
+            samples: track.samples.clone(),
+            turns: {
+                let m = &track.trak(&mp4).tkhd.matrix;
+                quarter_turns(m.a, m.b, m.c, m.d)
+            },
+        };
+        let duration = match track.duration {
+            0 => stream.samples.iter().map(|s| s.composition_timestamp as f64 + s.duration as f64).fold(0., f64::max),
+            d => d as f64,
+        } / stream.timescale;
+        // As shown: a phone's portrait video is stored on its side and turned upright.
+        let (width, height) = match stream.turns % 2 {
+            0 => (avc1.width as u32, avc1.height as u32),
+            _ => (avc1.height as u32, avc1.width as u32),
+        };
+        Ok((stream, width, height, duration))
+    }
+
     /// A sample's NAL units (`data`) as Annex B (start codes instead of lengths), which OpenH264
     /// reads.
     fn annex_b(&self, mut data: &[u8], out: &mut Vec<u8>) {
@@ -468,10 +521,17 @@ fn present(yuv: &DecodedYUV<'_>, pending: &mut BinaryHeap<Reverse<i64>>, stream:
 }
 
 fn show(yuv: &DecodedYUV<'_>, turns: u8, shared: &Shared) {
+    let picture = picture_of(yuv, MAX_WIDTH);
+    *shared.latest.lock().unwrap() = Some(Arc::new(turned(picture, turns)));
+    shared.seq.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A decoded picture as BGRA, scaled down to `max_width` when it is wider.
+fn picture_of(yuv: &DecodedYUV<'_>, max_width: u32) -> Picture {
     let (w, h) = yuv.dimensions_i32();
     let (sy, su, sv) = yuv.strides_i32();
     let (width, height) = (w as u32, h as u32);
-    let picture = if width <= MAX_WIDTH {
+    if width <= max_width {
         let mut bgra = vec![0u8; (width * height * 4) as usize];
         // libyuv's "ARGB" is B, G, R, A in memory: what the UI wants.
         yuv_helper::i420_to_argb(yuv.y(), sy as u32, yuv.u(), su as u32, yuv.v(), sv as u32, &mut bgra, width * 4, w, h);
@@ -483,10 +543,8 @@ fn show(yuv: &DecodedYUV<'_>, turns: u8, shared: &Shared) {
         copy_plane(yuv.y(), sy as usize, y, dy as usize, width as usize, height as usize);
         copy_plane(yuv.u(), su as usize, u, du as usize, width.div_ceil(2) as usize, height.div_ceil(2) as usize);
         copy_plane(yuv.v(), sv as usize, v, dv as usize, width.div_ceil(2) as usize, height.div_ceil(2) as usize);
-        crate::video::to_picture(&buffer, MAX_WIDTH)
-    };
-    *shared.latest.lock().unwrap() = Some(Arc::new(turned(picture, turns)));
-    shared.seq.fetch_add(1, Ordering::Relaxed);
+        crate::video::to_picture(&buffer, max_width)
+    }
 }
 
 fn copy_plane(src: &[u8], src_stride: usize, dst: &mut [u8], dst_stride: usize, width: usize, rows: usize) {
@@ -529,6 +587,42 @@ mod tests {
             feeding.finish(None);
         });
         buffered
+    }
+
+    #[test]
+    fn a_poster_needs_only_the_index_and_the_first_picture() {
+        for (bytes, tail) in [(STREAMED, None), (INDEX_LAST, Some(26604))] {
+            // Nothing comes unless asked for, as a look ahead fetches.
+            let buffered = Arc::new(Buffered::new(Some(bytes.len() as u64)));
+            let feeding = buffered.clone();
+            std::thread::spawn(move || {
+                if let Some(at) = tail {
+                    feeding.put_tail(at as u64, &bytes[at..]);
+                }
+                let mut at = 0;
+                while at < bytes.len() {
+                    if (feeding.head() as usize) < (feeding.until() as usize).max(3300) {
+                        let end = (at + 200).min(bytes.len());
+                        feeding.push(&bytes[at..end]);
+                        at = end;
+                    } else {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    if feeding.failed() {
+                        return;
+                    }
+                }
+            });
+            let poster = poster(&buffered, 1280, || false).unwrap();
+            assert_eq!((poster.width, poster.height, poster.picture.width, poster.picture.height), (96, 64, 96, 64));
+            assert!((poster.duration - 4.).abs() < 0.1, "{}", poster.duration);
+            assert!(buffered.head() < bytes.len() as u64 / 2, "only the start was fetched ({} bytes)", buffered.head());
+            assert_eq!(shape(&buffered, || false).unwrap(), (96, 64));
+            buffered.give_up();
+        }
+        let hevc = full(HEVC);
+        assert!(poster(&hevc, 1280, || false).is_err());
+        assert!(shape(&hevc, || false).is_ok_and(|(w, h)| w > 0 && h > 0));
     }
 
     #[test]

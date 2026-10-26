@@ -37,6 +37,9 @@ const KEPT: u64 = 256 << 20;
 /// The pointer resting on a video this long fetches its start.
 const REST: Duration = Duration::from_millis(250);
 
+/// How much of its start the pointer resting on a video fetches.
+const LOOK_AHEAD: u64 = 2 << 20;
+
 /// The video loaded from a message (at most one), and its latest picture.
 #[derive(Default)]
 pub struct MoviePlayer {
@@ -96,9 +99,9 @@ impl MoviePlayer {
         *self = MoviePlayer { kept, resting, ..MoviePlayer::default() };
     }
 
-    /// The bytes of the video `key`, kept or a new download of them; `whole` asks for all of
-    /// them, not only the start.
-    fn bytes(&mut self, key: &str, source: MediaSource, whole: bool, io: &Io, fetcher: Fetcher) -> Arc<Buffered> {
+    /// The bytes of the video `key`, kept or a new download of them; asking for its first
+    /// `until` bytes, or all of them (`None`).
+    pub(super) fn bytes(&mut self, key: &str, source: MediaSource, until: Option<u64>, io: &Io, fetcher: Fetcher) -> Arc<Buffered> {
         let bytes = match self.kept.iter().position(|(k, _)| k == key) {
             Some(i) if !self.kept[i].1.failed() => self.kept.remove(i).expect("found").1,
             found => {
@@ -113,12 +116,13 @@ impl MoviePlayer {
                 bytes
             }
         };
-        if whole {
-            bytes.want();
+        match until {
+            None => bytes.want(),
+            Some(n) => bytes.want_until(n),
         }
         self.kept.push_back((key.to_owned(), bytes.clone()));
         // The oldest go (their downloads stop), never the one loaded or just asked for.
-        let size = |b: &Buffered| b.size().unwrap_or_else(|| b.progress().0);
+        let size = |b: &Buffered| b.progress().0;
         let mut total: u64 = self.kept.iter().map(|(_, b)| size(b)).sum();
         let mut i = 0;
         while total > KEPT && i + 1 < self.kept.len() {
@@ -183,7 +187,7 @@ impl Client {
             p.clear(cx);
             p.key = Some(key.clone());
             p.loading = true;
-            let bytes = p.bytes(&key, source, true, &io, fetcher);
+            let bytes = p.bytes(&key, source, None, &io, fetcher);
             p.bytes = Some(bytes.clone());
             p.refresh(cx);
             cx.notify();
@@ -263,7 +267,7 @@ impl Client {
                     player
                         .update(cx, |p, _| {
                             p.resting = None;
-                            p.bytes(&key, source, false, &io, fetcher);
+                            p.bytes(&key, source, Some(LOOK_AHEAD), &io, fetcher);
                         })
                         .ok();
                 }

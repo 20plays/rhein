@@ -14,7 +14,7 @@ use rhein_store::embed::{Embed, EmbedKind};
 use rhein_store::client::GifShare;
 use rhein_store::gif_links::MediaKind;
 use rhein_store::MediaProbe;
-use rhein_store::{Client, DownloadView, EmbedState, MediaSource, gif_links, markdown};
+use rhein_store::{Client, DownloadView, EmbedState, MediaSource, Poster, gif_links, markdown};
 use rhein_ui::images::{self, Fitted, fitted};
 use rhein_ui::theme::{FONT_EMOJI, FONT_MONO, radius, size, text};
 use rhein_ui::{ActiveTheme as _, motion, Avatar, Button, Icon, IconButton, Theme, icon, icon_sized, tooltip};
@@ -1173,9 +1173,20 @@ fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
     let source = attachment_source(ctx, message_id, i, a);
     let player = ctx.client.read(cx).movie_player.read(cx);
     let loaded = player.key() == Some(key.as_str());
+    let poster = ctx.client.read(cx).movie_posters.read(cx).get(&key).cloned();
+    // Its size as the message says, else its poster's, else the player's once it plays.
     let natural = match (a.width, a.height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as f32, h as f32)),
-        _ => player.view().filter(|_| loaded).and_then(|v| v.size).filter(|(w, h)| *w > 0 && *h > 0).map(|(w, h)| (w as f32, h as f32)),
+        _ => poster
+            .as_ref()
+            .and_then(Poster::size)
+            .or_else(|| player.view().filter(|_| loaded).and_then(|v| v.size))
+            .filter(|(w, h)| *w > 0 && *h > 0)
+            .map(|(w, h)| (w as f32, h as f32)),
+    };
+    let poster = match poster {
+        Some(Poster::Ready { path, .. }) => Some(path),
+        _ => None,
     };
     let (w, h) = natural.unwrap_or((16., 9.));
     let scale = (VIDEO_MAX.0 / w).min(VIDEO_MAX.1 / h);
@@ -1206,6 +1217,7 @@ fn video_attachment(ctx: &RowCtx, ix: usize, i: usize, message_id: &str, a: &Att
                 let (key, source) = (key.clone(), source.clone());
                 client.update(cx, |c, cx| c.toggle_movie(key, source, cx));
             })
+            .children(poster.map(|path| img(rhein_ui::images::file(path)).absolute().inset_0().size_full().object_fit(ObjectFit::Contain)))
             .child(
                 div()
                     .size(px(56.))
@@ -1705,10 +1717,12 @@ pub struct RowMedia {
     /// Telium media links whose kind is not known yet.
     pub probes: Vec<String>,
     pub pictures: Vec<String>,
+    /// Videos whose posters are not asked for yet: key, content hash, size, source.
+    pub posters: Vec<(String, String, i64, MediaSource)>,
     pub progress: u64,
 }
 
-pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &ParsedCache) -> RowMedia {
+pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &ParsedCache, cx: &App) -> RowMedia {
     let parsed = parsed(cache, message);
     use std::hash::{Hash, Hasher};
     let mut media = RowMedia::default();
@@ -1716,6 +1730,21 @@ pub fn row_media(client: &Client, channel_id: &str, message: &Message, cache: &P
     for a in message.attachments.iter().filter(|a| a.is_image()) {
         if let (Some(url), (_, None)) = (&a.url, fit(a.width, a.height)) {
             media.pictures.push(url.clone());
+        }
+    }
+    let posters = client.movie_posters.read(cx);
+    for (i, a) in message.attachments.iter().enumerate().filter(|(_, a)| rhein_voice::movie::playable(&a.filename, &a.mime)) {
+        let key = format!("{}#{i}", message.id);
+        match posters.get(&key) {
+            // A poster arriving can change the row's height.
+            Some(poster) => poster.size().hash(&mut progress),
+            None => {
+                let source = match &a.url {
+                    Some(url) => MediaSource::Url(url.clone()),
+                    None => MediaSource::Dm { conversation: channel_id.to_owned(), message: message.id.clone(), index: i },
+                };
+                media.posters.push((key, a.hash.clone(), a.size, source));
+            }
         }
     }
     let strip_embeds = client.channel(channel_id).is_some_and(|c| c.strip_embeds);

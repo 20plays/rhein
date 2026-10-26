@@ -32,10 +32,12 @@ mod notify;
 mod signals;
 mod media;
 mod movie;
+mod posters;
 mod sound;
 pub use gifs::{GifShare, MediaProbe};
 pub use media::{DownloadView, MediaSource, MediaTick, free_download_path, safe_file_name};
 pub use movie::{MoviePlayer, MovieView};
+pub use posters::{MoviePosters, Poster};
 pub use sound::SoundView;
 pub use call::{ActiveCall, CallMode, CallSpeaking, CallStatus, CallVideo, VoicePrefs};
 pub use rhein_voice::Slot;
@@ -401,6 +403,8 @@ pub struct Client {
     pub media_tick: Entity<MediaTick>,
     /// The video playing from a message, apart from the client for the same reason.
     pub movie_player: Entity<MoviePlayer>,
+    /// The videos' posters, apart from the client so one arriving redraws only video rows.
+    pub movie_posters: Entity<MoviePosters>,
     /// Renews guild sessions before they run out (every minute, see `freshen_sessions`).
     renew_ticker: Option<Task<()>>,
     /// guild id → user id → their voice state (only users in a channel).
@@ -524,6 +528,7 @@ impl Client {
             call_speaking: cx.new(|_| CallSpeaking::default()),
             media_tick: cx.new(|_| MediaTick),
             movie_player: cx.new(|_| MoviePlayer::default()),
+            movie_posters: cx.new(|_| MoviePosters::default()),
             downloads: HashMap::new(),
             renew_ticker: None,
             signin: None,

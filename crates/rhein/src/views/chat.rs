@@ -592,13 +592,13 @@ impl ChatView {
         let top = self.list.logical_scroll_top().item_ix.min(count);
         let range = top.saturating_sub(ABOVE)..(top + BELOW).min(count);
         let (mut embeds, mut shares, mut pictures, mut changed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut probes = Vec::new();
+        let (mut probes, mut posters) = (Vec::new(), Vec::new());
         {
             let client = self.client.read(cx);
             let Some(log) = client.logs.get(&channel) else { return };
             for ix in range {
                 let Some(message) = log.messages.get(ix) else { break };
-                let media = crate::views::rows::row_media(client, &channel, message, &self.parsed);
+                let media = crate::views::rows::row_media(client, &channel, message, &self.parsed, cx);
                 let arrived = media.pictures.iter().filter(|p| self.arrived.contains(*p)).count() as u64;
                 let progress = media.progress ^ arrived.wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 if self.row_progress.insert(crate::views::rows::message_key(message).to_owned(), progress).is_some_and(|was| was != progress) {
@@ -607,6 +607,7 @@ impl ChatView {
                 embeds.extend(media.embeds);
                 shares.extend(media.shares);
                 probes.extend(media.probes);
+                posters.extend(media.posters);
                 pictures.extend(media.pictures.into_iter().filter(|p| !self.prefetched.contains(p)));
             }
         }
@@ -630,7 +631,7 @@ impl ChatView {
             })
             .detach();
         }
-        if !embeds.is_empty() || !shares.is_empty() || !probes.is_empty() {
+        if !embeds.is_empty() || !shares.is_empty() || !probes.is_empty() || !posters.is_empty() {
             let client = self.client.clone();
             cx.defer(move |cx| {
                 client.update(cx, |client, cx| {
@@ -642,6 +643,9 @@ impl ChatView {
                     }
                     for url in &probes {
                         client.request_media_kind(url, cx);
+                    }
+                    for (key, hash, size, source) in posters {
+                        client.request_poster(key, &hash, size, source, cx);
                     }
                 })
             });
@@ -1947,11 +1951,14 @@ impl ChatView {
         let this = cx.entity();
         let client = self.client.clone();
         let sound = client.read(cx).media_tick.clone();
+        let posters = client.read(cx).movie_posters.clone();
         let history = part(&this, |chat, window, cx| chat.history(window, cx), cx);
         history.update(cx, |p, cx| {
             p.watch(&client, cx);
             // A sound file playing moves its bar.
             p.watch(&sound, cx);
+            // A video's poster arriving can change its row's height.
+            p.watch(&posters, cx);
         });
         self.history = Some(history.clone());
         history
