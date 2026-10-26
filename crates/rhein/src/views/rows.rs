@@ -154,9 +154,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
         let hovered = v.hovered_link.as_ref().filter(|(m, _, _)| *m == message.id).map(|(_, b, r)| (*b, r.clone()));
         // Only this message's spoilers, not a copy of every one revealed.
         let revealed: HashSet<(String, usize)> = v.revealed.iter().filter(|(m, _)| *m == message.id).cloned().collect();
-        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(message)).copied(), (selected, hovered))
+        let row_hovered = v.hovered_row.as_deref() == Some(message_key(message));
+        (revealed, v.highlight.as_ref().map(|(id, _)| id.clone()), v.fresh.get(message_key(message)).copied(), (selected, hovered), row_hovered)
     });
-    let (revealed, highlighted, fresh, (selected, hovered)) = view_state.unwrap_or_default();
+    let (revealed, highlighted, fresh, (selected, hovered), row_hovered) = view_state.unwrap_or_default();
     let highlighted = highlighted.as_deref() == Some(message.id.as_str());
 
     let parsed = parsed(&ctx.parsed, message);
@@ -430,7 +431,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .text_color(t.text_faint)
             .opacity(0.)
             .group_hover(group.clone(), |s| s.opacity(1.))
-            .child(format_hm(message.created_at, prefs.clock_24h))
+            // Only the hovered row shapes its time (see `actions`).
+            .when(row_hovered, |d| d.child(format_hm(message.created_at, prefs.clock_24h)))
             .into_any_element()
     } else {
         let (v1, u1) = (ctx.view.clone(), message.author.clone());
@@ -447,7 +449,10 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
             .into_any_element()
     };
 
-    let actions = (!pending).then(|| hover_actions(ctx, ix, message, &group, client, guild_id.as_deref(), &t));
+    // Built for the row under the pointer only: hidden on every other row, they were laid out and
+    // shaped on each of them in every frame of a scroll. They still show by `group_hover`, so a
+    // row the pointer just left draws none even before the view hears of it.
+    let actions = (!pending && row_hovered).then(|| hover_actions(ctx, ix, message, &group, client, guild_id.as_deref(), &t));
 
     let row_bg: Option<Hsla> = if highlighted {
         Some(t.accent_soft.into())
@@ -456,7 +461,13 @@ pub fn render_row(ctx: &RowCtx, ix: usize, _window: &mut Window, cx: &mut App) -
     } else {
         None
     };
+    let hover_view = ctx.view.clone();
+    let hover_key = message_key(message).to_owned();
     let row = div()
+        .id(SharedString::from(format!("row-{hover_key}")))
+        .on_hover(move |hovered, _, cx| {
+            hover_view.update(cx, |v, cx| v.hover_row(&hover_key, *hovered, cx)).ok();
+        })
         .relative()
         .w_full()
         .group(group)

@@ -89,6 +89,9 @@ pub struct ChatView {
     pub(crate) selection: Option<crate::views::select::TextSelection>,
     /// The link (or channel, or spoiler) under the pointer: message, text block, byte range.
     pub(crate) hovered_link: Option<(String, usize, std::ops::Range<usize>)>,
+    /// The message row under the pointer (its key, `rows::message_key`). Only that row builds
+    /// its hover actions: every row building them, hidden, was most of a scroll frame's layout.
+    pub(crate) hovered_row: Option<String>,
     /// Takes the keyboard while text is selected, so Ctrl+C reaches the selection and not the
     /// composer.
     pub(crate) select_focus: FocusHandle,
@@ -281,6 +284,7 @@ impl ChatView {
             voice_chat: None,
             selection: None,
             hovered_link: None,
+            hovered_row: None,
             select_focus: cx.focus_handle(),
             composer_bounds: Rc::default(),
             prefetched: HashSet::new(),
@@ -718,6 +722,19 @@ impl ChatView {
         };
         if self.hovered_link != next {
             self.hovered_link = next;
+            cx.notify();
+        }
+    }
+
+    /// The pointer entered the row of the message under `key` (`true`) or left it.
+    pub(crate) fn hover_row(&mut self, key: &str, hovered: bool, cx: &mut Context<Self>) {
+        let next = match hovered {
+            true => Some(key.to_owned()),
+            false if self.hovered_row.as_deref() == Some(key) => None,
+            false => return,
+        };
+        if self.hovered_row != next {
+            self.hovered_row = next;
             cx.notify();
         }
     }
