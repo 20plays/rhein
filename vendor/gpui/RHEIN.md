@@ -20,6 +20,16 @@ Changes are marked `Rhein:` in the source.
   only by `Window::refresh`, is what makes such a view redraw regardless.
   `Window::peek_element_state` reads the kept size before the view takes its state.
   Tests: `crates/rhein-ui/tests/kept_rows.rs`.
+- **Kept-size views drawn moved** (`view.rs` `movable`, `window.rs` `reuse_prepaint_at`,
+  `reuse_paint_at`, `scene.rs` `replay_moved`): a clean kept-size view whose position changed (a
+  list scrolled) is drawn from what it drew, moved, instead of rendered and laid out again. Hitboxes
+  and every primitive move with it (a sprite's matrix translation by `d - R·d`). It has to be the
+  same size and text style, wholly inside its clip before and after, with nothing that keeps
+  positions outside hitboxes and primitives (deferred draws, tooltips, input handlers). Its mouse
+  listeners still hold the old positions, so they are not called (`Frame::moved_listeners`); the
+  view is never drawn moved while the pointer is over it or a button is held, and when the pointer
+  comes over one, the dispatch notifies it so it draws afresh where it is (`Frame::moved_views`,
+  carried over like hitboxes when an ancestor is reused).
 
 To move to a newer Zed: run `vendor.py` on a checkout of that revision, apply the changes again,
 and update the revision here and in Rhein's `Cargo.toml`.

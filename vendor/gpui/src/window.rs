@@ -1048,6 +1048,12 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    /// Rhein: for each mouse listener, whether it belongs to a view drawn moved from where it was
+    /// painted (see `Window::reuse_paint_at`). Such listeners kept the positions of then and are
+    /// not called; the view draws afresh once the pointer comes over it.
+    pub(crate) moved_listeners: Vec<bool>,
+    /// Rhein: the views drawn moved in this frame, where they are now.
+    pub(crate) moved_views: Vec<(EntityId, Bounds<Pixels>)>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1070,6 +1076,8 @@ pub(crate) struct Frame {
 #[derive(Clone, Default)]
 pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
+    /// Rhein: into `Frame::moved_views`, which a reused range carries over like its hitboxes.
+    moved_views_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
@@ -1104,6 +1112,8 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
+            moved_listeners: Vec::new(),
+            moved_views: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1131,6 +1141,8 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
+        self.moved_listeners.clear();
+        self.moved_views.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -1297,6 +1309,9 @@ pub struct Window {
     /// frames ([`crate::ViewElement::keep_size`]) are reused through that and redraw only on
     /// this.
     pub(crate) refresh_requested: bool,
+    /// Rhein: a mouse button is held (a drag or a selection may be under way); views are then
+    /// not drawn moved, so every listener keeps working.
+    pub(crate) mouse_held: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
     focus_enabled: bool,
@@ -2203,6 +2218,7 @@ impl Window {
             long_press_capture: None,
             refreshing: false,
             refresh_requested: false,
+            mouse_held: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
             focus_enabled: true,
@@ -4013,6 +4029,7 @@ impl Window {
             hitboxes_index: self.next_frame.hitboxes.len(),
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
+            moved_views_index: self.next_frame.moved_views.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
@@ -4020,10 +4037,40 @@ impl Window {
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
+        self.reuse_prepaint_at(range, Point::default());
+    }
+
+    /// Rhein: whether what a view prepainted in `range` can be reused moved: nothing in it that
+    /// keeps positions outside its hitboxes (deferred draws, tooltips).
+    pub(crate) fn prepaint_movable(range: &Range<PrepaintStateIndex>) -> bool {
+        range.start.deferred_draws_index == range.end.deferred_draws_index
+            && range.start.tooltips_index == range.end.tooltips_index
+    }
+
+    /// Rhein: whether what a view painted in `range` can be reused moved: no input handlers,
+    /// which keep their bounds.
+    pub(crate) fn paint_movable(range: &Range<PaintIndex>) -> bool {
+        range.start.input_handlers_index == range.end.input_handlers_index
+    }
+
+    /// Rhein: as [`Window::reuse_prepaint`], with the hitboxes moved by `offset`.
+    pub(crate) fn reuse_prepaint_at(&mut self, range: Range<PrepaintStateIndex>, offset: Point<Pixels>) {
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
-                .cloned(),
+                .map(|hitbox| Hitbox {
+                    bounds: hitbox.bounds + offset,
+                    content_mask: ContentMask {
+                        bounds: hitbox.content_mask.bounds + offset,
+                    },
+                    ..hitbox.clone()
+                }),
+        );
+        self.next_frame.moved_views.extend(
+            self.rendered_frame.moved_views
+                [range.start.moved_views_index..range.end.moved_views_index]
+                .iter()
+                .map(|(view, bounds)| (*view, *bounds + offset)),
         );
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
@@ -4085,6 +4132,13 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        self.reuse_paint_at(range, Point::default());
+    }
+
+    /// Rhein: as [`Window::reuse_paint`], moved by `offset`. The mouse listeners of a moved view
+    /// are marked so (see `Frame::moved_listeners`); one reused in place keeps its mark.
+    pub(crate) fn reuse_paint_at(&mut self, range: Range<PaintIndex>, offset: Point<Pixels>) {
+        let moved = offset != Point::default();
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4111,6 +4165,12 @@ impl Window {
                 .iter_mut()
                 .map(|listener| listener.take()),
         );
+        self.next_frame.moved_listeners.extend(
+            self.rendered_frame.moved_listeners
+                [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
+                .iter()
+                .map(|was| moved || *was),
+        );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
                 ..range.end.accessed_element_states_index]
@@ -4124,10 +4184,19 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
-            range.start.scene_index..range.end.scene_index,
-            &self.rendered_frame.scene,
-        );
+        if moved {
+            let scale = self.scale_factor();
+            self.next_frame.scene.replay_moved(
+                range.start.scene_index..range.end.scene_index,
+                &self.rendered_frame.scene,
+                offset.scale(scale),
+            );
+        } else {
+            self.next_frame.scene.replay(
+                range.start.scene_index..range.end.scene_index,
+                &self.rendered_frame.scene,
+            );
+        }
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -4264,6 +4333,7 @@ impl Window {
         let result = f(self);
         if result.is_err() {
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
+            self.next_frame.moved_views.truncate(index.moved_views_index);
             self.next_frame
                 .tooltip_requests
                 .truncate(index.tooltips_index);
@@ -5490,6 +5560,7 @@ impl Window {
                 }
             },
         )));
+        self.next_frame.moved_listeners.push(false);
     }
 
     /// Register a key event listener on this node for the next frame. The type of event
@@ -5671,11 +5742,13 @@ impl Window {
             }
             PlatformInput::MouseDown(mouse_down) => {
                 self.mouse_position = mouse_down.position;
+                self.mouse_held = true;
                 self.modifiers = mouse_down.modifiers;
                 PlatformInput::MouseDown(mouse_down)
             }
             PlatformInput::MouseUp(mouse_up) => {
                 self.mouse_position = mouse_up.position;
+                self.mouse_held = false;
                 self.modifiers = mouse_up.modifiers;
                 PlatformInput::MouseUp(mouse_up)
             }
@@ -5993,11 +6066,29 @@ impl Window {
             return;
         }
 
+        // Rhein: a view drawn moved does not hear the mouse (its listeners kept their old
+        // positions); once the pointer is over one, it draws afresh where it is.
+        let position = self.mouse_position();
+        let under_pointer: SmallVec<[EntityId; 2]> = self
+            .rendered_frame
+            .moved_views
+            .iter()
+            .filter(|(_, bounds)| bounds.contains(&position))
+            .map(|(view, _)| *view)
+            .collect();
+        for view in under_pointer {
+            cx.notify(view);
+        }
+
         let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
+        let moved_listeners = mem::take(&mut self.rendered_frame.moved_listeners);
 
         // Capture phase, events bubble from back to front. Handlers for this phase are used for
         // special purposes, such as detecting events outside of a given Bounds.
-        for listener in &mut mouse_listeners {
+        for (ix, listener) in mouse_listeners.iter_mut().enumerate() {
+            if moved_listeners.get(ix).copied().unwrap_or(false) {
+                continue;
+            }
             let listener = listener.as_mut().unwrap();
             listener(event, DispatchPhase::Capture, self, cx);
             if !cx.propagate_event {
@@ -6007,7 +6098,10 @@ impl Window {
 
         // Bubble phase, where most normal handlers do their work.
         if cx.propagate_event {
-            for listener in mouse_listeners.iter_mut().rev() {
+            for (ix, listener) in mouse_listeners.iter_mut().enumerate().rev() {
+                if moved_listeners.get(ix).copied().unwrap_or(false) {
+                    continue;
+                }
                 let listener = listener.as_mut().unwrap();
                 listener(event, DispatchPhase::Bubble, self, cx);
                 if !cx.propagate_event {
@@ -6017,6 +6111,7 @@ impl Window {
         }
 
         self.rendered_frame.mouse_listeners = mouse_listeners;
+        self.rendered_frame.moved_listeners = moved_listeners;
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {

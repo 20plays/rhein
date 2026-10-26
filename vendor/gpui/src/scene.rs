@@ -148,6 +148,25 @@ impl Scene {
         }
     }
 
+    /// Rhein: as [`Scene::replay`], with everything moved by `offset`: a cached view drawn again
+    /// where it moved to, unchanged (see `Window::reuse_paint_at`).
+    pub(crate) fn replay_moved(
+        &mut self,
+        range: Range<usize>,
+        prev_scene: &Scene,
+        offset: Point<ScaledPixels>,
+    ) {
+        for operation in &prev_scene.paint_operations[range] {
+            match operation {
+                PaintOperation::Primitive(primitive) => {
+                    self.insert_primitive(primitive.moved(offset))
+                }
+                PaintOperation::StartLayer(bounds) => self.push_layer(*bounds + offset),
+                PaintOperation::EndLayer => self.pop_layer(),
+            }
+        }
+    }
+
     pub fn finish(&mut self) {
         self.shadows.sort_by_key(|shadow| shadow.order);
         self.quads.sort_by_key(|quad| quad.order);
@@ -243,6 +262,72 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
+    }
+
+    /// Rhein: this primitive moved by `d`, its clip with it.
+    pub(crate) fn moved(&self, d: Point<ScaledPixels>) -> Primitive {
+        fn mask(mask: &ContentMask<ScaledPixels>, d: Point<ScaledPixels>) -> ContentMask<ScaledPixels> {
+            ContentMask { bounds: mask.bounds + d }
+        }
+        // A sprite's matrix maps window positions (`R·p + t`), so moving what it maps by `d`
+        // moves its translation by `d - R·d` (the shaders apply R transposed).
+        fn matrix(m: &TransformationMatrix, d: Point<ScaledPixels>) -> TransformationMatrix {
+            if *m == TransformationMatrix::unit() {
+                return *m;
+            }
+            let r = m.rotation_scale;
+            let (dx, dy) = (d.x.0, d.y.0);
+            TransformationMatrix {
+                rotation_scale: r,
+                translation: [
+                    m.translation[0] + dx - (r[0][0] * dx + r[1][0] * dy),
+                    m.translation[1] + dy - (r[0][1] * dx + r[1][1] * dy),
+                ],
+            }
+        }
+        let mut moved = self.clone();
+        match &mut moved {
+            Primitive::Shadow(p) => {
+                p.bounds = p.bounds + d;
+                p.element_bounds = p.element_bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+            }
+            Primitive::Quad(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+            }
+            Primitive::Path(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+                for vertex in &mut p.vertices {
+                    vertex.xy_position = vertex.xy_position + d;
+                    vertex.content_mask = mask(&vertex.content_mask, d);
+                }
+            }
+            Primitive::Underline(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+            }
+            Primitive::MonochromeSprite(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+                p.transformation = matrix(&p.transformation, d);
+            }
+            Primitive::SubpixelSprite(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+                p.transformation = matrix(&p.transformation, d);
+            }
+            Primitive::PolychromeSprite(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+            }
+            Primitive::Surface(p) => {
+                p.bounds = p.bounds + d;
+                p.content_mask = mask(&p.content_mask, d);
+            }
+        }
+        moved
     }
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {

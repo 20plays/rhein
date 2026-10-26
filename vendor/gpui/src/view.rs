@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ContentMask, Context,
     Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    LayoutId, PaintIndex, Pixels, Point, PrepaintStateIndex, Render, RenderOnce, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -344,6 +344,8 @@ struct ViewElementState {
     accessed_entities: FxHashSet<EntityId>,
     /// Rhein: the size the view's content asked for when last rendered (for `keep_size`).
     measured: Size<Pixels>,
+    /// Rhein: how far the view moved in this frame's prepaint, for its paint to move as much.
+    moved_by: Point<Pixels>,
 }
 
 struct ViewElementCacheKey {
@@ -590,6 +592,7 @@ fn prepaint_view(
                             text_style,
                         },
                         measured: bounds.size,
+                        moved_by: Point::default(),
                     };
                     (Some(element), state)
                 },
@@ -608,19 +611,45 @@ fn prepaint_view(
                     window.refreshing
                 };
 
-                if let Some(mut element_state) = element_state
-                    && element_state.cache_key.bounds == bounds
-                    && element_state.cache_key.content_mask == content_mask
-                    && element_state.cache_key.text_style == text_style
-                    && !window.dirty_views.contains(&entity_id)
-                    && !refreshing
-                {
+                let in_place = element_state.as_ref().is_some_and(|element_state| {
+                    element_state.cache_key.bounds == bounds
+                        && element_state.cache_key.content_mask == content_mask
+                        && element_state.cache_key.text_style == text_style
+                        && !window.dirty_views.contains(&entity_id)
+                        && !refreshing
+                });
+                // Rhein: a kept-size view that only moved (a list scrolled) is drawn again from
+                // what it drew, moved; see `movable`.
+                let moved = !in_place
+                    && keep_size
+                    && element_state.as_ref().is_some_and(|element_state| {
+                        movable(element_state, bounds, &content_mask, &text_style, entity_id, window)
+                    });
+
+                if in_place && let Some(mut element_state) = element_state {
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint(element_state.prepaint_range.clone());
                     cx.entities
                         .extend_accessed(&element_state.accessed_entities);
                     let prepaint_end = window.prepaint_index();
                     element_state.prepaint_range = prepaint_start..prepaint_end;
+                    element_state.moved_by = Point::default();
+
+                    return (None, element_state);
+                }
+
+                if moved && let Some(mut element_state) = element_state {
+                    let offset = bounds.origin - element_state.cache_key.bounds.origin;
+                    let prepaint_start = window.prepaint_index();
+                    window.reuse_prepaint_at(element_state.prepaint_range.clone(), offset);
+                    cx.entities
+                        .extend_accessed(&element_state.accessed_entities);
+                    let prepaint_end = window.prepaint_index();
+                    element_state.prepaint_range = prepaint_start..prepaint_end;
+                    element_state.cache_key.bounds = bounds;
+                    element_state.cache_key.content_mask = content_mask;
+                    element_state.moved_by = offset;
+                    window.next_frame.moved_views.push((entity_id, bounds));
 
                     return (None, element_state);
                 }
@@ -660,11 +689,47 @@ fn prepaint_view(
                             text_style,
                         },
                         measured,
+                        moved_by: Point::default(),
                     },
                 )
             },
         )
     })
+}
+
+/// Rhein: whether a clean kept-size view whose position changed can be drawn from what it drew,
+/// moved. Its size and text style are the same; it was and is wholly inside its clip (so moving
+/// the clips of what it drew along with it cuts nothing differently); nothing it drew keeps
+/// positions outside what gets moved (`Window::prepaint_movable`, `paint_movable`); and the
+/// pointer is not over it and no button is held, since its mouse listeners keep their old
+/// positions and are left out (`Frame::moved_listeners`).
+fn movable(
+    state: &ViewElementState,
+    bounds: Bounds<Pixels>,
+    content_mask: &ContentMask<Pixels>,
+    text_style: &TextStyle,
+    entity_id: EntityId,
+    window: &Window,
+) -> bool {
+    fn inside(inner: &Bounds<Pixels>, outer: &Bounds<Pixels>) -> bool {
+        inner.left() >= outer.left()
+            && inner.top() >= outer.top()
+            && inner.right() <= outer.right()
+            && inner.bottom() <= outer.bottom()
+    }
+    let before = state.cache_key.bounds;
+    let pointer = window.mouse_position();
+    before.size == bounds.size
+        && state.cache_key.text_style == *text_style
+        && !window.dirty_views.contains(&entity_id)
+        && !window.refresh_requested
+        && !window.mouse_held
+        && inside(&before, &state.cache_key.content_mask.bounds)
+        && inside(&bounds, &content_mask.bounds)
+        && !before.contains(&pointer)
+        && !bounds.contains(&pointer)
+        && Window::prepaint_movable(&state.prepaint_range)
+        && Window::paint_movable(&state.paint_range)
 }
 
 /// Rhein: lays out a kept-size view (see [`ViewElement::keep_size`]) at the size it had in the
@@ -736,7 +801,10 @@ fn paint_view(
                         element.paint(window, cx);
                         window.refreshing = refreshing;
                     } else {
-                        window.reuse_paint(element_state.paint_range.clone());
+                        window.reuse_paint_at(
+                            element_state.paint_range.clone(),
+                            mem::take(&mut element_state.moved_by),
+                        );
                     }
 
                     let paint_end = window.paint_index();
