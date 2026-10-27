@@ -1597,6 +1597,10 @@ impl Client {
         self.servers.iter().find(|s| s.name == name)
     }
 
+    fn ready_servers(&self) -> impl Iterator<Item = &Server> {
+        self.servers.iter().filter(|s| s.status == ServerStatus::Ready)
+    }
+
     /// Whether "Protect my IP" covers a server: for every server, or per guild (then the
     /// strictest of its guilds, since one connection serves them all).
     pub fn protected(&self, key: &str) -> bool {
@@ -3708,16 +3712,25 @@ impl Client {
     }
 
     /// Someone else's activity artwork, safe to show: never the original host (that would tell it
-    /// who is looking), always a copy re-hosted by one of our own servers' camo caches, as the web
-    /// client does. `None` until that copy is known.
+    /// who is looking), always one of our own servers: its media as it is, anything else a copy
+    /// re-hosted by its camo cache, as the web client does. `None` until that copy is known.
     pub fn artwork_url(&mut self, url: &str, cx: &mut Context<Self>) -> Option<String> {
+        // Already media on a server we are signed in to (a cover uploaded from someone's machine):
+        // loaded as it is, like our own, rather than as the camo cache's poorer copy.
+        let ours = self
+            .ready_servers()
+            .filter_map(|s| s.doc.as_ref())
+            .any(|d| crate::embed::is_own_media_file(url, &d.api));
+        if ours {
+            return Some(url.to_owned());
+        }
         match self.artwork.get(url) {
             Some(EmbedState::Ready(embed)) => return embed.image.clone(),
             Some(EmbedState::Loading) => return None,
             Some(EmbedState::Empty { retry_at }) if Instant::now() < *retry_at => return None,
             _ => {}
         }
-        let api = self.servers.iter().filter(|s| s.status == ServerStatus::Ready).find_map(|s| s.api.clone())?;
+        let api = self.ready_servers().find_map(|s| s.api.clone())?;
         self.artwork.insert(url.to_owned(), EmbedState::Loading);
         let io = self.io.clone();
         let url = url.to_owned();

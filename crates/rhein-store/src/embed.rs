@@ -71,13 +71,20 @@ pub fn read(payload: &Value, api_base: &str, url: &str) -> Option<Embed> {
 
 /// Absolute, same origin as the answering server, under its camo or media path, no userinfo.
 fn is_own_media(candidate: &str, api_base: &str) -> bool {
-    let (Ok(media), Ok(base)) = (url::Url::parse(candidate), url::Url::parse(api_base)) else {
-        return false;
-    };
-    media.origin() == base.origin()
-        && media.username().is_empty()
-        && media.password().is_none()
-        && (media.path().starts_with("/_telium/v1/camo/") || media.path().starts_with("/_telium/v1/media/"))
+    let Some(media) = on_server(candidate, api_base) else { return false };
+    media.path().starts_with("/_telium/v1/camo/") || media.path().starts_with("/_telium/v1/media/")
+}
+
+/// One of the answering server's own media files as it is: same origin, no userinfo, and a media
+/// hash path (`media/{hash}` or `media/remote/{origin}/{hash}`), nothing else under it.
+pub fn is_own_media_file(candidate: &str, api_base: &str) -> bool {
+    on_server(candidate, api_base).is_some() && crate::gif_links::is_telium_media(candidate)
+}
+
+/// `candidate` parsed, when it is absolute, same origin as `api_base` and carries no userinfo.
+fn on_server(candidate: &str, api_base: &str) -> Option<url::Url> {
+    let (media, base) = (url::Url::parse(candidate).ok()?, url::Url::parse(api_base).ok()?);
+    (media.origin() == base.origin() && media.username().is_empty() && media.password().is_none()).then_some(media)
 }
 
 #[cfg(test)]
