@@ -420,3 +420,48 @@ fn rows_draw_again_as_what_holds_them_fades(cx: &mut TestAppContext) {
     frame(cx);
     assert_eq!(renders[3].get(), before, "reused while nothing changes");
 }
+
+/// Text laid out before the history in the window, as a sidebar or an overlay has: how much of
+/// it there is moves where the history's text layouts sit in each frame.
+struct Before {
+    lines: usize,
+    host: Entity<Host>,
+}
+
+impl Render for Before {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .children((0..self.lines).map(|n| div().id(n).on_click(|_, _, _| {}).child(format!("line {n}"))))
+            .child(self.host.clone().cached(StyleRefinement::default().size_full()))
+    }
+}
+
+#[gpui::test]
+fn rows_reused_after_what_comes_before_them_changed_find_their_text(cx: &mut TestAppContext) {
+    let renders: Vec<_> = (0..50).map(|_| Rc::new(Cell::new(0))).collect();
+    let list = ListState::new(50, ListAlignment::Top, px(0.));
+    let host = cx.update(|cx| {
+        let rows = renders.iter().enumerate().map(|(ix, r)| cx.new(|_| Row { ix, height: 20., renders: r.clone(), clicks: Rc::default() })).collect();
+        cx.new(|_| Host { list: list.clone(), rows })
+    });
+    let root_host = host.clone();
+    let (root, cx) = cx.add_window_view(move |_, _| Before { lines: 0, host: root_host });
+    cx.simulate_resize(size(px(400.), px(300.)));
+    cx.simulate_mouse_move(point(px(1000.), px(1000.)), None, Modifiers::none());
+    frame(cx);
+    frame(cx);
+    for lines in [6, 0, 3, 9] {
+        // Lines come or go before the history, which is reused whole meanwhile...
+        root.update(cx, |r, cx| {
+            r.lines = lines;
+            cx.notify();
+        });
+        frame(cx);
+        // ...and then draws again, its rows reused where this frame has them.
+        host.update(cx, |_, cx| cx.notify());
+        frame(cx);
+        frame(cx);
+    }
+}

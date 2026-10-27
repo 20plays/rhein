@@ -1054,6 +1054,11 @@ pub(crate) struct Frame {
     pub(crate) moved_listeners: Vec<bool>,
     /// Rhein: the views drawn moved in this frame, where they are now.
     pub(crate) moved_views: Vec<(EntityId, Bounds<Pixels>)>,
+    /// Rhein: where each kept-size view's prepaint and paint are in this frame (see
+    /// `Window::kept_ranges`). Carried over, relocated, when a range holding them is reused, and
+    /// rolled back with a failed `Window::transact`, so they always point into this frame.
+    pub(crate) kept_prepaints: Vec<(EntityId, Range<PrepaintStateIndex>)>,
+    pub(crate) kept_paints: Vec<(EntityId, Range<PaintIndex>)>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1078,6 +1083,8 @@ pub(crate) struct PrepaintStateIndex {
     hitboxes_index: usize,
     /// Rhein: into `Frame::moved_views`, which a reused range carries over like its hitboxes.
     moved_views_index: usize,
+    /// Rhein: into `Frame::kept_prepaints`, carried over likewise.
+    kept_prepaints_index: usize,
     tooltips_index: usize,
     deferred_draws_index: usize,
     dispatch_tree_index: usize,
@@ -1096,6 +1103,8 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    /// Rhein: into `Frame::kept_paints`, carried over like the rest when a paint is reused.
+    kept_paints_index: usize,
 }
 
 impl Frame {
@@ -1114,6 +1123,8 @@ impl Frame {
             mouse_listeners: Vec::new(),
             moved_listeners: Vec::new(),
             moved_views: Vec::new(),
+            kept_prepaints: Vec::new(),
+            kept_paints: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1143,6 +1154,8 @@ impl Frame {
         self.mouse_listeners.clear();
         self.moved_listeners.clear();
         self.moved_views.clear();
+        self.kept_prepaints.clear();
+        self.kept_paints.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -4030,10 +4043,20 @@ impl Window {
             tooltips_index: self.next_frame.tooltip_requests.len(),
             deferred_draws_index: self.next_frame.deferred_draws.len(),
             moved_views_index: self.next_frame.moved_views.len(),
+            kept_prepaints_index: self.next_frame.kept_prepaints.len(),
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
         }
+    }
+
+    /// Rhein: where the kept-size view `entity_id` prepainted and painted in the last frame,
+    /// which reusing it copies from; `None` when it was not drawn in it (whatever its own state
+    /// remembers is then no use: its ranges may be of an older frame or of a retried prepaint).
+    pub(crate) fn kept_ranges(&self, entity_id: EntityId) -> Option<(Range<PrepaintStateIndex>, Range<PaintIndex>)> {
+        let prepaint = self.rendered_frame.kept_prepaints.iter().rev().find(|(id, _)| *id == entity_id)?.1.clone();
+        let paint = self.rendered_frame.kept_paints.iter().rev().find(|(id, _)| *id == entity_id)?.1.clone();
+        Some((prepaint, paint))
     }
 
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
@@ -4055,6 +4078,24 @@ impl Window {
 
     /// Rhein: as [`Window::reuse_prepaint`], with the hitboxes moved by `offset`.
     pub(crate) fn reuse_prepaint_at(&mut self, range: Range<PrepaintStateIndex>, offset: Point<Pixels>) {
+        // Rhein: the kept-size views inside come along, at where their ranges land.
+        let to = self.prepaint_index();
+        let relocate = |i: &PrepaintStateIndex| PrepaintStateIndex {
+            hitboxes_index: to.hitboxes_index + (i.hitboxes_index - range.start.hitboxes_index),
+            moved_views_index: to.moved_views_index + (i.moved_views_index - range.start.moved_views_index),
+            kept_prepaints_index: to.kept_prepaints_index + (i.kept_prepaints_index - range.start.kept_prepaints_index),
+            tooltips_index: to.tooltips_index + (i.tooltips_index - range.start.tooltips_index),
+            deferred_draws_index: to.deferred_draws_index + (i.deferred_draws_index - range.start.deferred_draws_index),
+            dispatch_tree_index: to.dispatch_tree_index + (i.dispatch_tree_index - range.start.dispatch_tree_index),
+            accessed_element_states_index: to.accessed_element_states_index
+                + (i.accessed_element_states_index - range.start.accessed_element_states_index),
+            line_layout_index: i.line_layout_index.relocated(&range.start.line_layout_index, &to.line_layout_index),
+        };
+        let kept: Vec<_> = self.rendered_frame.kept_prepaints[range.start.kept_prepaints_index..range.end.kept_prepaints_index]
+            .iter()
+            .map(|(id, r)| (*id, relocate(&r.start)..relocate(&r.end)))
+            .collect();
+        self.next_frame.kept_prepaints.extend(kept);
         self.next_frame.hitboxes.extend(
             self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                 .iter()
@@ -4128,6 +4169,7 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            kept_paints_index: self.next_frame.kept_paints.len(),
         }
     }
 
@@ -4139,6 +4181,26 @@ impl Window {
     /// are marked so (see `Frame::moved_listeners`); one reused in place keeps its mark.
     pub(crate) fn reuse_paint_at(&mut self, range: Range<PaintIndex>, offset: Point<Pixels>) {
         let moved = offset != Point::default();
+        // Rhein: the kept-size views inside come along, at where their ranges land.
+        let to = self.paint_index();
+        let relocate = |i: &PaintIndex| PaintIndex {
+            scene_index: to.scene_index + (i.scene_index - range.start.scene_index),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: to.debug_bounds_index + (i.debug_bounds_index - range.start.debug_bounds_index),
+            mouse_listeners_index: to.mouse_listeners_index + (i.mouse_listeners_index - range.start.mouse_listeners_index),
+            input_handlers_index: to.input_handlers_index + (i.input_handlers_index - range.start.input_handlers_index),
+            cursor_styles_index: to.cursor_styles_index + (i.cursor_styles_index - range.start.cursor_styles_index),
+            accessed_element_states_index: to.accessed_element_states_index
+                + (i.accessed_element_states_index - range.start.accessed_element_states_index),
+            tab_handle_index: to.tab_handle_index + (i.tab_handle_index - range.start.tab_handle_index),
+            line_layout_index: i.line_layout_index.relocated(&range.start.line_layout_index, &to.line_layout_index),
+            kept_paints_index: to.kept_paints_index + (i.kept_paints_index - range.start.kept_paints_index),
+        };
+        let kept: Vec<_> = self.rendered_frame.kept_paints[range.start.kept_paints_index..range.end.kept_paints_index]
+            .iter()
+            .map(|(id, r)| (*id, relocate(&r.start)..relocate(&r.end)))
+            .collect();
+        self.next_frame.kept_paints.extend(kept);
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
@@ -4334,6 +4396,7 @@ impl Window {
         if result.is_err() {
             self.next_frame.hitboxes.truncate(index.hitboxes_index);
             self.next_frame.moved_views.truncate(index.moved_views_index);
+            self.next_frame.kept_prepaints.truncate(index.kept_prepaints_index);
             self.next_frame
                 .tooltip_requests
                 .truncate(index.tooltips_index);

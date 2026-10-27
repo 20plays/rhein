@@ -490,6 +490,7 @@ impl<V: View> Element for ViewElement<V> {
             paint_view(
                 entity_id,
                 self.cached_style.is_some(),
+                self.keep_size && self.cached_style.is_some(),
                 global_id,
                 element,
                 window,
@@ -588,6 +589,7 @@ fn prepaint_view(
                     let (_, prepainted) = cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
                     accessed_entities.extend(prepainted);
                     let prepaint_end = window.prepaint_index();
+                    window.next_frame.kept_prepaints.push((entity_id, prepaint_start.clone()..prepaint_end.clone()));
                     let state = ViewElementState {
                         accessed_entities,
                         prepaint_range: prepaint_start..prepaint_end,
@@ -619,7 +621,12 @@ fn prepaint_view(
                     window.refreshing
                 };
 
-                let in_place = element_state.as_ref().is_some_and(|element_state| {
+                // Rhein: a kept-size view reuses what it drew where the last frame has it, not
+                // where its state remembers (see `Frame::kept_prepaints`); not drawn in the last
+                // frame, it draws afresh.
+                let kept = if keep_size { window.kept_ranges(entity_id) } else { None };
+                let reusable = !keep_size || kept.is_some();
+                let in_place = reusable && element_state.as_ref().is_some_and(|element_state| {
                     element_state.cache_key.bounds == bounds
                         && element_state.cache_key.content_mask == content_mask
                         && element_state.cache_key.text_style == text_style
@@ -631,16 +638,24 @@ fn prepaint_view(
                 // what it drew, moved; see `movable`.
                 let moved = !in_place
                     && keep_size
+                    && reusable
                     && element_state.as_ref().is_some_and(|element_state| {
                         movable(element_state, bounds, &content_mask, &text_style, opacity, entity_id, window)
                     });
 
                 if in_place && let Some(mut element_state) = element_state {
+                    if let Some((prepaint, paint)) = kept.clone() {
+                        element_state.prepaint_range = prepaint;
+                        element_state.paint_range = paint;
+                    }
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint(element_state.prepaint_range.clone());
                     cx.entities
                         .extend_accessed(&element_state.accessed_entities);
                     let prepaint_end = window.prepaint_index();
+                    if keep_size {
+                        window.next_frame.kept_prepaints.push((entity_id, prepaint_start.clone()..prepaint_end.clone()));
+                    }
                     element_state.prepaint_range = prepaint_start..prepaint_end;
                     element_state.moved_by = Point::default();
 
@@ -648,12 +663,17 @@ fn prepaint_view(
                 }
 
                 if moved && let Some(mut element_state) = element_state {
+                    if let Some((prepaint, paint)) = kept {
+                        element_state.prepaint_range = prepaint;
+                        element_state.paint_range = paint;
+                    }
                     let offset = bounds.origin - element_state.cache_key.bounds.origin;
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint_at(element_state.prepaint_range.clone(), offset);
                     cx.entities
                         .extend_accessed(&element_state.accessed_entities);
                     let prepaint_end = window.prepaint_index();
+                    window.next_frame.kept_prepaints.push((entity_id, prepaint_start.clone()..prepaint_end.clone()));
                     element_state.prepaint_range = prepaint_start..prepaint_end;
                     element_state.cache_key.bounds = bounds;
                     element_state.cache_key.content_mask = content_mask;
@@ -685,6 +705,9 @@ fn prepaint_view(
 
                 let prepaint_end = window.prepaint_index();
                 window.refreshing = refreshing;
+                if keep_size {
+                    window.next_frame.kept_prepaints.push((entity_id, prepaint_start.clone()..prepaint_end.clone()));
+                }
 
                 (
                     Some(element),
@@ -798,6 +821,7 @@ fn prepaint_component(
 fn paint_view(
     entity_id: EntityId,
     cached: bool,
+    keep_size: bool,
     global_id: Option<&GlobalElementId>,
     element: &mut Option<AnyElement>,
     window: &mut Window,
@@ -825,6 +849,9 @@ fn paint_view(
                     }
 
                     let paint_end = window.paint_index();
+                    if keep_size {
+                        window.next_frame.kept_paints.push((entity_id, paint_start.clone()..paint_end.clone()));
+                    }
                     element_state.paint_range = paint_start..paint_end;
 
                     ((), element_state)

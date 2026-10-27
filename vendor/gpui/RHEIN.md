@@ -34,6 +34,16 @@ Changes are marked `Rhein:` in the source.
   comes over one, the dispatch notifies it so it draws afresh where it is (`Frame::moved_views`,
   carried over like hitboxes when an ancestor is reused).
 
+- **Kept-size views reuse what the last frame has, not what they remember** (`window.rs`
+  `Frame::kept_prepaints`/`kept_paints`, `Window::kept_ranges`; `view.rs` `prepaint_view`,
+  `paint_view`): a view's own state holds the ranges of the frame it last drew in. While an
+  ancestor was reused whole those went stale (anything drawn before it in the window moves
+  them), and a list's prepaint retried within a frame (`Window::transact`, for autoscroll) left
+  them pointing into the frame under way. Reused, they copied another frame's text layouts:
+  `line_layout.rs` panicked with a range out of bounds. Each frame now lists where every kept-size
+  view's prepaint and paint are; a reused range carries its views' entries along, relocated,
+  and a failed transaction rolls them back. A view not in the last frame's list draws afresh.
+  Test: `rows_reused_after_what_comes_before_them_changed_find_their_text` (it panicked before).
 - **Cached views redraw when an ancestor's opacity changes** (`view.rs` `ViewElementCacheKey`,
   `div.rs` `Interactivity::prepaint`): what a cached view draws keeps the opacity it was drawn at,
   so a view reused while an ancestor fades stays as faint as it first was. A history fading in

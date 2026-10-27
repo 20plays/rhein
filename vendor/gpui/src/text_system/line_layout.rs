@@ -485,6 +485,18 @@ pub(crate) struct LineLayoutIndex {
     wrapped_lines_index: usize,
 }
 
+impl LineLayoutIndex {
+    /// Rhein: where `self`, recorded relative to `from`, is once what starts at `from` is copied
+    /// to start at `to` (see `Window::reuse_prepaint_at`).
+    pub(crate) fn relocated(&self, from: &Self, to: &Self) -> Self {
+        Self {
+            font_generation: self.font_generation,
+            lines_index: to.lines_index + (self.lines_index - from.lines_index),
+            wrapped_lines_index: to.wrapped_lines_index + (self.wrapped_lines_index - from.wrapped_lines_index),
+        }
+    }
+}
+
 impl LineLayoutCache {
     pub fn new(
         platform_text_system: Arc<dyn PlatformTextSystem>,
