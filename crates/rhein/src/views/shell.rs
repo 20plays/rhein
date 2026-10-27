@@ -1223,7 +1223,7 @@ impl Shell {
         {
             let client = self.client.clone();
             let me = me.clone();
-            entries.push(MenuEntry::custom(move |_, cx| {
+            entries.push(MenuEntry::custom(move |window, cx| {
                 let t = cx.theme().clone();
                 let profile = client.update(cx, |c, cx| c.profile(&me, cx));
                 let c = client.read(cx);
@@ -1245,7 +1245,7 @@ impl Shell {
                     .map(|(i, a)| {
                         // Our own artwork loads directly: it came from this machine or its home server.
                         let assets = a.assets.clone().unwrap_or_default();
-                        activity::card(&format!("me-activity-{i}"), a, assets.large_image, assets.small_image, now_ms, &t)
+                        activity::card(&format!("me-activity-{i}"), a, assets.large_image, assets.small_image, now_ms, &t, window)
                     })
                     .collect();
                 let body = div()
@@ -1582,7 +1582,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_profile_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_profile_card(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (user_id, guild_id, at) = self.profile_card.clone()?;
         // Read so that its ticks draw the shell again (the shell itself is not cached).
         self.card_clock.read(cx);
@@ -1611,7 +1611,7 @@ impl Shell {
                         assets.small_image.as_deref().and_then(|u| c.artwork_url(u, cx)),
                     )
                 });
-                activity::card(&format!("card-activity-{i}"), a, large, small, now_ms, &t)
+                activity::card(&format!("card-activity-{i}"), a, large, small, now_ms, &t, window)
             })
             .collect();
         let client = self.client.read(cx);
@@ -1922,7 +1922,7 @@ impl Shell {
                 let (large, small) = self.client.update(cx, |c, cx| {
                     (assets.large_image.as_deref().and_then(|u| c.artwork_url(u, cx)), assets.small_image.as_deref().and_then(|u| c.artwork_url(u, cx)))
                 });
-                activity::card(&format!("full-activity-{i}"), a, large, small, now_ms, &t)
+                activity::card(&format!("full-activity-{i}"), a, large, small, now_ms, &t, window)
             })
             .collect();
         let client = self.client.read(cx);
@@ -3280,7 +3280,7 @@ impl Render for Shell {
         let banners = self.banners(cx);
         let ringing = self.ringing_card(cx);
         let modal = self.render_modal(cx);
-        let card = self.render_profile_card(cx);
+        let card = self.render_profile_card(window, cx);
         let full_profile = self.render_full_profile(window, cx);
         let switcher = self.switcher.as_ref().map(|(view, _)| {
             motion::fade_in(

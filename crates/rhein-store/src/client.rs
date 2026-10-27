@@ -3712,18 +3712,12 @@ impl Client {
     }
 
     /// Someone else's activity artwork, safe to show: never the original host (that would tell it
-    /// who is looking), always one of our own servers: its media as it is, anything else a copy
-    /// re-hosted by its camo cache, as the web client does. `None` until that copy is known.
+    /// who is looking), always one of our own servers. A picture already on one of them (a cover
+    /// uploaded from someone's machine) is loaded as it is, once it is known to be one of a
+    /// bounded size; anything else is a copy re-hosted by a camo cache, as the web client does.
+    /// `None` until that is known. Called on every frame for every activity shown, so all of it is
+    /// worked out once, in the background, and kept.
     pub fn artwork_url(&mut self, url: &str, cx: &mut Context<Self>) -> Option<String> {
-        // Already media on a server we are signed in to (a cover uploaded from someone's machine):
-        // loaded as it is, like our own, rather than as the camo cache's poorer copy.
-        let ours = self
-            .ready_servers()
-            .filter_map(|s| s.doc.as_ref())
-            .any(|d| crate::embed::is_own_media_file(url, &d.api));
-        if ours {
-            return Some(url.to_owned());
-        }
         match self.artwork.get(url) {
             Some(EmbedState::Ready(embed)) => return embed.image.clone(),
             Some(EmbedState::Loading) => return None,
@@ -3731,17 +3725,39 @@ impl Client {
             _ => {}
         }
         let api = self.ready_servers().find_map(|s| s.api.clone())?;
+        let own = self.ready_servers().filter_map(|s| s.doc.as_ref()).any(|d| crate::embed::is_own_media_file(url, &d.api));
         self.artwork.insert(url.to_owned(), EmbedState::Loading);
         let io = self.io.clone();
         let url = url.to_owned();
         cx.spawn(async move |this, cx| {
             let base = api.base().to_owned();
             let asked = url.clone();
-            let result = join(io.spawn(async move { Ok(api.embed(&asked).await?) })).await;
+            // `None`: the picture as it is; else the camo cache's answer.
+            let result = join(io.spawn(async move {
+                if own && small_picture(api.http(), &asked).await {
+                    return Ok(None);
+                }
+                Ok(Some(api.embed(&asked).await?))
+            }))
+            .await;
             this.update(cx, |this, cx| {
-                let state = match result.ok().and_then(|p| crate::embed::read(&p, &base, &url)).filter(|e| e.image.is_some()) {
-                    Some(embed) => EmbedState::Ready(embed),
-                    None => EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(300) },
+                let state = match result {
+                    Ok(None) => EmbedState::Ready(crate::embed::Embed {
+                        url: url.clone(),
+                        site: String::new(),
+                        kind: crate::embed::EmbedKind::Image,
+                        title: None,
+                        description: None,
+                        image: Some(url.clone()),
+                        video: None,
+                        width: None,
+                        height: None,
+                    }),
+                    Ok(Some(payload)) => match crate::embed::read(&payload, &base, &url).filter(|e| e.image.is_some()) {
+                        Some(embed) => EmbedState::Ready(embed),
+                        None => EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(300) },
+                    },
+                    Err(_) => EmbedState::Empty { retry_at: Instant::now() + Duration::from_secs(300) },
                 };
                 this.artwork.insert(url, state);
                 cx.notify();
@@ -4139,6 +4155,18 @@ pub fn now_ms() -> i64 {
 }
 
 /// A one-line explanation for the UI, preferring the server's own message.
+/// Artwork loaded as it is from one of our servers is at most this large; a larger one comes
+/// through the camo cache, which bounds what is fetched and decoded.
+const ARTWORK_MAX: u64 = 4 << 20;
+
+/// Whether `url` is a picture of at most `ARTWORK_MAX` bytes, by what the server says of it
+/// (without fetching it). Not knowing counts as no.
+async fn small_picture(http: &reqwest::Client, url: &str) -> bool {
+    let Ok(response) = http.head(url).send().await else { return false };
+    let picture = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("image/"));
+    response.status().is_success() && picture && response.content_length().is_some_and(|n| n <= ARTWORK_MAX)
+}
+
 fn friendly(err: &anyhow::Error) -> String {
     if let Some(api) = err.downcast_ref::<rhein_net::ApiError>() {
         let text = |code| api.is(code);

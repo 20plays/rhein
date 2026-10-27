@@ -3,7 +3,7 @@
 
 use gpui::{
     AnyElement, App, FontWeight, IntoElement, ObjectFit, ParentElement as _, SharedString, Styled as _,
-    StyledImage as _, div, img, prelude::*, px,
+    StyledImage as _, Window, div, img, prelude::*, px,
 };
 use rhein_proto::Activity;
 use rhein_ui::images;
@@ -14,8 +14,9 @@ const ART: f32 = 60.;
 const SMALL_ART: f32 = 20.;
 
 /// `large` and `small` are the artwork URLs already made safe to load (see
-/// `Client::artwork_url`), `now_ms` the wall clock for the timer.
-pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<String>, now_ms: u64, t: &Theme) -> AnyElement {
+/// `Client::artwork_url`), `now_ms` the wall clock for the timer. The artwork is kept shrunk to
+/// the tiles it is drawn in: it may be an original upload, not only a camo cache's copy.
+pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<String>, now_ms: u64, t: &Theme, window: &Window) -> AnyElement {
     let glyph = match activity.kind {
         2 => Icon::Music,
         1 | 3 => Icon::Monitor,
@@ -31,7 +32,7 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
         .items_center()
         .justify_center()
         .child(match large {
-            Some(url) => img(images::source(url)).size(px(ART)).rounded(radius::MD).object_fit(ObjectFit::Cover).into_any_element(),
+            Some(url) => img(images::scaled(url, px(ART), window)).size(px(ART)).rounded(radius::MD).object_fit(ObjectFit::Cover).into_any_element(),
             None => icon_sized(glyph, px(24.)).text_color(t.text_faint).into_any_element(),
         })
         .children(small.map(|url| {
@@ -42,7 +43,7 @@ pub fn card(id: &str, activity: &Activity, large: Option<String>, small: Option<
                 .p(px(2.))
                 .rounded_full()
                 .bg(t.bg_panel)
-                .child(img(images::source(url)).size(px(SMALL_ART)).rounded_full().object_fit(ObjectFit::Cover))
+                .child(img(images::scaled(url, px(SMALL_ART), window)).size(px(SMALL_ART)).rounded_full().object_fit(ObjectFit::Cover))
         }));
 
     let line = |s: &Option<String>| s.clone().map(|s| div().text_size(text::SM).text_color(t.text_muted).truncate().child(s));
