@@ -267,3 +267,156 @@ impl Render for Root2 {
         div().size_full().child(self.host.clone().cached(StyleRefinement::default().size_full()))
     }
 }
+
+/// A row that says where it was painted (`debug_bounds`).
+struct Marked {
+    name: &'static str,
+}
+
+impl Render for Marked {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let name = self.name;
+        div().w_full().h(px(20.)).debug_selector(move || name.to_owned()).child(name)
+    }
+}
+
+/// Two channels' rows in one list, as the history shows one channel and then another.
+struct Channels {
+    list: ListState,
+    a: Vec<Entity<Marked>>,
+    b: Vec<Entity<Marked>>,
+    showing_a: bool,
+}
+
+impl Render for Channels {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let rows = if self.showing_a { self.a.clone() } else { self.b.clone() };
+        list(self.list.clone(), move |ix, _, _| rows[ix].clone().cached(StyleRefinement::default().w_full()).keep_size().into_any_element()).size_full()
+    }
+}
+
+struct Root3 {
+    host: Entity<Channels>,
+}
+
+impl Render for Root3 {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.host.clone().cached(StyleRefinement::default().size_full()))
+    }
+}
+
+#[gpui::test]
+fn a_channel_shown_again_draws_its_rows(cx: &mut TestAppContext) {
+    channel_switches(cx, ListAlignment::Top, false);
+}
+
+#[gpui::test]
+fn a_channel_shown_again_draws_its_rows_at_the_bottom(cx: &mut TestAppContext) {
+    channel_switches(cx, ListAlignment::Bottom, false);
+}
+
+#[gpui::test]
+fn a_channel_shown_again_draws_its_rows_in_its_own_list(cx: &mut TestAppContext) {
+    channel_switches(cx, ListAlignment::Bottom, true);
+}
+
+/// Switches between two channels' rows, the list started over (or, with `own_lists`, each
+/// channel's list kept and put back), as the history does.
+fn channel_switches(cx: &mut TestAppContext, alignment: ListAlignment, own_lists: bool) {
+    const A: [&str; 5] = ["a0", "a1", "a2", "a3", "a4"];
+    const B: [&str; 5] = ["b0", "b1", "b2", "b3", "b4"];
+    let new_list = || {
+        let list = ListState::new(5, alignment, px(600.));
+        list.set_follow_mode(gpui::FollowMode::Tail);
+        list
+    };
+    let list = new_list();
+    let mut other = Some(new_list());
+    let host = cx.update(|cx| {
+        let a = A.iter().map(|&name| cx.new(|_| Marked { name })).collect();
+        let b = B.iter().map(|&name| cx.new(|_| Marked { name })).collect();
+        cx.new(|_| Channels { list: list.clone(), a, b, showing_a: true })
+    });
+    let root = host.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| Root3 { host: root });
+    cx.simulate_resize(size(px(400.), px(300.)));
+    cx.simulate_mouse_move(point(px(1000.), px(1000.)), None, Modifiers::none());
+    frame(cx);
+    frame(cx);
+    assert!(cx.debug_bounds("a2").is_some(), "channel a is drawn");
+    for (showing_a, name) in [(false, "b2"), (true, "a2"), (false, "b2"), (true, "a2")] {
+        host.update(cx, |h, cx| {
+            h.showing_a = showing_a;
+            match (own_lists, other.take()) {
+                (true, Some(kept)) => other = Some(std::mem::replace(&mut h.list, kept)),
+                _ => {
+                    h.list.reset(5);
+                    other = Some(new_list());
+                }
+            }
+            cx.notify();
+        });
+        frame(cx);
+        assert!(cx.debug_bounds(name).is_some(), "{name} is drawn after switching to it");
+        frame(cx);
+        assert!(cx.debug_bounds(name).is_some(), "{name} is still drawn a frame later");
+    }
+}
+
+/// Holds the list in a box that fades, as the history fades in after a switch.
+struct Fading {
+    list: ListState,
+    rows: Vec<Entity<Row>>,
+    opacity: f32,
+}
+
+impl Render for Fading {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let rows = self.rows.clone();
+        div()
+            .size_full()
+            .opacity(self.opacity)
+            .child(list(self.list.clone(), move |ix, _, _| rows[ix].clone().cached(StyleRefinement::default().w_full()).keep_size().into_any_element()).size_full())
+    }
+}
+
+struct Root4 {
+    host: Entity<Fading>,
+}
+
+impl Render for Root4 {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.host.clone().cached(StyleRefinement::default().size_full()))
+    }
+}
+
+#[gpui::test]
+fn rows_draw_again_as_what_holds_them_fades(cx: &mut TestAppContext) {
+    let renders: Vec<_> = (0..10).map(|_| Rc::new(Cell::new(0))).collect();
+    let list = ListState::new(10, ListAlignment::Top, px(0.));
+    let host = cx.update(|cx| {
+        let rows = renders.iter().enumerate().map(|(ix, r)| cx.new(|_| Row { ix, height: 20., renders: r.clone(), clicks: Rc::default() })).collect();
+        cx.new(|_| Fading { list: list.clone(), rows, opacity: 0.01 })
+    });
+    let root = host.clone();
+    let (_, cx) = cx.add_window_view(move |_, _| Root4 { host: root });
+    cx.simulate_resize(size(px(400.), px(300.)));
+    cx.simulate_mouse_move(point(px(1000.), px(1000.)), None, Modifiers::none());
+    frame(cx);
+    frame(cx);
+    for opacity in [0.5, 1.0] {
+        let before = renders[3].get();
+        host.update(cx, |h, cx| {
+            h.opacity = opacity;
+            cx.notify();
+        });
+        frame(cx);
+        // Kept as drawn at the faint opacity, the row would stay invisible.
+        assert_eq!(renders[3].get(), before + 1, "the row draws again at opacity {opacity}");
+    }
+    // At a steady opacity it is reused again.
+    let before = renders[3].get();
+    host.update(cx, |_, cx| cx.notify());
+    frame(cx);
+    assert_eq!(renders[3].get(), before, "reused while nothing changes");
+}

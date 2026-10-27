@@ -352,6 +352,9 @@ struct ViewElementCacheKey {
     bounds: Bounds<Pixels>,
     content_mask: ContentMask<Pixels>,
     text_style: TextStyle,
+    /// Rhein: the opacity it was drawn at, which its primitives keep: drawn again when an ancestor
+    /// fades (a history fading in after a switch kept its rows at the first frame's, invisible).
+    opacity: f32,
 }
 
 #[cfg(not(gpui_hot_reload))]
@@ -579,6 +582,7 @@ fn prepaint_view(
                 |_, window| {
                     let content_mask = window.content_mask();
                     let text_style = window.text_style();
+                    let opacity = window.element_opacity();
                     let prepaint_start = window.prepaint_index();
                     // As in its layout, what is read while it prepaints counts.
                     let (_, prepainted) = cx.detect_accessed_entities(|cx| element.prepaint(window, cx));
@@ -592,6 +596,7 @@ fn prepaint_view(
                             bounds,
                             content_mask,
                             text_style,
+                            opacity,
                         },
                         measured: bounds.size,
                         moved_by: Point::default(),
@@ -606,6 +611,7 @@ fn prepaint_view(
             |element_state, window| {
                 let content_mask = window.content_mask();
                 let text_style = window.text_style();
+                let opacity = window.element_opacity();
                 // Rhein: a kept-size view is not redrawn because an ancestor is (see `keep_size`).
                 let refreshing = if keep_size {
                     window.refresh_requested
@@ -617,6 +623,7 @@ fn prepaint_view(
                     element_state.cache_key.bounds == bounds
                         && element_state.cache_key.content_mask == content_mask
                         && element_state.cache_key.text_style == text_style
+                        && element_state.cache_key.opacity == opacity
                         && !window.dirty_views.contains(&entity_id)
                         && !refreshing
                 });
@@ -625,7 +632,7 @@ fn prepaint_view(
                 let moved = !in_place
                     && keep_size
                     && element_state.as_ref().is_some_and(|element_state| {
-                        movable(element_state, bounds, &content_mask, &text_style, entity_id, window)
+                        movable(element_state, bounds, &content_mask, &text_style, opacity, entity_id, window)
                     });
 
                 if in_place && let Some(mut element_state) = element_state {
@@ -689,6 +696,7 @@ fn prepaint_view(
                             bounds,
                             content_mask,
                             text_style,
+                            opacity,
                         },
                         measured,
                         moved_by: Point::default(),
@@ -700,8 +708,8 @@ fn prepaint_view(
 }
 
 /// Rhein: whether a clean kept-size view whose position changed can be drawn from what it drew,
-/// moved. Its size and text style are the same; it was and is wholly inside its clip (so moving
-/// the clips of what it drew along with it cuts nothing differently); nothing it drew keeps
+/// moved. Its size, text style and opacity are the same; it was and is wholly inside its clip (so
+/// moving the clips of what it drew along with it cuts nothing differently); nothing it drew keeps
 /// positions outside what gets moved (`Window::prepaint_movable`, `paint_movable`); and the
 /// pointer is not over it and no button is held, since its mouse listeners keep their old
 /// positions and are left out (`Frame::moved_listeners`).
@@ -710,6 +718,7 @@ fn movable(
     bounds: Bounds<Pixels>,
     content_mask: &ContentMask<Pixels>,
     text_style: &TextStyle,
+    opacity: f32,
     entity_id: EntityId,
     window: &Window,
 ) -> bool {
@@ -723,6 +732,7 @@ fn movable(
     let pointer = window.mouse_position();
     before.size == bounds.size
         && state.cache_key.text_style == *text_style
+        && state.cache_key.opacity == opacity
         && !window.dirty_views.contains(&entity_id)
         && !window.refresh_requested
         && !window.mouse_held

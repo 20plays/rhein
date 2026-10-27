@@ -34,5 +34,13 @@ Changes are marked `Rhein:` in the source.
   comes over one, the dispatch notifies it so it draws afresh where it is (`Frame::moved_views`,
   carried over like hitboxes when an ancestor is reused).
 
+- **Cached views redraw when an ancestor's opacity changes** (`view.rs` `ViewElementCacheKey`,
+  `div.rs` `Interactivity::prepaint`): what a cached view draws keeps the opacity it was drawn at,
+  so a view reused while an ancestor fades stays as faint as it first was. A history fading in
+  after a channel switch drew its rows at almost nothing, then kept them so until something
+  refreshed the window seconds later. The opacity is now part of the cache key, and a `div`
+  applies its opacity in prepaint as well as paint, so the views inside see it when the cache is
+  decided. Test: `rows_draw_again_as_what_holds_them_fades` in `crates/rhein-ui/tests/kept_rows.rs`.
+
 To move to a newer Zed: run `vendor.py` on a checkout of that revision, apply the changes again,
 and update the revision here and in Rhein's `Cargo.toml`.
