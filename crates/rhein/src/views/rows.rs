@@ -567,7 +567,8 @@ pub fn render_row(ctx: &RowCtx, ix: usize, ui: &RowUi, _window: &mut Window, cx:
         .flex_col()
         .when(new_day, |d| d.child(day_separator(message.created_at, &t)))
         .when(divider_here, |d| d.child(new_messages_line(&t)))
-        .when(!grouped, |d| d.pt(if prefs.compact { GROUP_GAP_COMPACT } else { GROUP_GAP }))
+        // A day line is the gap itself: the same room above it as below.
+        .when(!grouped && !new_day, |d| d.pt(if prefs.compact { GROUP_GAP_COMPACT } else { GROUP_GAP }))
         .child(row);
     // A message that just arrived: it is first laid out unseen and without taking room (with its
     // group gap and any day line), to learn its height; then that space opens smoothly (the
@@ -1626,8 +1627,7 @@ fn day_separator(ms: i64, t: &Theme) -> AnyElement {
         .items_center()
         .gap_3()
         .px_4()
-        .pt_4()
-        .pb_1()
+        .py_1()
         .child(div().flex_1().h(px(1.)).bg(t.border))
         .child(div().font_family(FONT_MONO).text_size(text::XS).text_color(t.text_faint).child(day_label(ms).to_lowercase()))
         .child(div().flex_1().h(px(1.)).bg(t.border))
