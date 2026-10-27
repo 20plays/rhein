@@ -6,7 +6,12 @@
 
 <p align="center">A native desktop client for <a href="https://docs.telium.chat/">Telium</a>, written in Rust with GPUI.</p>
 
-Rhein talks to Telium servers directly and works next to the official web client on the same account. It uses the same OPAQUE login, the same guild sessions and gateway, and the same end-to-end encrypted conversations. Rhein is beta software.
+Rhein talks to Telium servers directly and works next to the official web client on the same account. It uses the same OPAQUE login, the same guild sessions and gateway, and the same end-to-end encrypted conversations.
+
+> [!NOTE]
+> Rhein is an unofficial client. It is not made or endorsed by the Telium project.
+>
+> Rhein is beta software. Its cryptography (the OPAQUE login, MLS and call encryption) follows Telium's spec and interoperates with the web client, but nobody has audited it. Please report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## Features
 
@@ -22,7 +27,7 @@ Not done yet: read receipts, camera capture, the recovery key, a gapless switch 
 
 ## Installing
 
-Rhein runs on Linux.
+Rhein runs on Linux, on Wayland and X11. It is developed on Arch Linux. Building it needs a Rust toolchain recent enough for edition 2024 (Rust 1.85 or later), and the first build takes a while because it compiles libwebrtc.
 
 ```sh
 ./install                  # check system packages, build, install into /usr (sudo when needed)
@@ -39,11 +44,13 @@ Rhein runs on Linux.
 
 It then builds the `production` profile, a release build with thin LTO and stripped symbols. It installs the `rhein` binary, the desktop entry `cc.rheinium.Rhein.desktop` and its icon. Fonts, icons and sounds are compiled into the binary.
 
+Rhein decodes H.264 video with OpenH264, built from source. Cisco's patent license for H.264 covers only the binaries Cisco ships itself, so where software patents apply, playing H.264 videos in Rhein is not covered by it.
+
 Accounts are saved in `~/.config/rhein/accounts.json` (mode 0600). Set `RHEIN_CONFIG_DIR` to use another directory. Invites are entered as `server/CODE`, for example `example.org/~abcd1234`.
 
 ## Development
 
-The development scripts run local Telium servers built from a clone of the Telium server in `.dev/telium`.
+The development scripts run local Telium servers. `scripts/dev-server.sh` clones the Telium source from `~/projects/telium` into `.dev/telium` and builds the server there, so check out Telium at `~/projects/telium` first.
 
 ```sh
 ./rheinrun                   # both dev servers, the dev SFU, then the client; stops them on exit
