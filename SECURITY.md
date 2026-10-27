@@ -6,4 +6,4 @@ You'll get an answer within a few days. Once a fix is out, the problem can be ma
 
 Only the latest release gets fixes.
 
-Rhein is alpha software, and its cryptography (OPAQUE login, MLS, call encryption) has not been audited.
+Rhein is beta software, and its cryptography (OPAQUE login, MLS, call encryption) has not been audited.

@@ -6,7 +6,7 @@
 
 <p align="center">A native desktop client for <a href="https://docs.telium.chat/">Telium</a>, written in Rust with GPUI.</p>
 
-Rhein talks to Telium servers directly and works next to the official web client on the same account. It uses the same OPAQUE login, the same guild sessions and gateway, and the same end-to-end encrypted conversations. Like Telium's protocol 1, it is alpha software.
+Rhein talks to Telium servers directly and works next to the official web client on the same account. It uses the same OPAQUE login, the same guild sessions and gateway, and the same end-to-end encrypted conversations. Rhein is beta software.
 
 ## Features
 
