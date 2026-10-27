@@ -488,6 +488,24 @@ impl Shell {
                         view.update(cx, |v, cx| v.dev_crop(path, banner, cx));
                     }
                 }
+                // Panics on purpose, for checking that crash.log keeps it.
+                "panic" => panic!("RHEIN_DEV_OPEN=panic"),
+                // Once READY and the history are in, scrolls the history up and down, then opens
+                // the settings; for chasing what scrolling leaves behind.
+                "scroll-settings" => {
+                    cx.spawn_in(window, async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_secs(6)).await;
+                        for n in 0..24 {
+                            let by = if n % 12 < 6 { -60. } else { 60. };
+                            this.update(cx, |v, cx| v.chat.update(cx, |c, cx| c.dev_scroll(by, cx))).ok();
+                            cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
+                        }
+                        cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                        log::warn!("dev: opening the settings");
+                        this.update_in(cx, |v, window, cx| v.open_settings(window, cx)).ok();
+                    })
+                    .detach();
+                }
                 other if other.starts_with("settings=") => {
                     this.open_settings(window, cx);
                     let section = other.trim_start_matches("settings=").to_owned();

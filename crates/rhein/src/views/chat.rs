@@ -335,6 +335,16 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Scrolls the history by `by` pixels, as the wheel does (debug builds' dev hooks).
+    #[cfg(debug_assertions)]
+    pub fn dev_scroll(&mut self, by: f32, cx: &mut Context<Self>) {
+        self.list.scroll_by(px(by));
+        if let Some(history) = &self.history {
+            history.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
     pub fn composer_focus(&self, cx: &App) -> FocusHandle {
         self.composer.focus_handle(cx)
     }

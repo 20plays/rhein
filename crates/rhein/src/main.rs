@@ -10,10 +10,30 @@ use rhein_store::{Client, Io};
 
 actions!(rhein, [Quit]);
 
+/// A panic is also written to `crash.log` in the cache directory, with where it happened and a
+/// backtrace: started from the desktop, nothing else would keep what went wrong.
+fn keep_panics() {
+    let shown = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        shown(info);
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_owned();
+        let report = format!("--- {when} (unix time), Rhein {}, thread {thread}\n{info}\n{backtrace}\n", env!("CARGO_PKG_VERSION"));
+        let path = rhein_store::persist::cache_dir().join("crash.log");
+        let _ = std::fs::create_dir_all(rhein_store::persist::cache_dir());
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write as _;
+            let _ = file.write_all(report.as_bytes());
+        }
+    }));
+}
+
 fn main() {
     // A release says only what went wrong; RUST_LOG still asks for more.
     let level = if cfg!(debug_assertions) { "info" } else { "warn" };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level)).init();
+    keep_panics();
 
     let io = match Io::new() {
         Ok(io) => io,
