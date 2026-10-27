@@ -45,13 +45,17 @@ while (($#)); do
   shift
 done
 
-app_id=chat.rhein.Rhein
+app_id=cc.rheinium.Rhein
 dest="${DESTDIR:-}$prefix"
 bin="$dest/bin/rhein"
 desktop="$dest/share/applications/$app_id.desktop"
 icon="$dest/share/icons/hicolor/512x512/apps/$app_id.png"
-# An icon from an older install, before the logo.
-old_icon="$dest/share/icons/hicolor/scalable/apps/$app_id.svg"
+# What older installs left: the icon before the logo, and everything under the old app id.
+old_files=(
+  "$dest/share/icons/hicolor/scalable/apps/chat.rhein.Rhein.svg"
+  "$dest/share/applications/chat.rhein.Rhein.desktop"
+  "$dest/share/icons/hicolor/512x512/apps/chat.rhein.Rhein.png"
+)
 
 # Runs a command as root only when the target is not writable by us.
 as_owner() {
@@ -76,7 +80,7 @@ refresh_caches() {
 
 if ((uninstall)); then
   echo "· removing Rhein from $dest"
-  as_owner rm -f "$bin" "$desktop" "$icon" "$old_icon"
+  as_owner rm -f "$bin" "$desktop" "$icon" "${old_files[@]}"
   refresh_caches
   echo "done"
   exit 0
@@ -196,7 +200,9 @@ echo "· installing into $dest"
 as_owner install -Dm755 "$built" "$bin"
 as_owner install -Dm644 "packaging/$app_id.desktop" "$desktop"
 as_owner install -Dm644 "packaging/$app_id.png" "$icon"
-[[ -e $old_icon ]] && as_owner rm -f "$old_icon"
+for f in "${old_files[@]}"; do
+  if [[ -e $f ]]; then as_owner rm -f "$f"; fi
+done
 refresh_caches
 
 echo "done: $bin"

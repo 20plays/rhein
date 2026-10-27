@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packaging/chat.rhein.Rhein.png" width="128" alt="Rhein logo">
+  <img src="packaging/cc.rheinium.Rhein.png" width="128" alt="Rhein logo">
 </p>
 
 <h1 align="center">Rhein</h1>
@@ -37,7 +37,7 @@ Rhein runs on Linux.
 - ALSA, PipeWire and the Vulkan loader
 - `xdg-desktop-portal` with the backend for your desktop (wlroots, Hyprland, GNOME or KDE), plus `-gtk` on wlroots and Hyprland for the file chooser
 
-It then builds the `production` profile, a release build with thin LTO and stripped symbols. It installs the `rhein` binary, the desktop entry `chat.rhein.Rhein.desktop` and its icon. Fonts, icons and sounds are compiled into the binary.
+It then builds the `production` profile, a release build with thin LTO and stripped symbols. It installs the `rhein` binary, the desktop entry `cc.rheinium.Rhein.desktop` and its icon. Fonts, icons and sounds are compiled into the binary.
 
 Accounts are saved in `~/.config/rhein/accounts.json` (mode 0600). Set `RHEIN_CONFIG_DIR` to use another directory. Invites are entered as `server/CODE`, for example `example.org/~abcd1234`.
 
@@ -116,4 +116,4 @@ The interop tests run the web client's own code against Rhein:
 
 Rhein is free software under the GNU General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
 
-The code in `vendor/` keeps its upstream license: Apache-2.0 for GPUI, its wgpu renderer and libwebrtc, MIT for openmls, BSD-2-Clause for openh264-sys2. The bundled Geist fonts are under the SIL Open Font License and the Lucide icons under the ISC license.
+The code in `vendor/` keeps its upstream license: Apache-2.0 for GPUI, its wgpu renderer and libwebrtc, MIT for openmls, BSD-2-Clause for openh264-sys2. The bundled Geist fonts are under the SIL Open Font License and the Lucide icons under the ISC license. The notification sounds come from the Telium web client and are under Apache-2.0.

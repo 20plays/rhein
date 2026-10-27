@@ -79,7 +79,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions { title: Some("Rhein".into()), ..Default::default() }),
-                app_id: Some("chat.rhein.Rhein".into()),
+                app_id: Some("cc.rheinium.Rhein".into()),
                 window_min_size: Some(size(px(720.), px(480.))),
                 ..Default::default()
             },

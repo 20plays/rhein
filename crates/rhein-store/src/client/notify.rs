@@ -231,7 +231,7 @@ fn shorten(text: &str) -> String {
 async fn desktop_notification(title: &str, body: &str) -> anyhow::Result<()> {
     use std::collections::HashMap;
     let connection = zbus::Connection::session().await?;
-    let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::from([("desktop-entry", zbus::zvariant::Value::from("chat.rhein.Rhein"))]);
+    let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::from([("desktop-entry", zbus::zvariant::Value::from("cc.rheinium.Rhein"))]);
     connection
         .call_method(
             Some("org.freedesktop.Notifications"),
