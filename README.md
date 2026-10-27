@@ -114,4 +114,6 @@ The interop tests run the web client's own code against Rhein:
 
 ## License
 
-Apache-2.0
+Rhein is free software under the GNU General Public License, version 3 or (at your option) any later version. See [LICENSE](LICENSE).
+
+The code in `vendor/` keeps its upstream license: Apache-2.0 for GPUI, its wgpu renderer and libwebrtc, MIT for openmls, BSD-2-Clause for openh264-sys2. The bundled Geist fonts are under the SIL Open Font License and the Lucide icons under the ISC license.
