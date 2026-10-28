@@ -6,6 +6,8 @@
 
 <p align="center">A native desktop client for <a href="https://docs.telium.chat/">Telium</a>, written in Rust with GPUI.</p>
 
+<p align="center"><img src="docs/screenshot.png" alt="Rhein showing a guild channel with messages, reactions and a picture"></p>
+
 Rhein talks to Telium servers directly and works next to the official web client on the same account. It uses the same OPAQUE login, the same guild sessions and gateway, and the same end-to-end encrypted conversations.
 
 > [!NOTE]
@@ -70,6 +72,15 @@ cargo run -p rhein
 In debug builds the login form defaults to `localhost:8448`, and `RHEIN_SERVER` overrides that. Debug builds can also start on a given screen, which helps with screenshots: `RHEIN_DEV_OPEN=home|settings|settings=Activity|join|switcher|signout|account|switch=@user:server|profile=@user:server`. Release builds have none of these development hooks.
 
 ### Demo data
+
+The screenshot above shows a guild seeded on a Telium server by the `demo_seed` example. It registers six accounts with names and pictures, creates the guild "Riverside" with a few channels and a conversation, and signs Rhein in as Anna:
+
+```sh
+RHEIN_CONFIG_DIR=$PWD/.dev/config-shots cargo run -p rhein-store --example demo_seed -- staging.telium.chat
+RHEIN_CONFIG_DIR=$PWD/.dev/config-shots cargo run -p rhein
+```
+
+For a local dev server, the Node seed script does the same with Anna and Ben:
 
 ```sh
 cd scripts/demo && npm install
