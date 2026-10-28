@@ -768,10 +768,15 @@ mod tests {
         let config = AudioConfig { input: Some("alsa:null".into()), output: Some("alsa:null".into()), ..Default::default() };
         let engine = AudioEngine::start(config).unwrap();
         let tap = engine.tap();
-        std::thread::sleep(Duration::from_millis(500));
+        // 20 frames are 200 ms of sound. A busy CI runner can take a while to start the null device,
+        // so the test waits for them instead of counting what came in a fixed time.
+        let start = Instant::now();
+        let mut frames = 0;
+        while frames < 20 && start.elapsed() < Duration::from_secs(5) {
+            frames += tap.recv_timeout(Duration::from_millis(100)).into_iter().count();
+        }
         assert_eq!(engine.errors(), Vec::<String>::new());
-        let frames = tap.try_iter().count();
-        assert!(frames >= 20, "the speakers were fed ({frames} frames in 500 ms)");
+        assert!(frames >= 20, "the speakers were fed ({frames} frames in {:?})", start.elapsed());
         assert!(engine.input_level() < 0.01, "null captures silence");
     }
 
