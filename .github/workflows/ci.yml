@@ -21,6 +21,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev pkg-config libasound2-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev
+      - name: Clang 21
+        # The libwebrtc that webrtc-sys downloads ships a libc++ that needs clang 21 or later;
+        # Ubuntu 22.04 has clang 14.
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+          echo "CC=clang-21" >> "$GITHUB_ENV"
+          echo "CXX=clang++-21" >> "$GITHUB_ENV"
       - uses: rui314/setup-mold@v1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
