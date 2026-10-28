@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn telium_media_links() {
         let hash = "d33f997d4478f964774167b6fe90d42cd9829a4f31822ae68ea624043a44e341";
-        let local = format!("https://staging.telium.chat/_telium/v1/media/{hash}?cap=RO9LUT-_5XSbUJy8Hq4YU8Cac9of8BqA");
+        let local = format!("https://staging.telium.chat/_telium/v1/media/{hash}?cap=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         assert!(is_telium_media(&local));
         assert!(!is_gif(&local));
         assert!(is_telium_media(&format!("https://a.example/_telium/v1/media/remote/b.example/{hash}")));

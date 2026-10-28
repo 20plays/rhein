@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported runner, so the binary runs on any glibc from 2.35 on.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libasound2-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev
+      - uses: rui314/setup-mold@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: ./install --build-only --no-deps
+      - name: Pack
+        run: scripts/package.sh "$GITHUB_REF_NAME"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Rhein ${{ github.ref_name }}
+          prerelease: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          body: |
+            Open beta of Rhein, a native desktop client for Telium, for Linux x86_64.
+
+            Unpack the archive, then run `./install.sh` to install for yourself (into ~/.local) or `./install.sh --system` for everyone (into /usr).
+
+            Rhein needs ALSA, PipeWire, a Vulkan driver, xkbcommon, fontconfig and glibc 2.35 or newer, plus xdg-desktop-portal with your desktop's backend for screen sharing. On other systems, build it from source with `./install`.
+
+            Rhein is beta software, and its cryptography has not been audited. Please report security problems as described in SECURITY.md.

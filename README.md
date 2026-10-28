@@ -29,7 +29,13 @@ Not done yet: read receipts, camera capture, the recovery key, a gapless switch 
 
 ## Installing
 
-Rhein runs on Linux, on Wayland and X11. It is developed on Arch Linux. Building it needs a Rust toolchain recent enough for edition 2024 (Rust 1.85 or later), and the first build takes a while because it compiles libwebrtc.
+Rhein runs on Linux, on Wayland and X11. It is developed on Arch Linux.
+
+The [releases](https://github.com/alpwrk/rhein/releases) have a build for x86_64. Unpack it and run `./install.sh` to install it for yourself (into `~/.local`), or `./install.sh --system` for everyone. It needs glibc 2.35 or newer, ALSA, PipeWire and a Vulkan driver.
+
+### From source
+
+Building Rhein needs a Rust toolchain recent enough for edition 2024 (Rust 1.85 or later), and the first build takes a while because it compiles libwebrtc.
 
 ```sh
 ./install                  # check system packages, build, install into /usr (sudo when needed)

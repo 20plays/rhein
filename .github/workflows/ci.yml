@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # .cargo/config.toml links with -fuse-ld=mold, which Ubuntu 22.04's GCC doesn't know;
+  # setup-mold makes mold the default linker instead.
+  RUSTFLAGS: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libasound2-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libxcb1-dev libglib2.0-dev libfontconfig-dev libfreetype-dev libwayland-dev
+      - uses: rui314/setup-mold@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        # The live tests skip themselves without a dev server.
+        run: cargo test --workspace --locked -- --test-threads=1
