@@ -58,7 +58,7 @@ Accounts are saved in `~/.config/rhein/accounts.json` (mode 0600). Set `RHEIN_CO
 
 ## Development
 
-The development scripts run local Telium servers. `scripts/dev-server.sh` clones the Telium source from `~/projects/telium` into `.dev/telium` and builds the server there, so check out Telium at `~/projects/telium` first.
+The development scripts run local Telium servers, built from the Telium server's source. That source is not public at the moment, so for now only those who have it can run the dev servers and the live and interop tests below. `scripts/dev-server.sh` expects a checkout in `~/projects/telium`, clones it into `.dev/telium` and builds the server there. Without one, `./rheinrun` starts the client alone, which you can sign in to any Telium server, and `cargo test --workspace` runs the offline tests.
 
 ```sh
 ./rheinrun                   # both dev servers, the dev SFU, then the client; stops them on exit
